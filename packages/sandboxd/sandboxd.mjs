@@ -285,7 +285,12 @@ const server = createServer(async (req, res) => {
         return send(404, { error: "not found" });
     }
   } catch (err) {
-    send(500, { error: String(err && err.message ? err.message : err) });
+    // Expected filesystem misses are the agent's problem, not a server fault.
+    const code = err && err.code;
+    const status =
+      code === "ENOENT" || code === "ENOTDIR" ? 404 :
+      code === "EISDIR" || code === "EACCES" || code === "ERR_FS_FILE_TOO_LARGE" ? 400 : 500;
+    send(status, { error: String(err && err.message ? err.message : err) });
   }
 });
 

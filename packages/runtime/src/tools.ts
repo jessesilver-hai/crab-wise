@@ -205,7 +205,8 @@ export async function executeTool(
       }
       emitter.emit("agent_moved", { agentId, path });
       emitter.emit("agent_status", { agentId, status: "building" });
-      const { newLines } = await exec.write(path, content.replace(oldText, newText));
+      // Function replacer: a literal string here would interpret $-patterns ($&, $1…).
+      const { newLines } = await exec.write(path, content.replace(oldText, () => newText));
       const added = newText ? newText.split("\n").length : 0;
       const removed = oldText.split("\n").length;
       ctx.stats.filesWritten.add(path);

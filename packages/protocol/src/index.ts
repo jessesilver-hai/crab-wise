@@ -604,6 +604,11 @@ export class BountyLedger {
         const named = failingNow.size > 0;
         const by = this.agentNames.get(e.agentId) ?? e.agentId;
         if (named) {
+          // A named board supersedes count-based guesses: retract open synthetics
+          // (deleted, not cleared — retraction must never mint renown).
+          for (const [key, b] of this.byName) {
+            if (b.status === "posted" && key.startsWith("specter #")) this.byName.delete(key);
+          }
           for (const name of failingNow) {
             if (!this.byName.has(name)) {
               const b: Bounty = { name, value: bountyValue(name), status: "posted" };

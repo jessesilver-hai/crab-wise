@@ -89,6 +89,8 @@ try {
 
 function recordLegend(match: Match) {
   try {
+    // Demo skirmishes and idle sessions don't belong in the Hall.
+    if (match.taskId === "demo") return;
     const ledger = new BountyLedger();
     for (const e of match.events) ledger.apply(e);
     const entry: HallEntry = {
@@ -97,6 +99,7 @@ function recordLegend(match: Match) {
       taskTitle: match.taskTitle,
       endedAt: Date.now(),
     };
+    if (entry.renown <= 0 && entry.bountiesCleared === 0) return;
     hall.push(entry);
     hall.sort((a, b) => b.renown - a.renown || b.endedAt - a.endedAt);
     if (hall.length > HALL_MAX) hall.length = HALL_MAX;
@@ -313,6 +316,8 @@ wss.on("connection", (ws, req) => {
         }
         if (msg.type === "end" && role === "host" && match) {
           finishMatch(match, "abandoned");
+          // Free the visitor's sandbox slot now, not when the socket closes.
+          void sandboxes.destroy(match.matchId);
           return;
         }
       }

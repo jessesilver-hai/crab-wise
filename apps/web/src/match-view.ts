@@ -201,27 +201,6 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
   }
 
   // --- Inspect panel: the actual code, per file ------------------------------
-  function diffHtml(snippet: string): string {
-    return snippet
-      .split("\n")
-      .map((line) => {
-        const esc = escapeHtml(line);
-        if (line.startsWith("+")) return `<span class="dl-add">${esc}</span>`;
-        if (line.startsWith("-") || line.startsWith("−")) return `<span class="dl-del">${esc}</span>`;
-        if (line.startsWith("@@") || line.startsWith("diff ") || line.startsWith("index ")) {
-          return `<span class="dl-hunk">${esc}</span>`;
-        }
-        return esc;
-      })
-      .join("\n");
-  }
-
-  function fileDiffFrom(patch: string, path: string): string {
-    const parts = patch.split(/^diff --git /m).filter((p) => p.trim());
-    const hit = parts.find((p) => p.startsWith(`a/${path} `) || p.includes(` b/${path}\n`));
-    return hit ? "diff --git " + hit : "";
-  }
-
   async function openInspect(path: string) {
     const modal = document.createElement("div");
     modal.className = "patch-modal";
@@ -513,4 +492,27 @@ function compactRaw(e: GameEvent): string {
 
 export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+/** Color-code a ±-prefixed snippet or unified diff for HTML display. */
+export function diffHtml(snippet: string): string {
+  return snippet
+    .split("\n")
+    .map((line) => {
+      const esc = escapeHtml(line);
+      if (line.startsWith("+")) return `<span class="dl-add">${esc}</span>`;
+      if (line.startsWith("-") || line.startsWith("−")) return `<span class="dl-del">${esc}</span>`;
+      if (line.startsWith("@@") || line.startsWith("diff ") || line.startsWith("index ")) {
+        return `<span class="dl-hunk">${esc}</span>`;
+      }
+      return esc;
+    })
+    .join("\n");
+}
+
+/** Extract one file's section from a full unified git diff. */
+export function fileDiffFrom(patch: string, path: string): string {
+  const parts = patch.split(/^diff --git /m).filter((p) => p.trim());
+  const hit = parts.find((p) => p.startsWith(`a/${path} `) || p.includes(` b/${path}\n`));
+  return hit ? "diff --git " + hit : "";
 }
