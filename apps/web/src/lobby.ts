@@ -27,19 +27,21 @@ export function renderLobby(root: HTMLElement): void {
           <div class="sample-label">— or wake one of the old worlds —</div>
           <div id="sample-list"></div>
           <div class="form-row">
-            <label>Anthropic API key</label>
-            <input id="api-key" type="password" placeholder="sk-ant-…" value="${escapeHtml(savedKey)}" />
+            <label>Anthropic API key (optional)</label>
+            <input id="api-key" type="password" placeholder="leave empty — the Crown funds Grok 4.6" value="${escapeHtml(savedKey)}" />
             <div class="key-note">
-              <strong>Your key never leaves your browser.</strong> Agents call Anthropic directly
-              from this page; only tool calls (file edits, commands) travel to the sandbox. The
-              server never sees the key. <label style="display:inline"><input id="remember-key" type="checkbox" style="width:auto" ${savedKey ? "checked" : ""}/> remember key in this browser</label>
+              <strong>No key needed:</strong> the Crown pays for inference (Grok 4.6 via OpenRouter).
+              Bring your own Anthropic key to use Claude instead — <strong>it never leaves your
+              browser</strong>; only tool calls travel to the sandbox.
+              <label style="display:inline"><input id="remember-key" type="checkbox" style="width:auto" ${savedKey ? "checked" : ""}/> remember key in this browser</label>
             </div>
           </div>
           <div class="form-row">
             <label>Model</label>
             <select id="model">
-              <option value="claude-sonnet-4-5">Claude Sonnet 4.5 (recommended)</option>
-              <option value="claude-haiku-4-5">Claude Haiku 4.5 (cheaper, scrappier workers)</option>
+              <option value="">Grok 4.6 — Crown-funded, no key needed</option>
+              <option value="claude-sonnet-4-5">Claude Sonnet 4.5 (your key)</option>
+              <option value="claude-haiku-4-5">Claude Haiku 4.5 (your key, scrappier workers)</option>
             </select>
           </div>
           <button id="start-btn">⟡ Light the Beacon</button>
@@ -96,8 +98,12 @@ export function renderLobby(root: HTMLElement): void {
     const typedUrl = repoInput.value.trim();
     const sample = TASKS.find((t) => t.id === selectedSample);
 
-    if (!key.startsWith("sk-ant-")) {
+    if (key && !key.startsWith("sk-ant-")) {
       errorNote.textContent = "That does not look like an Anthropic API key (sk-ant-…).";
+      return;
+    }
+    if (model && !key) {
+      errorNote.textContent = "Claude models need your Anthropic key — or pick the Crown-funded option.";
       return;
     }
     let repoUrl: string;

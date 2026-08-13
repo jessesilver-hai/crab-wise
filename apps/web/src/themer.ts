@@ -66,11 +66,17 @@ Palette maps single characters to #rrggbb.`;
 export async function generateTheme(opts: {
   apiKey: string;
   model: string;
+  llm?: { baseURL: string; headers?: Record<string, string> };
   repoLabel: string;
   readme: string;
   treeSummary: string;
 }): Promise<ThemePack | null> {
-  const client = new Anthropic({ apiKey: opts.apiKey, dangerouslyAllowBrowser: true });
+  const client = new Anthropic({
+    apiKey: opts.apiKey || "crown-funded",
+    dangerouslyAllowBrowser: true,
+    baseURL: opts.llm?.baseURL,
+    defaultHeaders: opts.llm?.headers,
+  });
   try {
     const response = await client.messages.create({
       model: opts.model,

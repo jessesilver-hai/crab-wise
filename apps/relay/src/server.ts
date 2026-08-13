@@ -127,6 +127,49 @@ app.post<{ Params: { matchId: string; op: string } }>(
   },
 );
 
+// --- Crown-funded LLM proxy (host-only, bearer hostToken) ---------------------
+// The site pays for inference: requests are forwarded to OpenRouter's
+// Anthropic-compatible endpoint with the server-held key, model pinned.
+
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
+const FUNDED_MODEL = process.env.FUNDED_MODEL ?? "x-ai/grok-4.6";
+const MAX_LLM_CALLS_PER_MATCH = Number(process.env.MAX_LLM_CALLS_PER_MATCH ?? 400);
+const llmCalls = new Map<string, number>();
+
+app.post<{ Params: { matchId: string } }>("/api/llm/:matchId/v1/messages", async (req, reply) => {
+  if (!OPENROUTER_API_KEY) return reply.code(503).send({ error: "the Crown's coffers are closed" });
+  const hostToken = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+  if (!sandboxes.authorize(req.params.matchId, hostToken)) {
+    return reply.code(403).send({ error: "not your settlement" });
+  }
+  const calls = (llmCalls.get(req.params.matchId) ?? 0) + 1;
+  if (calls > MAX_LLM_CALLS_PER_MATCH) {
+    return reply.code(429).send({ error: "the Crown's patience is spent for this settlement" });
+  }
+  llmCalls.set(req.params.matchId, calls);
+
+  const body = req.body as Record<string, unknown>;
+  body.model = FUNDED_MODEL;
+  if (typeof body.max_tokens !== "number" || body.max_tokens > 16_000) body.max_tokens = 16_000;
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/messages", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "http-referer": "https://crab-wise.fly.dev",
+        "x-title": "Agent Empires",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(300_000),
+    });
+    reply.code(res.status).header("content-type", "application/json").send(await res.text());
+  } catch (err) {
+    reply.code(502).send({ error: `the oracle is unreachable: ${String(err)}` });
+  }
+});
+
 // --- Theme cache --------------------------------------------------------------
 
 app.get<{ Params: { repoKey: string } }>("/api/theme/:repoKey", async (req, reply) => {

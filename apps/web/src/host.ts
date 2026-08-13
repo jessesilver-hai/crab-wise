@@ -14,8 +14,13 @@ export type SettlementStart = {
   firstOrder?: string;
 };
 
+/** Model used when the visitor brings no key and the Crown pays via OpenRouter. */
+export const FUNDED_MODEL = "x-ai/grok-4.6";
+
 export async function startSettlement(root: HTMLElement, opts: SettlementStart): Promise<void> {
-  const { repoUrl, repoLabel, apiKey, model } = opts;
+  const { repoUrl, repoLabel, apiKey } = opts;
+  const funded = !apiKey;
+  const model = funded ? FUNDED_MODEL : opts.model;
 
   const { matchId, publish, end, sandbox } = await hostMatch(repoUrl, repoLabel, repoUrl);
   history.replaceState(null, "", `#/match/${matchId}`);
@@ -75,6 +80,12 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   }
 
   const executor = new SandboxExecutor(matchId, hostToken);
+  const llm = funded
+    ? {
+        baseURL: `${location.origin}/api/llm/${matchId}`,
+        headers: { authorization: `Bearer ${hostToken}` },
+      }
+    : undefined;
   const cachedTheme: ThemePack | null = await getCachedTheme(repoKey(repoUrl));
 
   const onEvent = (event: Parameters<typeof view.onEvent>[0]) => {
@@ -89,6 +100,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     repoLabel,
     executor,
     theme: cachedTheme,
+    llm,
     signal: abort.signal,
     onEvent,
   });
@@ -101,7 +113,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
 
     // No cached theme: divine one in the background while the session runs.
     if (!cachedTheme && !abort.signal.aborted) {
-      void generateTheme({ apiKey, model, repoLabel, readme, treeSummary }).then(async (theme) => {
+      void generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary }).then(async (theme) => {
         if (theme && !abort.signal.aborted) {
           settlement!.setTheme(theme);
           await fetch(`/api/theme/${repoKey(repoUrl)}`, {

@@ -175,6 +175,12 @@ export class SandboxManager {
     return { hostToken };
   }
 
+  /** True when the token is the live host of this settlement. */
+  authorize(matchId: string, hostToken: string): boolean {
+    const session = this.sessions.get(matchId);
+    return !!session && session.hostToken === hostToken;
+  }
+
   /** Proxy one sandboxd call on behalf of an authorized host. */
   async proxy(
     matchId: string,

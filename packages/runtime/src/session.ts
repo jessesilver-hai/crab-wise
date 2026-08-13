@@ -12,8 +12,11 @@ import type { Executor } from "./executor.js";
 import type { ToolContext } from "./tools.js";
 
 export type SettlementOptions = {
+  /** Empty string = Crown-funded mode: calls go through the relay's LLM proxy. */
   apiKey: string;
   model: string;
+  /** Override transport (Crown-funded proxy): baseURL + auth headers. */
+  llm?: { baseURL: string; headers?: Record<string, string> };
   repoUrl: string;
   repoLabel: string;
   executor: Executor;
@@ -114,7 +117,12 @@ export class Settlement {
 
   constructor(private opts: SettlementOptions) {
     this.emitter = new Emitter(opts.onEvent);
-    this.client = new Anthropic({ apiKey: opts.apiKey, dangerouslyAllowBrowser: true });
+    this.client = new Anthropic({
+      apiKey: opts.apiKey || "crown-funded",
+      dangerouslyAllowBrowser: true,
+      baseURL: opts.llm?.baseURL,
+      defaultHeaders: opts.llm?.headers,
+    });
     this.theme = opts.theme ?? null;
     this.kingName = this.theme?.kingName ?? ORCHESTRATOR_NAME;
   }

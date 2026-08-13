@@ -28,11 +28,16 @@ settlement is founded on your repo:
 
 ## Trust model
 
-**Your API key never leaves your browser.** The agent loop runs client-side and
-calls Anthropic directly (their CORS browser-access header). Only *tool calls*
-(file reads/writes, shell commands) travel to the server, which proxies them to
-an isolated, per-session sandbox VM with a hard TTL. The relay receives
-sanitized game events only.
+**No key needed.** By default the Crown funds inference: the browser agent loop
+calls the relay's LLM proxy, which forwards to OpenRouter (Grok 4.6) with a
+server-held key. The proxy only answers the live host of a settlement (bearer
+sandbox token), pins the model server-side, and caps calls per settlement.
+
+**Bring your own Anthropic key and it never leaves your browser.** The agent
+loop then calls Anthropic directly (their CORS browser-access header). Either
+way, only *tool calls* (file reads/writes, shell commands) travel to the
+server, which proxies them to an isolated, per-session sandbox VM with a hard
+TTL. The relay receives sanitized game events only.
 
 ## Architecture
 
