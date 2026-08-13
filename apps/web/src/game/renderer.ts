@@ -63,6 +63,9 @@ export function attachGameRenderer(mount: HTMLElement): Renderer {
     destroy() {
       game.destroy(true);
     },
+    setInspectHandler(cb) {
+      scene.onInspect = cb;
+    },
   };
 }
 
@@ -226,6 +229,8 @@ class MainScene extends Phaser.Scene {
 
   // interactivity
   private selected: Selection = null;
+  /** Wired by the match view: "open the code inspector for this file". */
+  onInspect: ((path: string) => void) | null = null;
   private followId: string | null = null;
   private hovered: Phaser.GameObjects.GameObject | null = null;
   private hoverMarker!: Phaser.GameObjects.Image;
@@ -402,6 +407,11 @@ class MainScene extends Phaser.Scene {
       const id = obj.getData("id") as string;
       const rec = this.agents.get(id);
       if (!rec) return;
+      // Second click on the already-followed unit opens the file it's working.
+      if (this.selected?.kind === "unit" && this.selected.id === id && rec.sitePath) {
+        this.onInspect?.(rec.sitePath);
+        return;
+      }
       this.selected = { kind: "unit", id };
       this.followId = id;
       this.cameras.main.startFollow(rec.unit.root, false, 0.08, 0.08);
@@ -409,6 +419,11 @@ class MainScene extends Phaser.Scene {
       const path = obj.getData("path") as string;
       const rec = this.buildings.get(path);
       if (!rec) return;
+      // Second click on the selected building unrolls its scrolls.
+      if (this.selected?.kind === "building" && this.selected.path === path && path !== "__towncenter__") {
+        this.onInspect?.(path);
+        return;
+      }
       this.stopFollowing();
       this.selected = { kind: "building", path };
       this.selectMarker.setPosition(isoX(rec.tx, rec.ty), isoY(rec.tx, rec.ty)).setVisible(true);
@@ -465,6 +480,7 @@ class MainScene extends Phaser.Scene {
       lines.push(`status: ${rec.status}`);
       if (rec.sitePath) lines.push(`at: ${truncPath(rec.sitePath)}`);
       if (rec.charge) lines.push(`charge: ${rec.charge.length > 120 ? rec.charge.slice(0, 120) + "…" : rec.charge}`);
+      if (rec.sitePath && this.onInspect) lines.push("⌕ click again to open its worksite");
     } else {
       const rec = this.buildings.get(this.selected.path);
       if (!rec) return this.clearSelection();
@@ -474,6 +490,7 @@ class MainScene extends Phaser.Scene {
       if (rec.path !== "__towncenter__") lines.push(truncPath(rec.path));
       lines.push(`reinforced ×${rec.writes}`);
       lines.push(`+${rec.linesAdded} / −${rec.linesRemoved} lines`);
+      if (rec.path !== "__towncenter__" && this.onInspect) lines.push("⌕ click again to inspect the code");
     }
     this.cardTitle.setText(title);
     this.cardTitle.setColor(hex(this.accent));

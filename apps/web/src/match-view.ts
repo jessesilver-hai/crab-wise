@@ -3,6 +3,8 @@ import type { GameEvent } from "@agent-empires/protocol";
 export type Renderer = {
   handleEvent(e: GameEvent, historical: boolean): void;
   destroy(): void;
+  /** Optional: the view supplies a callback for "inspect this file" gestures in-world. */
+  setInspectHandler?(cb: (path: string) => void): void;
 };
 
 export type MatchView = {
@@ -24,6 +26,8 @@ export type MatchViewOptions = {
   onPatch?: () => void;
   /** Host only: fetch the current session patch text for the Works viewer. */
   onViewPatch?: () => Promise<string>;
+  /** Host only: read a file's current contents from the sandbox for the Inspect panel. */
+  onReadFile?: (path: string) => Promise<string>;
 };
 
 const BUILDING_LABEL: Record<string, string> = {
@@ -111,15 +115,19 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
   window.scrollTo(0, 0);
 
   // --- Works ledger: every changed file, live -------------------------------
-  type Work = { writes: number; added: number; removed: number; by: string; created: boolean };
+  type Work = { writes: number; added: number; removed: number; by: string; created: boolean; snippets: string[] };
   const works = new Map<string, Work>();
   function recordWork(e: Extract<GameEvent, { type: "file_write" }>) {
-    const w = works.get(e.path) ?? { writes: 0, added: 0, removed: 0, by: "", created: false };
+    const w = works.get(e.path) ?? { writes: 0, added: 0, removed: 0, by: "", created: false, snippets: [] };
     w.writes++;
     w.added += e.linesAdded;
     w.removed += e.linesRemoved;
     w.by = name(e.agentId);
     w.created ||= e.created;
+    if (e.diffSnippet) {
+      w.snippets.push(e.diffSnippet);
+      if (w.snippets.length > 10) w.snippets.shift();
+    }
     works.set(e.path, w);
     el("works-empty").style.display = "none";
     const badge = el("works-badge");
@@ -127,12 +135,81 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     badge.textContent = String(works.size);
     el("works-list").innerHTML = [...works.entries()]
       .map(
-        ([path, w]) => `<div class="work-row">
+        ([path, w]) => `<div class="work-row" data-path="${escapeHtml(path)}" title="Open the scrolls for this file">
           <span class="mono">${escapeHtml(path)}</span>
           <span class="work-stat">${w.created ? "✦ new · " : ""}${w.writes}×, <span class="add">+${w.added}</span>/<span class="del">−${w.removed}</span> — ${escapeHtml(w.by)}</span>
         </div>`,
       )
       .join("");
+    el("works-list")
+      .querySelectorAll<HTMLElement>(".work-row")
+      .forEach((row) => (row.onclick = () => void openInspect(row.dataset.path!)));
+  }
+
+  // --- Inspect panel: the actual code, per file ------------------------------
+  function diffHtml(snippet: string): string {
+    return snippet
+      .split("\n")
+      .map((line) => {
+        const esc = escapeHtml(line);
+        if (line.startsWith("+")) return `<span class="dl-add">${esc}</span>`;
+        if (line.startsWith("-") || line.startsWith("−")) return `<span class="dl-del">${esc}</span>`;
+        if (line.startsWith("@@") || line.startsWith("diff ") || line.startsWith("index ")) {
+          return `<span class="dl-hunk">${esc}</span>`;
+        }
+        return esc;
+      })
+      .join("\n");
+  }
+
+  function fileDiffFrom(patch: string, path: string): string {
+    const parts = patch.split(/^diff --git /m).filter((p) => p.trim());
+    const hit = parts.find((p) => p.startsWith(`a/${path} `) || p.includes(` b/${path}\n`));
+    return hit ? "diff --git " + hit : "";
+  }
+
+  async function openInspect(path: string) {
+    const modal = document.createElement("div");
+    modal.className = "patch-modal";
+    modal.innerHTML = `<div class="patch-modal-inner inspect">
+      <button class="patch-close">✕ seal</button>
+      <h3 class="inspect-title mono">${escapeHtml(path)}</h3>
+      <div class="inspect-cols">
+        <section><h4>⚒ Session changes</h4><pre class="diff" id="ins-diff">consulting the scribes…</pre></section>
+        <section><h4>⌕ Source as it stands</h4><pre id="ins-src">…</pre></section>
+      </div>
+    </div>`;
+    root.querySelector(".match-view")!.appendChild(modal);
+    modal.querySelector<HTMLButtonElement>(".patch-close")!.onclick = () => modal.remove();
+    const diffPre = modal.querySelector<HTMLElement>("#ins-diff")!;
+    const srcPre = modal.querySelector<HTMLElement>("#ins-src")!;
+
+    const w = works.get(path);
+    const fallback = w?.snippets.length
+      ? diffHtml(w.snippets.join("\n· · ·\n"))
+      : "No recorded changes to this file this session.";
+    if (isHost && opts.onViewPatch) {
+      try {
+        const patch = await opts.onViewPatch();
+        const own = fileDiffFrom(patch, path);
+        diffPre.innerHTML = own ? diffHtml(own) : fallback;
+      } catch {
+        diffPre.innerHTML = fallback;
+      }
+    } else {
+      diffPre.innerHTML = fallback;
+    }
+
+    if (isHost && opts.onReadFile) {
+      try {
+        const src = await opts.onReadFile(path);
+        srcPre.textContent = src || "(empty file)";
+      } catch (err) {
+        srcPre.textContent = `The scroll resists: ${String(err)}`;
+      }
+    } else {
+      srcPre.textContent = "Only the Crown may unroll the source itself; spectators see the recorded changes.";
+    }
   }
   if (isHost && opts.onViewPatch) {
     el("works-patch-btn").onclick = async () => {
@@ -198,6 +275,9 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     const div = document.createElement("div");
     div.className = `entry ${cls}`;
     div.innerHTML = html;
+    div.querySelectorAll<HTMLElement>("[data-inspect]").forEach((n) => {
+      n.onclick = () => void openInspect(n.dataset.inspect!);
+    });
     feed.appendChild(div);
     while (feed.children.length > 400) feed.removeChild(feed.firstChild!);
     if (atBottom) feed.scrollTop = feed.scrollHeight;
@@ -258,9 +338,12 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       case "file_write": {
         const label = BUILDING_LABEL[e.buildingKind] ?? "a structure";
         const verb = e.created ? "raises" : "reinforces";
+        const snip = e.diffSnippet
+          ? `<details class="diff-details"><summary>⌕ view the change</summary><pre class="diff">${diffHtml(e.diffSnippet)}</pre></details>`
+          : "";
         return {
           cls: "system",
-          html: `⚒ ${who(e.agentId)} ${verb} ${label} at <span class="mono">${escapeHtml(e.path)}</span> (+${e.linesAdded}/−${e.linesRemoved})`,
+          html: `⚒ ${who(e.agentId)} ${verb} ${label} at <span class="mono work-link" data-inspect="${escapeHtml(e.path)}">${escapeHtml(e.path)}</span> (+${e.linesAdded}/−${e.linesRemoved})${snip}`,
         };
       }
       case "command_result":
@@ -355,6 +438,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     gameMount,
     attachRenderer(r) {
       renderer = r;
+      r.setInspectHandler?.((path) => void openInspect(path));
     },
   };
   return view;

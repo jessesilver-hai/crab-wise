@@ -320,6 +320,8 @@ export const FileWriteEvent = z.object({
   linesAdded: z.number(),
   linesRemoved: z.number(),
   buildingKind: BuildingKind,
+  /** Compact ±-prefixed change excerpt for live inspection feeds (edits and new files). */
+  diffSnippet: z.string().max(2000).optional(),
 });
 
 export const CommandKind = z.enum(["test", "install", "other"]);

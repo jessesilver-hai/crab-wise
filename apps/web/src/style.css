@@ -180,7 +180,9 @@ body:has(.match-view) { overflow: hidden; min-height: 0; }
   padding: 0.4rem 0.2rem;
   border-bottom: 1px solid var(--border);
   font-size: 0.78rem;
+  cursor: pointer;
 }
+.work-row:hover { background: rgba(212, 175, 96, 0.07); }
 .work-row .work-stat { color: var(--dim); font-size: 0.72rem; }
 .work-row .add { color: #7dc27d; }
 .work-row .del { color: #c96f5a; }
@@ -216,6 +218,62 @@ body:has(.match-view) { overflow: hidden; min-height: 0; }
   margin-top: 0.6rem;
 }
 .patch-close { align-self: flex-end; font-size: 0.75rem; }
+
+/* --- Inspect panel: per-file diff + live source --- */
+.patch-modal-inner.inspect { max-width: 1180px; }
+.inspect-title { font-size: 0.85rem; color: var(--gold); margin: 0.2rem 0 0.4rem; }
+.inspect-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  min-height: 0;
+  flex: 1;
+}
+.inspect-cols section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.6rem;
+}
+.inspect-cols h4 {
+  margin: 0 0 0.3rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  text-transform: uppercase;
+}
+.inspect-cols pre { flex: 1; margin-top: 0; max-height: 62vh; }
+@media (max-width: 900px) {
+  .inspect-cols { grid-template-columns: 1fr; }
+}
+
+pre.diff .dl-add { color: #7dc27d; display: inline; }
+pre.diff .dl-del { color: #c96f5a; display: inline; }
+pre.diff .dl-hunk { color: var(--dim); display: inline; }
+
+.diff-details { margin-top: 0.25rem; }
+.diff-details summary {
+  cursor: pointer;
+  font-size: 0.7rem;
+  color: var(--dim);
+  user-select: none;
+}
+.diff-details summary:hover { color: var(--gold); }
+.diff-details pre.diff {
+  margin: 0.3rem 0 0.1rem;
+  padding: 0.4rem 0.5rem;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border);
+  max-height: 200px;
+  overflow: auto;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.work-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.work-link:hover { color: var(--gold); }
 
 .topbar {
   display: flex;

@@ -27,12 +27,17 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
 
   root.innerHTML = "";
   let settlement: Settlement | null = null;
+  let fileReader: ((path: string) => Promise<string>) | null = null;
 
   const view = createMatchView(root, {
     matchId,
     title: repoLabel,
     role: "host",
     onSpeak: (text, toName) => settlement?.speak(text, toName),
+    onReadFile: async (path) => {
+      if (!fileReader) throw new Error("the vessel is not yet raised");
+      return fileReader(path);
+    },
     onPatch: async () => {
       if (!settlement) return;
       try {
@@ -85,6 +90,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   }
 
   const executor = new SandboxExecutor(matchId, hostToken);
+  fileReader = async (path) => (await executor.read(path)).content;
   const llm = funded
     ? {
         baseURL: `${location.origin}/api/llm/${matchId}`,

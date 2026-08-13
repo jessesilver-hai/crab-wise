@@ -142,6 +142,15 @@ function clip(text: string, max = MAX_TOOL_RESULT_CHARS): string {
   );
 }
 
+/** ±-prefixed excerpt of a change, capped for the event stream. */
+function snippetOf(oldText: string, newText: string, cap = 1800): string {
+  const del = oldText ? oldText.split("\n").map((l) => "- " + l) : [];
+  const add = newText ? newText.split("\n").map((l) => "+ " + l) : [];
+  let s = [...del, ...add].join("\n");
+  if (s.length > cap) s = s.slice(0, cap) + "\n…";
+  return s;
+}
+
 export function commandKind(command: string): CommandKind {
   if (/\b(pytest|jest|vitest|mocha|--test|go test|cargo test|rspec|phpunit|npm (run )?test|yarn test|pnpm test|make test|tox)\b/.test(command)) {
     return "test";
@@ -207,6 +216,7 @@ export async function executeTool(
         linesAdded: added,
         linesRemoved: removed,
         buildingKind: buildingKindFor(path),
+        diffSnippet: snippetOf(oldText, newText),
       });
       emitter.emit("log", { agentId, level: "tool", text: `edit_file ${path} (~+${added}/−${removed})` });
       return `Edited ${path}: replaced ${removed} line(s) with ${added} (file now ${newLines} lines).`;
@@ -229,6 +239,7 @@ export async function executeTool(
         linesAdded: added,
         linesRemoved: removed,
         buildingKind: buildingKindFor(path),
+        diffSnippet: created ? snippetOf("", content.split("\n").slice(0, 24).join("\n")) : undefined,
       });
       emitter.emit("log", {
         agentId,
