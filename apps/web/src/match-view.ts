@@ -1,4 +1,4 @@
-import type { GameEvent } from "@agent-empires/protocol";
+import { BountyLedger, type GameEvent } from "@agent-empires/protocol";
 
 export type Renderer = {
   handleEvent(e: GameEvent, historical: boolean): void;
@@ -60,6 +60,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
           <span class="res gold" title="tokens spent"><span class="icon">◆</span><span id="res-gold">0</span></span>
           <span class="res food" title="context remaining"><span class="icon">☽</span><span id="res-food">100%</span></span>
           <span class="res pop" title="agents"><span class="icon">⧉</span><span id="res-pop">0</span></span>
+          <span class="res renown" title="renown earned (bounties cleared)"><span class="icon">☨</span><span id="res-renown">0</span></span>
           ${isHost ? '<button id="patch-btn" class="patch-btn" title="Download the session diff as a .patch">⎘ Royal Decree</button>' : ""}
         </div>
       </div>
@@ -78,13 +79,18 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
           <div class="sidebar-tabs">
             <button id="tab-herald" class="active">◈ Herald</button>
             <button id="tab-works">⚒ Works <span id="works-badge" class="works-badge" style="display:none">0</span></button>
-            <button id="tab-scribe">⌘ Scribe (raw)</button>
+            <button id="tab-bounties">☨ Bounties <span id="bounty-badge" class="works-badge" style="display:none">0</span></button>
+            <button id="tab-scribe">⌘ Scribe</button>
           </div>
           <div class="feed" id="feed-herald"></div>
           <div class="feed" id="feed-works" style="display:none">
             <p class="empty-note" id="works-empty">No stone has yet been laid. Changed files appear here.</p>
             <div id="works-list"></div>
             ${isHost ? '<button id="works-patch-btn" class="works-patch-btn">⎘ Unroll the scrolls (view full patch)</button>' : ""}
+          </div>
+          <div class="feed" id="feed-bounties" style="display:none">
+            <p class="empty-note" id="bounties-empty">No bounties posted. The first test run names the specters, and each carries a price in renown.</p>
+            <div id="bounty-list"></div>
           </div>
           <div class="feed" id="feed-scribe" style="display:none"></div>
         </div>
@@ -99,15 +105,19 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
   const statusChip = el("status-chip");
 
   const worksFeed = el("feed-works");
+  const bountyFeed = el("feed-bounties");
   el("tab-herald").onclick = () => switchTab("herald");
   el("tab-works").onclick = () => switchTab("works");
+  el("tab-bounties").onclick = () => switchTab("bounties");
   el("tab-scribe").onclick = () => switchTab("scribe");
-  function switchTab(tab: "herald" | "works" | "scribe") {
+  function switchTab(tab: "herald" | "works" | "bounties" | "scribe") {
     heraldFeed.style.display = tab === "herald" ? "" : "none";
     worksFeed.style.display = tab === "works" ? "" : "none";
+    bountyFeed.style.display = tab === "bounties" ? "" : "none";
     scribeFeed.style.display = tab === "scribe" ? "" : "none";
     el("tab-herald").classList.toggle("active", tab === "herald");
     el("tab-works").classList.toggle("active", tab === "works");
+    el("tab-bounties").classList.toggle("active", tab === "bounties");
     el("tab-scribe").classList.toggle("active", tab === "scribe");
   }
 
@@ -144,6 +154,50 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     el("works-list")
       .querySelectorAll<HTMLElement>(".work-row")
       .forEach((row) => (row.onclick = () => void openInspect(row.dataset.path!)));
+  }
+
+  // --- Bounty board: failing tests carry a price in renown -------------------
+  const ledger = new BountyLedger();
+  function renderBounties() {
+    const bounties = ledger.bounties;
+    if (bounties.length === 0) return;
+    el("bounties-empty").style.display = "none";
+    const open = bounties.filter((b) => b.status === "posted").length;
+    const badge = el("bounty-badge");
+    badge.style.display = "";
+    badge.textContent = String(open);
+    el("bounty-list").innerHTML = bounties
+      .map(
+        (b) => `<div class="bounty-row ${b.status}">
+          <span class="bounty-name mono">${escapeHtml(b.name)}</span>
+          <span class="bounty-meta">${
+            b.status === "cleared"
+              ? `✓ claimed by ${escapeHtml(b.clearedBy ?? "unknown hands")} · +${b.value}`
+              : `☨ ${b.value} renown`
+          }</span>
+        </div>`,
+      )
+      .join("");
+    el("res-renown").textContent = String(ledger.summary().renown);
+  }
+  function applyBounties(e: GameEvent): void {
+    const { postedNow, clearedNow } = ledger.apply(e);
+    if (postedNow.length > 0) {
+      const total = postedNow.reduce((s, b) => s + b.value, 0);
+      addEntry(
+        heraldFeed,
+        "battle",
+        `☨ The bounty board fills: <strong>${postedNow.length}</strong> specter${postedNow.length === 1 ? "" : "s"} named, ${total} renown at stake. <span class="dim">(see ☨ Bounties)</span>`,
+      );
+    }
+    for (const b of clearedNow) {
+      addEntry(
+        heraldFeed,
+        "triumph",
+        `☨ Bounty claimed — <span class="mono">${escapeHtml(b.name)}</span> falls to ${escapeHtml(b.clearedBy ?? "unknown hands")} <strong>(+${b.value} renown)</strong>`,
+      );
+    }
+    if (postedNow.length > 0 || clearedNow.length > 0 || e.type === "tokens") renderBounties();
   }
 
   // --- Inspect panel: the actual code, per file ------------------------------
@@ -386,6 +440,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     onEvent(e, historical) {
       const entry = heraldFor(e);
       if (entry) addEntry(heraldFeed, entry.cls, entry.html);
+      applyBounties(e);
       if (e.type === "file_write") recordWork(e);
       if (e.type === "log") {
         addEntry(scribeFeed, `raw ${e.level === "error" ? "error" : ""}`, `${e.agentId ? `[${escapeHtml(name(e.agentId))}] ` : ""}${escapeHtml(e.text)}`);
@@ -410,8 +465,13 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         defeat: "The specters hold the walls. The tests still fail.",
         abandoned: detail ?? "The Crown departed. The chronicle survives below.",
       } as const;
+      const legend = ledger.summary();
       const stats = matchStats
-        ? `<table class="stats-table">
+        ? `<p class="legend-title">☨ ${escapeHtml(legend.title)} — ${legend.renown} renown${
+            legend.bountiesPosted > 0 ? ` · ${legend.bountiesCleared}/${legend.bountiesPosted} bounties claimed` : ""
+          }</p>
+          <table class="stats-table">
+            <tr><td>Renown earned</td><td>${legend.renown}</td></tr>
             <tr><td>Tokens spent</td><td>${matchStats.goldSpent?.toLocaleString()}</td></tr>
             <tr><td>Structures raised (files written)</td><td>${matchStats.buildingsRaised}</td></tr>
             <tr><td>Specters banished (tests fixed)</td><td>${matchStats.raidersSlain}</td></tr>

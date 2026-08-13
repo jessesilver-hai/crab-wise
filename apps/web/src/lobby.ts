@@ -3,7 +3,7 @@ import { fetchMatches } from "./relay.js";
 import { startSettlement } from "./host.js";
 import { startDemoMatch } from "./demo.js";
 import { escapeHtml } from "./match-view.js";
-import type { MatchSummary } from "@agent-empires/protocol";
+import type { HallEntry, MatchSummary } from "@agent-empires/protocol";
 
 const KEY_STORAGE = "agent-empires-api-key";
 
@@ -53,6 +53,8 @@ export function renderLobby(root: HTMLElement): void {
           <div id="live-list"><p class="empty-note">Consulting the watchtower…</p></div>
           <h2 style="margin-top:1.5rem">The Chronicle</h2>
           <div id="finished-list"><p class="empty-note">No records yet.</p></div>
+          <h2 style="margin-top:1.5rem">☨ Hall of Legends</h2>
+          <div id="hall-list"><p class="empty-note">No legends yet. Clear bounties — fix failing tests — and be remembered.</p></div>
         </div>
       </div>
       <p class="footer-note">
@@ -159,6 +161,23 @@ async function refreshMatches(root: HTMLElement) {
       : '<p class="empty-note">No records yet.</p>';
     for (const row of root.querySelectorAll<HTMLElement>(".match-row")) {
       row.onclick = () => (location.hash = `#/match/${row.dataset.id}`);
+    }
+    const hallList = root.querySelector<HTMLElement>("#hall-list");
+    if (hallList) {
+      const res = await fetch("/api/hall");
+      const { entries } = (await res.json()) as { entries: HallEntry[] };
+      if (entries.length > 0) {
+        hallList.innerHTML = entries
+          .slice(0, 10)
+          .map(
+            (h, i) => `<div class="hall-row">
+              <span class="hall-rank">${i + 1}</span>
+              <span class="hall-name">${escapeHtml(h.factionName ?? h.taskTitle)}<span class="hall-title">${escapeHtml(h.title)}</span></span>
+              <span class="hall-stats">☨ ${h.renown} · ${h.bountiesCleared}/${h.bountiesPosted} bounties · ◆ ${h.goldSpent.toLocaleString()}</span>
+            </div>`,
+          )
+          .join("");
+      }
     }
   } catch {
     // relay unreachable; leave the lists as they are

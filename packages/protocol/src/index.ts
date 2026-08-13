@@ -522,6 +522,159 @@ export function buildingKindFor(path: string): z.infer<typeof BuildingKind> {
   return "house";
 }
 
+// ---------------------------------------------------------------------------
+// Bounties + renown (shared by web live view, relay Hall of Legends, replays)
+// ---------------------------------------------------------------------------
+
+export type Bounty = {
+  name: string;
+  value: number;
+  status: "posted" | "cleared";
+  clearedBy?: string;
+};
+
+export type LegendSummary = {
+  renown: number;
+  bountiesPosted: number;
+  bountiesCleared: number;
+  clearedValue: number;
+  factionName?: string;
+  result?: z.infer<typeof MatchResult>;
+  goldSpent: number;
+  title: string;
+};
+
+function fnv1a(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/** A failing test's price on the bounty board. Deterministic so every client agrees. */
+export function bountyValue(testName: string): number {
+  return 100 + (fnv1a(testName) % 151);
+}
+
+export function renownTitle(renown: number, cleared: number): string {
+  if (renown >= 600) return "Wardbreaker of the First Rank";
+  if (renown >= 300) return "Wardbreaker";
+  if (cleared >= 1) return "Specter-Bane";
+  return "Settler";
+}
+
+/**
+ * Folds the event stream into a bounty board: the first failing test run posts
+ * bounties (one per named failure), later runs clear the ones that stop
+ * failing. Unnamed failures fall back to count-based synthetic bounties.
+ */
+export class BountyLedger {
+  private byName = new Map<string, Bounty>();
+  private agentNames = new Map<string, string>();
+  private posted = false;
+  private syntheticCount = 0;
+  goldSpent = 0;
+  result?: z.infer<typeof MatchResult>;
+  factionName?: string;
+
+  /** Returns bounties newly posted/cleared by this event, for live feeds. */
+  apply(e: GameEvent): { postedNow: Bounty[]; clearedNow: Bounty[] } {
+    const postedNow: Bounty[] = [];
+    const clearedNow: Bounty[] = [];
+    switch (e.type) {
+      case "agent_spawned":
+        this.agentNames.set(e.agentId, e.name);
+        break;
+      case "tokens":
+        this.goldSpent = e.matchTotalTokens;
+        break;
+      case "theme_ready":
+        this.factionName = e.theme.factionName;
+        break;
+      case "match_ended":
+        this.result = e.result;
+        break;
+      case "command_result": {
+        if (e.kind !== "test" || e.testsFailed === undefined) break;
+        const failingNow = new Set(
+          (e.failures ?? []).map((f) => f.name.slice(0, 160)).filter((n) => n.length > 0),
+        );
+        const named = failingNow.size > 0;
+        const by = this.agentNames.get(e.agentId) ?? e.agentId;
+        if (named) {
+          for (const name of failingNow) {
+            if (!this.byName.has(name)) {
+              const b: Bounty = { name, value: bountyValue(name), status: "posted" };
+              this.byName.set(name, b);
+              postedNow.push(b);
+            }
+          }
+          for (const b of this.byName.values()) {
+            if (b.status === "posted" && !b.name.startsWith("specter #") && !failingNow.has(b.name)) {
+              b.status = "cleared";
+              b.clearedBy = by;
+              clearedNow.push(b);
+            }
+          }
+        } else {
+          // Count-based fallback: keep exactly testsFailed synthetic bounties open.
+          while (this.syntheticCount < e.testsFailed) {
+            this.syntheticCount++;
+            const name = `specter #${this.syntheticCount}`;
+            const b: Bounty = { name, value: bountyValue(name), status: "posted" };
+            this.byName.set(name, b);
+            postedNow.push(b);
+          }
+          const open = [...this.byName.values()].filter(
+            (b) => b.status === "posted" && b.name.startsWith("specter #"),
+          );
+          for (let i = open.length; i > e.testsFailed; i--) {
+            const b = open[i - 1]!;
+            b.status = "cleared";
+            b.clearedBy = by;
+            clearedNow.push(b);
+          }
+        }
+        this.posted = this.posted || this.byName.size > 0;
+        break;
+      }
+    }
+    return { postedNow, clearedNow };
+  }
+
+  get bounties(): Bounty[] {
+    return [...this.byName.values()];
+  }
+
+  summary(): LegendSummary {
+    const all = this.bounties;
+    const cleared = all.filter((b) => b.status === "cleared");
+    const clearedValue = cleared.reduce((s, b) => s + b.value, 0);
+    const renown = Math.max(
+      0,
+      clearedValue + (this.result === "victory" ? 200 : 0) - Math.floor(this.goldSpent / 2500),
+    );
+    return {
+      renown,
+      bountiesPosted: all.length,
+      bountiesCleared: cleared.length,
+      clearedValue,
+      factionName: this.factionName,
+      result: this.result,
+      goldSpent: this.goldSpent,
+      title: renownTitle(renown, cleared.length),
+    };
+  }
+}
+
+export type HallEntry = LegendSummary & {
+  matchId: string;
+  taskTitle: string;
+  endedAt: number;
+};
+
 /** Fallback worker name pool (ancient-future register); themes override it. */
 export const VILLAGER_NAMES = [
   "Ashka",

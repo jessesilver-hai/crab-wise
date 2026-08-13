@@ -9,7 +9,12 @@ primary_region = "iad"
 [env]
   PORT = "8080"
   MAX_SANDBOXES = "6"
+  HALL_PATH = "/data/hall.json"
   # Set via `fly secrets`: FLY_API_TOKEN, SANDBOX_APP, SANDBOX_IMAGE
+
+[mounts]
+  source = "hall_data"
+  destination = "/data"
 
 [http_service]
   internal_port = 8080

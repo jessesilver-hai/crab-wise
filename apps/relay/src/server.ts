@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import { WebSocketServer, WebSocket } from "ws";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -12,6 +12,8 @@ import {
   MatchSummary,
   PROTOCOL_VERSION,
   ThemePack,
+  BountyLedger,
+  type HallEntry,
 } from "@agent-empires/protocol";
 import { SandboxManager, driverFromEnv } from "./sandbox.js";
 
@@ -75,11 +77,42 @@ function summarize(m: Match): MatchSummary {
   };
 }
 
+// --- Hall of Legends: finished settlements ranked by renown, persisted -------
+const HALL_PATH = process.env.HALL_PATH ?? path.join(process.cwd(), "data", "hall.json");
+const HALL_MAX = 200;
+let hall: HallEntry[] = [];
+try {
+  hall = JSON.parse(readFileSync(HALL_PATH, "utf8")) as HallEntry[];
+} catch {
+  hall = [];
+}
+
+function recordLegend(match: Match) {
+  try {
+    const ledger = new BountyLedger();
+    for (const e of match.events) ledger.apply(e);
+    const entry: HallEntry = {
+      ...ledger.summary(),
+      matchId: match.matchId,
+      taskTitle: match.taskTitle,
+      endedAt: Date.now(),
+    };
+    hall.push(entry);
+    hall.sort((a, b) => b.renown - a.renown || b.endedAt - a.endedAt);
+    if (hall.length > HALL_MAX) hall.length = HALL_MAX;
+    mkdirSync(path.dirname(HALL_PATH), { recursive: true });
+    writeFileSync(HALL_PATH, JSON.stringify(hall));
+  } catch (err) {
+    app.log.warn(`hall write failed: ${String(err)}`);
+  }
+}
+
 function finishMatch(match: Match, result: "victory" | "defeat" | "abandoned") {
   if (match.status === "finished") return;
   match.status = "finished";
   match.result = result;
   match.host = null;
+  recordLegend(match);
   broadcast(match, { type: "match_over" });
   // Cap memory: evict oldest finished matches.
   const finished = [...matches.values()]
@@ -106,6 +139,8 @@ app.get("/api/matches", async () => {
 });
 
 app.get("/healthz", async () => ({ ok: true }));
+
+app.get("/api/hall", async () => ({ entries: hall.slice(0, 50) }));
 
 // --- Sandbox tool-call proxy (host-only, bearer hostToken) -------------------
 

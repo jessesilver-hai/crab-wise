@@ -275,6 +275,46 @@ pre.diff .dl-hunk { color: var(--dim); display: inline; }
 .work-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .work-link:hover { color: var(--gold); }
 
+/* --- Bounty board + Hall of Legends --- */
+.res.renown .icon { color: #c9a3e0; }
+.bounty-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.2rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.76rem;
+}
+.bounty-row .bounty-name { word-break: break-all; }
+.bounty-row .bounty-meta { font-size: 0.7rem; color: var(--dim); }
+.bounty-row.cleared .bounty-name { text-decoration: line-through; opacity: 0.55; }
+.bounty-row.cleared .bounty-meta { color: #7dc27d; }
+.bounty-row.posted .bounty-meta { color: #c9a3e0; }
+.entry .dim { color: var(--dim); font-size: 0.85em; }
+.legend-title {
+  font-family: "Cinzel", Georgia, serif;
+  color: #c9a3e0;
+  letter-spacing: 0.06em;
+  margin: 0.2rem 0 0.6rem;
+}
+.hall-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.42rem 0.2rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+.hall-rank {
+  font-family: "Cinzel", Georgia, serif;
+  color: var(--gold);
+  min-width: 1.4rem;
+  text-align: right;
+}
+.hall-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hall-name .hall-title { display: block; font-size: 0.68rem; color: #c9a3e0; }
+.hall-stats { color: var(--dim); font-size: 0.7rem; white-space: nowrap; }
+
 .topbar {
   display: flex;
   align-items: center;
