@@ -1,0 +1,23 @@
+# Agent Empires — public relay + frontend.
+# The sandbox app (per-session machines) is separate; see infra/README notes.
+app = "agent-empires"
+primary_region = "iad"
+
+[build]
+  dockerfile = "infra/relay.Dockerfile"
+
+[env]
+  PORT = "8080"
+  MAX_SANDBOXES = "6"
+  # Set via `fly secrets`: FLY_API_TOKEN, SANDBOX_APP, SANDBOX_IMAGE
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"   # websockets + in-memory rooms need an always-on machine
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

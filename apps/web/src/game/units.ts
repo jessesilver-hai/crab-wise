@@ -19,7 +19,7 @@ export class Unit {
     this.root.addChild(this.sprite);
 
     const label = new Text({
-      text: name.split(" ")[0]!,
+      text: shortName(name),
       style: { fontFamily: "IBM Plex Mono, monospace", fontSize: 11, fill: labelColor },
     });
     label.anchor.set(0.5, 0);
@@ -102,6 +102,13 @@ export class Unit {
   get y(): number {
     return this.root.y;
   }
+}
+
+/** "Ashka the Unsleeping" → "Ashka"; "The Hierophant" → "Hierophant". */
+function shortName(name: string): string {
+  const words = name.split(" ");
+  const first = words[0]!;
+  return /^(the|a|an|of)$/i.test(first) && words[1] ? words[1] : first;
 }
 
 export type Floater = { obj: Text; vy: number; expiry: number };
