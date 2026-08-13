@@ -149,6 +149,10 @@ type Session = {
 
 export class SandboxManager {
   private sessions = new Map<string, Session>();
+  /** Matches ended while their sandbox was still provisioning. */
+  private endedEarly = new Set<string>();
+  /** IPs with a provision in flight (sessions map only holds completed ones). */
+  private pending = new Map<string, string>();
   constructor(private driver: SandboxDriver) {}
 
   get count(): number {
@@ -156,13 +160,29 @@ export class SandboxManager {
   }
 
   async provision(matchId: string, ip: string): Promise<{ hostToken: string }> {
-    if (this.sessions.size >= MAX_SANDBOXES) {
+    if (this.sessions.size + this.pending.size >= MAX_SANDBOXES) {
       throw new Error("all sandboxes are busy; try again in a few minutes");
     }
     for (const s of this.sessions.values()) {
       if (s.ip === ip) throw new Error("one settlement per visitor at a time");
     }
-    const handle = await this.driver.create(matchId);
+    for (const pendingIp of this.pending.values()) {
+      if (pendingIp === ip) throw new Error("one settlement per visitor at a time");
+    }
+    this.pending.set(matchId, ip);
+    let handle: SandboxHandle;
+    try {
+      handle = await this.driver.create(matchId);
+    } finally {
+      this.pending.delete(matchId);
+    }
+    // The host may have ended (or vanished) while the machine was booting:
+    // registering it now would orphan a running sandbox and hold the ip slot.
+    if (this.endedEarly.has(matchId)) {
+      this.endedEarly.delete(matchId);
+      void handle.destroy().catch(() => {});
+      throw new Error("the settlement ended before the vessel rose");
+    }
     const hostToken = randomBytes(24).toString("hex");
     const session: Session = {
       matchId,
@@ -221,7 +241,11 @@ export class SandboxManager {
 
   async destroy(matchId: string): Promise<void> {
     const session = this.sessions.get(matchId);
-    if (!session) return;
+    if (!session) {
+      // Provisioning may still be in flight; make sure it self-destructs on arrival.
+      if (this.pending.has(matchId)) this.endedEarly.add(matchId);
+      return;
+    }
     this.sessions.delete(matchId);
     clearTimeout(session.killTimer);
     if (session.graceTimer) clearTimeout(session.graceTimer);
