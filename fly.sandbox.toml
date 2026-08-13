@@ -1,0 +1,6 @@
+# Build/push config for the per-session sandbox image only.
+# Usage: fly deploy --config fly.sandbox.toml --build-only --push --image-label sandbox
+app = "crab-wise-sandbox"
+
+[build]
+  dockerfile = "infra/sandbox.Dockerfile"

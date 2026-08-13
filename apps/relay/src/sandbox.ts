@@ -93,9 +93,15 @@ export class FlyDriver implements SandboxDriver {
       },
     });
     const machineId: string = machine.id;
-    await this.api("GET", `/machines/${machineId}/wait?state=started&timeout=60`);
     const baseUrl = `http://${machineId}.vm.${this.app}.internal:9800`;
-    await waitHealthy(baseUrl, 30_000);
+    try {
+      await this.api("GET", `/machines/${machineId}/wait?state=started&timeout=60`);
+      await waitHealthy(baseUrl, 30_000);
+    } catch (err) {
+      // Don't leak a machine we can't reach.
+      await this.api("DELETE", `/machines/${machineId}?force=true`).catch(() => {});
+      throw err;
+    }
     return {
       baseUrl,
       token,
