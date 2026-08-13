@@ -1,0 +1,9 @@
+{
+  "name": "repel-the-invasion",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-reporter=tap \"tests/*.test.js\""
+  }
+}

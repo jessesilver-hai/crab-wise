@@ -11,6 +11,7 @@
   "dependencies": {
     "@agent-empires/protocol": "*",
     "@agent-empires/runtime": "*",
+    "@agent-empires/tasks": "*",
     "@webcontainer/api": "^1.6.1",
     "pixi.js": "^8.6.6"
   },

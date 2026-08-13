@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "tasks"
   ],
   "scripts": {
     "dev": "npm run dev --workspace apps/web",

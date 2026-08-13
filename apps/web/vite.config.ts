@@ -11,6 +11,10 @@ export default defineConfig({
   server: {
     headers: isolationHeaders,
     port: 5173,
+    proxy: {
+      "/api": "http://localhost:8080",
+      "/ws": { target: "ws://localhost:8080", ws: true },
+    },
   },
   preview: {
     headers: isolationHeaders,
