@@ -8,16 +8,36 @@ import type { Executor } from "./executor.js";
 export const WORKER_TOOLS: Anthropic.Tool[] = [
   {
     name: "read_file",
-    description: "Read a file from the repository. Returns the full contents (large files truncated).",
+    description:
+      "Read a file from the repository. Optionally pass start_line/end_line to read a range (1-based, inclusive). Large output is truncated head+tail.",
     input_schema: {
       type: "object",
-      properties: { path: { type: "string", description: "Path relative to repo root" } },
+      properties: {
+        path: { type: "string", description: "Path relative to repo root" },
+        start_line: { type: "number", description: "First line to read (1-based)" },
+        end_line: { type: "number", description: "Last line to read (inclusive)" },
+      },
       required: ["path"],
     },
   },
   {
+    name: "edit_file",
+    description:
+      "Replace an exact snippet in a file. old_text must match the file contents exactly and appear exactly once — include enough surrounding lines to make it unique. Preferred over write_file for changes to existing files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        old_text: { type: "string", description: "Exact existing text to replace (must be unique in the file)" },
+        new_text: { type: "string", description: "Replacement text" },
+      },
+      required: ["path", "old_text", "new_text"],
+    },
+  },
+  {
     name: "write_file",
-    description: "Create or overwrite a file with the given contents. Always write the complete file.",
+    description:
+      "Create a new file, or fully overwrite an existing one, with the given contents. Always write the complete file. For partial changes to existing files use edit_file instead.",
     input_schema: {
       type: "object",
       properties: {
@@ -58,6 +78,18 @@ export const WORKER_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "delegate",
+    description:
+      "Dispatch a scout: a read-only sub-agent that explores the repository (read/list/search only) and answers one question, so large investigations don't fill your own memory. Use for questions like 'how does X work / where is Y handled / summarize module Z'. Budget: 3 per assignment.",
+    input_schema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "One self-contained question about the codebase" },
+      },
+      required: ["question"],
+    },
+  },
+  {
     name: "send_message",
     description:
       "Send a short message to a fellow agent (by name) or to everyone (omit `to`). Use it to coordinate: announce what you're starting, share discoveries, warn about conflicts.",
@@ -72,6 +104,11 @@ export const WORKER_TOOLS: Anthropic.Tool[] = [
   },
 ];
 
+/** Read-only exploration subset given to delegated scouts. */
+export const SCOUT_TOOLS: Anthropic.Tool[] = WORKER_TOOLS.filter((t) =>
+  ["read_file", "list_dir", "search"].includes(t.name),
+);
+
 export type ToolContext = {
   exec: Executor;
   emitter: Emitter;
@@ -79,6 +116,9 @@ export type ToolContext = {
   agentName: string;
   lexicon: () => HeraldLexicon | undefined;
   sendMessage: (from: string, to: string | undefined, text: string) => void;
+  /** Spawn a read-only scout sub-agent; absent for scouts themselves (depth cap 1). */
+  delegate?: (question: string, parentName: string) => Promise<string>;
+  delegatesUsed: { count: number };
   stats: {
     filesRead: Set<string>;
     filesWritten: Set<string>;
@@ -90,8 +130,16 @@ export type ToolContext = {
 
 const MAX_TOOL_RESULT_CHARS = 12_000;
 
+/** Truncate preserving head and tail — errors and summaries cluster at the ends. */
 function clip(text: string, max = MAX_TOOL_RESULT_CHARS): string {
-  return text.length > max ? text.slice(0, max) + `\n…[truncated ${text.length - max} chars]` : text;
+  if (text.length <= max) return text;
+  const head = Math.floor(max * 0.75);
+  const tail = max - head;
+  return (
+    text.slice(0, head) +
+    `\n…[${(text.length - max).toLocaleString()} chars omitted — use read_file with start_line/end_line for the middle]…\n` +
+    text.slice(text.length - tail)
+  );
 }
 
 export function commandKind(command: string): CommandKind {
@@ -121,7 +169,47 @@ export async function executeTool(
       ctx.stats.filesRead.add(path);
       emitter.emit("file_read", { agentId, path, lines });
       emitter.emit("log", { agentId, level: "tool", text: `read_file ${path} (${lines} lines)` });
+      const start = input.start_line ? Math.max(1, Math.floor(Number(input.start_line))) : undefined;
+      const end = input.end_line ? Math.floor(Number(input.end_line)) : undefined;
+      if (start !== undefined || end !== undefined) {
+        const all = content.split("\n");
+        const s = (start ?? 1) - 1;
+        const e = Math.min(end ?? all.length, all.length);
+        if (s >= all.length) return `Tool error: start_line ${start} is past the end (${all.length} lines).`;
+        return clip(`[lines ${s + 1}-${e} of ${all.length}]\n` + all.slice(s, e).join("\n"));
+      }
       return clip(content);
+    }
+
+    case "edit_file": {
+      const path = String(input.path ?? "");
+      const oldText = String(input.old_text ?? "");
+      const newText = String(input.new_text ?? "");
+      if (!oldText) return "Tool error: old_text must not be empty (use write_file to create files).";
+      const { content } = await exec.read(path);
+      const count = content.split(oldText).length - 1;
+      if (count === 0) {
+        return `Tool error: old_text not found in ${path}. Read the file and copy the snippet exactly (whitespace matters).`;
+      }
+      if (count > 1) {
+        return `Tool error: old_text appears ${count} times in ${path}; include more surrounding lines to make it unique.`;
+      }
+      emitter.emit("agent_moved", { agentId, path });
+      emitter.emit("agent_status", { agentId, status: "building" });
+      const { newLines } = await exec.write(path, content.replace(oldText, newText));
+      const added = newText ? newText.split("\n").length : 0;
+      const removed = oldText.split("\n").length;
+      ctx.stats.filesWritten.add(path);
+      emitter.emit("file_write", {
+        agentId,
+        path,
+        created: false,
+        linesAdded: added,
+        linesRemoved: removed,
+        buildingKind: buildingKindFor(path),
+      });
+      emitter.emit("log", { agentId, level: "tool", text: `edit_file ${path} (~+${added}/−${removed})` });
+      return `Edited ${path}: replaced ${removed} line(s) with ${added} (file now ${newLines} lines).`;
     }
 
     case "write_file": {
@@ -175,7 +263,9 @@ export async function executeTool(
       emitter.emit("agent_status", { agentId, status: kind === "test" ? "fighting" : "building" });
       emitter.emit("command_run", { agentId, command, kind });
 
+      const startedAt = Date.now();
       const { exitCode, output, timedOut } = await exec.exec(command);
+      const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
       let summary = timedOut ? "timed out" : exitCode === 0 ? "succeeded" : `exited ${exitCode}`;
       let testsFailed: number | undefined;
       let testsPassed: number | undefined;
@@ -209,8 +299,19 @@ export async function executeTool(
         testsPassed,
         failures,
       });
-      emitter.emit("log", { agentId, level: "tool", text: `${command} → exit ${exitCode} (${summary})` });
-      return clip(`exit code: ${exitCode}${timedOut ? " (timed out)" : ""}\n${output}`);
+      emitter.emit("log", { agentId, level: "tool", text: `${command} → exit ${exitCode} (${summary}, ${secs}s)` });
+      return clip(`exit code: ${exitCode}${timedOut ? " (timed out)" : ""} · ${secs}s\n${output}`);
+    }
+
+    case "delegate": {
+      const question = String(input.question ?? "").trim();
+      if (!question) return "Tool error: question is required.";
+      if (!ctx.delegate) return "Tool error: scouts cannot delegate further (depth limit).";
+      if (ctx.delegatesUsed.count >= 3) return "Tool error: delegation budget exhausted (3 per assignment).";
+      ctx.delegatesUsed.count++;
+      emitter.emit("log", { agentId, level: "tool", text: `delegate → "${question.slice(0, 140)}"` });
+      const answer = await ctx.delegate(question, ctx.agentName);
+      return clip(answer);
     }
 
     case "send_message": {

@@ -6,6 +6,7 @@ import { executeTool, ToolContext, WORKER_TOOLS } from "./tools.js";
 const MAX_TURNS = 28;
 const CONTEXT_MAX_TOKENS = 200_000;
 const COMPACTION_THRESHOLD_TOKENS = 60_000;
+const FOLD_THRESHOLD_TOKENS = 80_000;
 
 export type Inbox = { drain(): { from: string; text: string }[] };
 
@@ -24,6 +25,8 @@ export class Agent {
     private inbox: Inbox,
     matchTokens: { total: number },
     private signal?: AbortSignal,
+    private tools: Anthropic.Tool[] = WORKER_TOOLS,
+    private maxTurns: number = MAX_TURNS,
   ) {
     this.matchTokens = matchTokens;
   }
@@ -33,16 +36,21 @@ export class Agent {
     this.history.push({ role: "user", content: brief });
     let finalText = "";
 
-    for (let turn = 0; turn < MAX_TURNS; turn++) {
+    for (let turn = 0; turn < this.maxTurns; turn++) {
       if (this.signal?.aborted) throw new Error("match aborted");
 
-      // Deliver queued inter-agent mail before thinking.
+      // Deliver queued inter-agent mail before thinking. Merge into a trailing
+      // user message when present: some providers reject non-alternating roles.
       const mail = this.inbox.drain();
       if (mail.length > 0) {
-        this.history.push({
-          role: "user",
-          content: mail.map((m) => `[Message from ${m.from}]: ${m.text}`).join("\n"),
-        });
+        const mailText = mail.map((m) => `[Message from ${m.from}]: ${m.text}`).join("\n");
+        const last = this.history[this.history.length - 1];
+        if (last?.role === "user") {
+          if (typeof last.content === "string") last.content += "\n" + mailText;
+          else last.content.push({ type: "text", text: mailText });
+        } else {
+          this.history.push({ role: "user", content: mailText });
+        }
       }
 
       this.emitter.emit("agent_status", { agentId: this.id, status: "thinking" });
@@ -51,7 +59,7 @@ export class Agent {
         model: this.model,
         max_tokens: 4096,
         system: systemPrompt,
-        tools: WORKER_TOOLS,
+        tools: this.tools,
         messages: this.history,
       });
 
@@ -102,11 +110,59 @@ export class Agent {
       }
       this.history.push({ role: "user", content: results });
 
-      if (inputTokens > COMPACTION_THRESHOLD_TOKENS) this.compact();
+      // Orchestrator histories accrete every worker report across the whole
+      // session: fold them into a durable chronicle (one cheap sub-call).
+      // Workers are short-lived; blanking old tool results is enough.
+      if (this.role === "orchestrator" && inputTokens > FOLD_THRESHOLD_TOKENS) {
+        await this.fold().catch(() => this.compact());
+      } else if (inputTokens > COMPACTION_THRESHOLD_TOKENS) {
+        this.compact();
+      }
     }
 
     this.emitter.emit("agent_status", { agentId: this.id, status: "done" });
     return finalText;
+  }
+
+  /**
+   * RLM-style context folding for the orchestrator: distill everything but the
+   * recent turns into a durable chronicle via one summarization sub-call, then
+   * replace the old history with it. Falls back to compact() on failure.
+   */
+  private async fold(): Promise<void> {
+    // Keep the recent tail, starting on an assistant message so roles alternate.
+    let keepFrom = Math.max(1, this.history.length - 8);
+    while (keepFrom < this.history.length && this.history[keepFrom]!.role !== "assistant") keepFrom++;
+    if (keepFrom >= this.history.length || keepFrom <= 1) return this.compact();
+
+    const folded = this.history.slice(0, keepFrom);
+    const digestSource = JSON.stringify(folded);
+    const res = await this.client.messages.create({
+      model: this.model,
+      max_tokens: 900,
+      system:
+        "You are the royal scribe. Distill this working-session transcript into the durable facts the project lead must retain: what the repository is, files explored and changed (exact paths), decisions made, worker assignments and their outcomes, current test/build state, and open threads. Under 300 words, plain prose, no preamble.",
+      messages: [{ role: "user", content: digestSource.slice(0, 240_000) }],
+    });
+    this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+    this.emitter.emit("tokens", {
+      agentId: this.id,
+      inputTokens: res.usage.input_tokens,
+      outputTokens: res.usage.output_tokens,
+      matchTotalTokens: this.matchTokens.total,
+    });
+    const digest = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    if (!digest) return this.compact();
+    this.history = [
+      { role: "user", content: `[The royal scribe's chronicle of the session so far — durable context]\n${digest}` },
+      ...this.history.slice(keepFrom),
+    ];
+    this.emitter.emit("compaction", { agentId: this.id });
+    this.emitter.emit("agent_status", { agentId: this.id, status: "resting" });
   }
 
   /**

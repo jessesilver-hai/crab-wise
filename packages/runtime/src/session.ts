@@ -9,7 +9,7 @@ import { Agent, type Inbox } from "./agent.js";
 import { Emitter } from "./emitter.js";
 import { heraldCharge, heraldMessage, type HeraldLexicon } from "./herald.js";
 import type { Executor } from "./executor.js";
-import type { ToolContext } from "./tools.js";
+import { SCOUT_TOOLS, type ToolContext } from "./tools.js";
 
 export type SettlementOptions = {
   /** Empty string = Crown-funded mode: calls go through the relay's LLM proxy. */
@@ -70,8 +70,8 @@ When The Crown speaks to you, either:
 a) Answer directly (questions, discussion, status) — just reply in plain prose, in character
    as a capable regal engineering lead. Keep it under 120 words.
 b) If the order requires engineering work, briefly explore the repo if needed
-   (list_dir, read_file, search), then END your reply with one line per worker
-   (1-4 workers) in exactly this format:
+   (list_dir, read_file, search — or delegate a scout for broad questions), then END
+   your reply with one line per worker (1-4 workers) in exactly this format:
 ASSIGN <worker name>: <concrete one-sentence engineering assignment>
 
 For example:
@@ -87,6 +87,13 @@ Only use worker names from the roster you are given. Assignments should be
 independent and parallelizable. Stay in character, but keep assignments
 technically precise.`;
 
+const SCOUT_SYSTEM = (name: string, repoLabel: string) =>
+  `You are ${name}, a scout dispatched into the repository "${repoLabel}" to answer ONE question.
+You are read-only: explore with list_dir, read_file (use line ranges on big files), and search.
+Be fast and frugal — a handful of tool calls, then stop calling tools and answer. Report concrete
+facts with exact file paths and line references. If the answer cannot be found, say what you
+checked and what is missing. No preamble.`;
+
 const WORKER_SYSTEM = (name: string, persona: string, repoLabel: string, peers: string[]) =>
   `You are ${name}${persona ? ` — ${persona}` : ""}, a software engineer working on the
 repository "${repoLabel}". Your teammates: ${peers.join(", ")}. Coordinate with send_message:
@@ -94,8 +101,11 @@ announce what you start, share discoveries, warn before touching shared files. K
 to one or two sentences, lightly in character but technically precise.
 
 Work methodically:
-1. Explore only what you need (list_dir, read_file, search).
-2. Make focused edits with write_file (always write complete file contents).
+1. Explore only what you need (list_dir, read_file with line ranges, search). For broad
+   questions ("how does X work?"), dispatch a scout with delegate instead of reading
+   everything yourself — it reports back and your memory stays clean.
+2. Edit with edit_file (exact-snippet replacement) for existing files; write_file only
+   for new files or full rewrites.
 3. Verify your work: run the project's tests or build if available (run_command).
 4. When your assignment is complete and verified, stop calling tools and summarize
    what you did in one short paragraph.
@@ -118,6 +128,7 @@ export class Settlement {
   private king: Agent | null = null;
   private kingName: string;
   private workerCounter = 0;
+  private scoutCounter = 0;
   private activeWorkers = new Map<string, string>(); // name -> agentId
   private orderQueue: string[] = [];
   private processing = false;
@@ -131,6 +142,7 @@ export class Settlement {
       dangerouslyAllowBrowser: true,
       baseURL: opts.llm?.baseURL,
       defaultHeaders: opts.llm?.headers,
+      maxRetries: 4,
     });
     this.theme = opts.theme ?? null;
     this.kingName = this.theme?.kingName ?? ORCHESTRATOR_NAME;
@@ -150,7 +162,7 @@ export class Settlement {
     };
   }
 
-  private toolCtx(agentId: string, agentName: string): ToolContext {
+  private toolCtx(agentId: string, agentName: string, opts?: { scout?: boolean }): ToolContext {
     return {
       exec: this.opts.executor,
       emitter: this.emitter,
@@ -159,7 +171,44 @@ export class Settlement {
       lexicon: () => this.lexicon(),
       sendMessage: (from, to, text) => this.bus.send(from, to, text),
       stats: this.stats,
+      delegate: opts?.scout ? undefined : (question, parentName) => this.runScout(question, parentName),
+      delegatesUsed: { count: 0 },
     };
+  }
+
+  /** RLM-style recursion, depth 1: a read-only scout explores and reports back. */
+  private async runScout(question: string, parentName: string): Promise<string> {
+    const name = `Wisp of ${parentName.split(" ")[0]!}`;
+    const agentId = `scout-${this.scoutCounter++}`;
+    this.emitter.emit("agent_spawned", {
+      agentId,
+      role: "worker",
+      name,
+      model: this.opts.model,
+      charge: question.slice(0, 140),
+    });
+    const scout = new Agent(
+      agentId,
+      name,
+      "worker",
+      this.client,
+      this.opts.model,
+      this.emitter,
+      this.toolCtx(agentId, name, { scout: true }),
+      { drain: () => [] },
+      this.matchTokens,
+      this.opts.signal,
+      SCOUT_TOOLS,
+      10,
+    );
+    try {
+      const answer = await scout.run(SCOUT_SYSTEM(name, this.opts.repoLabel), question);
+      this.emitter.emit("agent_done", { agentId, summary: (answer || "returned empty-handed").slice(0, 140) });
+      return answer || "(the scout returned empty-handed)";
+    } catch (err) {
+      this.emitter.emit("agent_done", { agentId, summary: "the wisp faded (scout error)" });
+      return `Scout failed: ${String(err).slice(0, 200)}`;
+    }
   }
 
   /** Clone, map the realm, seat the King. Returns repo intel for theming. */
