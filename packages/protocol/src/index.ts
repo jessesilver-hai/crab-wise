@@ -601,8 +601,19 @@ export class BountyLedger {
         const failingNow = new Set(
           (e.failures ?? []).map((f) => f.name.slice(0, 160)).filter((n) => n.length > 0),
         );
-        const named = failingNow.size > 0;
         const by = this.agentNames.get(e.agentId) ?? e.agentId;
+        if (e.testsFailed === 0) {
+          // Green board: every open bounty falls, named or synthetic.
+          for (const b of this.byName.values()) {
+            if (b.status === "posted") {
+              b.status = "cleared";
+              b.clearedBy = by;
+              clearedNow.push(b);
+            }
+          }
+          break;
+        }
+        const named = failingNow.size > 0;
         if (named) {
           // A named board supersedes count-based guesses: retract open synthetics
           // (deleted, not cleared — retraction must never mint renown).

@@ -80,6 +80,16 @@ console.log("BountyLedger");
   check("regressions post new bounties mid-session", regress.postedNow.length === 1 && regress.postedNow[0].name === "b");
 }
 {
+  // The decisive flow: a fully green run reports no failure names at all.
+  const l = new BountyLedger();
+  l.apply({ ...ts(), type: "agent_spawned", agentId: "w1", role: "worker", name: "Ashka", model: "m" });
+  l.apply(testResult("w1", [{ name: "a" }, { name: "b" }], 2));
+  l.apply(testResult("w2", [], 3)); // a second, unnamed board elsewhere
+  const green = l.apply(testResult("w1", [], 0, 9));
+  check("final green run clears every open bounty", green.clearedNow.length === 5 && l.bounties.every((b) => b.status === "cleared"));
+  check("green-run credit goes to the runner", green.clearedNow.every((b) => b.clearedBy === "Ashka"));
+}
+{
   const vals = ["x", "y", "long test name with spaces", "☨"].map(bountyValue);
   check("bounty values deterministic in [100, 250]", vals.every((v) => v >= 100 && v <= 250) && bountyValue("x") === bountyValue("x"));
   check("titles ladder", renownTitle(700, 5) === "Wardbreaker of the First Rank" && renownTitle(10, 1) === "Specter-Bane" && renownTitle(0, 0) === "Settler");
