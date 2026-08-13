@@ -22,6 +22,8 @@ export type MatchViewOptions = {
   onSpeak?: (text: string, toName?: string) => void;
   /** Host only: request the settlement's patch download. */
   onPatch?: () => void;
+  /** Host only: fetch the current session patch text for the Works viewer. */
+  onViewPatch?: () => Promise<string>;
 };
 
 const BUILDING_LABEL: Record<string, string> = {
@@ -71,9 +73,15 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         <div class="sidebar">
           <div class="sidebar-tabs">
             <button id="tab-herald" class="active">◈ Herald</button>
+            <button id="tab-works">⚒ Works <span id="works-badge" class="works-badge" style="display:none">0</span></button>
             <button id="tab-scribe">⌘ Scribe (raw)</button>
           </div>
           <div class="feed" id="feed-herald"></div>
+          <div class="feed" id="feed-works" style="display:none">
+            <p class="empty-note" id="works-empty">No stone has yet been laid. Changed files appear here.</p>
+            <div id="works-list"></div>
+            ${isHost ? '<button id="works-patch-btn" class="works-patch-btn">⎘ Unroll the scrolls (view full patch)</button>' : ""}
+          </div>
           <div class="feed" id="feed-scribe" style="display:none"></div>
         </div>
       </div>
@@ -86,13 +94,60 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
   const gameMount = el("game-mount");
   const statusChip = el("status-chip");
 
+  const worksFeed = el("feed-works");
   el("tab-herald").onclick = () => switchTab("herald");
+  el("tab-works").onclick = () => switchTab("works");
   el("tab-scribe").onclick = () => switchTab("scribe");
-  function switchTab(tab: "herald" | "scribe") {
+  function switchTab(tab: "herald" | "works" | "scribe") {
     heraldFeed.style.display = tab === "herald" ? "" : "none";
+    worksFeed.style.display = tab === "works" ? "" : "none";
     scribeFeed.style.display = tab === "scribe" ? "" : "none";
     el("tab-herald").classList.toggle("active", tab === "herald");
+    el("tab-works").classList.toggle("active", tab === "works");
     el("tab-scribe").classList.toggle("active", tab === "scribe");
+  }
+
+  // The page must never scroll under the match view; the feeds scroll instead.
+  window.scrollTo(0, 0);
+
+  // --- Works ledger: every changed file, live -------------------------------
+  type Work = { writes: number; added: number; removed: number; by: string; created: boolean };
+  const works = new Map<string, Work>();
+  function recordWork(e: Extract<GameEvent, { type: "file_write" }>) {
+    const w = works.get(e.path) ?? { writes: 0, added: 0, removed: 0, by: "", created: false };
+    w.writes++;
+    w.added += e.linesAdded;
+    w.removed += e.linesRemoved;
+    w.by = name(e.agentId);
+    w.created ||= e.created;
+    works.set(e.path, w);
+    el("works-empty").style.display = "none";
+    const badge = el("works-badge");
+    badge.style.display = "";
+    badge.textContent = String(works.size);
+    el("works-list").innerHTML = [...works.entries()]
+      .map(
+        ([path, w]) => `<div class="work-row">
+          <span class="mono">${escapeHtml(path)}</span>
+          <span class="work-stat">${w.created ? "✦ new · " : ""}${w.writes}×, <span class="add">+${w.added}</span>/<span class="del">−${w.removed}</span> — ${escapeHtml(w.by)}</span>
+        </div>`,
+      )
+      .join("");
+  }
+  if (isHost && opts.onViewPatch) {
+    el("works-patch-btn").onclick = async () => {
+      const modal = document.createElement("div");
+      modal.className = "patch-modal";
+      modal.innerHTML = `<div class="patch-modal-inner"><button class="patch-close">✕ seal</button><pre>consulting the scribes…</pre></div>`;
+      root.querySelector(".match-view")!.appendChild(modal);
+      modal.querySelector<HTMLButtonElement>(".patch-close")!.onclick = () => modal.remove();
+      try {
+        const patch = await opts.onViewPatch!();
+        modal.querySelector("pre")!.textContent = patch.trim() || "No changes yet — the land lies as it was found.";
+      } catch (err) {
+        modal.querySelector("pre")!.textContent = `The scrolls resist: ${String(err)}`;
+      }
+    };
   }
 
   // Command bar wiring (host only)
@@ -188,8 +243,13 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         const charge = e.charge ? ` — charged: “${escapeHtml(e.charge)}”` : "";
         return { cls: "system", html: `⧉ ${who(e.agentId)} enters the realm${charge}` };
       }
-      case "message":
-        return { cls: "herald-msg", html: `◈ ${escapeHtml(e.herald)}` };
+      case "message": {
+        const speaker = e.fromId === "crown" ? "The Crown" : name(e.fromId);
+        const flavor = e.herald && e.herald !== e.text ? `<em class="liturgy">${escapeHtml(e.herald)}</em><br/>` : "";
+        return { cls: "herald-msg", html: `◈ <span class="who">${escapeHtml(speaker)}</span>: ${flavor}${escapeHtml(e.text)}` };
+      }
+      case "log":
+        return e.level === "error" ? { cls: "battle", html: `⚠ ${escapeHtml(e.text.slice(0, 300))}` } : null;
       case "file_write": {
         const label = BUILDING_LABEL[e.buildingKind] ?? "a structure";
         const verb = e.created ? "raises" : "reinforces";
@@ -238,6 +298,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     onEvent(e, historical) {
       const entry = heraldFor(e);
       if (entry) addEntry(heraldFeed, entry.cls, entry.html);
+      if (e.type === "file_write") recordWork(e);
       if (e.type === "log") {
         addEntry(scribeFeed, `raw ${e.level === "error" ? "error" : ""}`, `${e.agentId ? `[${escapeHtml(name(e.agentId))}] ` : ""}${escapeHtml(e.text)}`);
       } else if (e.type !== "tokens" && e.type !== "context" && e.type !== "theme_ready") {

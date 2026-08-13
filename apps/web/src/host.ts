@@ -52,6 +52,11 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
         alert(`The decree could not be sealed: ${String(err)}`);
       }
     },
+    onViewPatch: async () => {
+      if (!settlement) return "";
+      const { patch } = await settlement.requestPatch();
+      return patch;
+    },
   });
   view.showOverlay("loading", "Raising the vessel — a sandbox wakes for this repository…");
   view.attachRenderer(attachGameRenderer(view.gameMount));
@@ -114,13 +119,23 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     // No cached theme: divine one in the background while the session runs.
     if (!cachedTheme && !abort.signal.aborted) {
       void generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary }).then(async (theme) => {
-        if (theme && !abort.signal.aborted) {
+        if (abort.signal.aborted) return;
+        if (theme) {
           settlement!.setTheme(theme);
           await fetch(`/api/theme/${repoKey(repoUrl)}`, {
             method: "PUT",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(theme),
           }).catch(() => {});
+        } else {
+          // Surface the failure instead of silently keeping the default skin.
+          onEvent({
+            seq: 0,
+            ts: Date.now(),
+            type: "log",
+            level: "error",
+            text: "The chroniclers' vision failed — this realm keeps the ashen guise. (Theme generation did not validate.)",
+          } as Parameters<typeof view.onEvent>[0]);
         }
       });
     }

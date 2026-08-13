@@ -160,6 +160,62 @@ input:focus, select:focus { outline: none; border-color: var(--gold); }
   grid-template-rows: auto 1fr;
   height: 100vh;
 }
+/* The page itself must never scroll during a match; only the feeds do. */
+body:has(.match-view) { overflow: hidden; min-height: 0; }
+
+.liturgy { color: var(--dim); font-size: 0.78rem; }
+
+.works-badge {
+  background: var(--gold);
+  color: #1a1208;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  padding: 0 0.35rem;
+  margin-left: 0.25rem;
+}
+.work-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.2rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+.work-row .work-stat { color: var(--dim); font-size: 0.72rem; }
+.work-row .add { color: #7dc27d; }
+.work-row .del { color: #c96f5a; }
+.works-patch-btn { margin-top: 0.8rem; width: 100%; font-size: 0.78rem; }
+
+.patch-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  background: rgba(8, 5, 2, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem;
+}
+.patch-modal-inner {
+  background: var(--panel);
+  border: 2px solid var(--border);
+  max-width: 900px;
+  width: 100%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem;
+}
+.patch-modal-inner pre {
+  overflow: auto;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  color: var(--parchment);
+  margin-top: 0.6rem;
+}
+.patch-close { align-self: flex-end; font-size: 0.75rem; }
 
 .topbar {
   display: flex;
