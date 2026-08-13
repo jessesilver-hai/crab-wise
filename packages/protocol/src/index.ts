@@ -215,6 +215,44 @@ export const FileNode: z.ZodType<FileNode> = z.lazy(() =>
 // Events are sanitized by construction: no API keys, no raw prompts.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// District patches — the Worldsmith deepens revealed regions incrementally.
+// Same regime as WorldSpec: bounded, validated, discardable without harm.
+// ---------------------------------------------------------------------------
+
+export const DistrictLandmark = z.object({
+  name: z.string().max(48),
+  /** Clickable in-world lore for this landmark. */
+  lore: z.string().max(240),
+  silhouette: z.array(Primitive).min(1).max(6),
+  glow: z.object({ color: Hex, pulseSec: z.number().min(2).max(20) }).optional(),
+});
+export type DistrictLandmark = z.infer<typeof DistrictLandmark>;
+
+/** A discoverable planted from real repo content (TODO/FIXME etc.). */
+export const QuestHook = z.object({
+  label: z.string().max(80),
+  path: z.string().max(200),
+  line: z.number().int().positive().optional(),
+  /** The actual source line that spawned this hook. */
+  snippet: z.string().max(200),
+});
+export type QuestHook = z.infer<typeof QuestHook>;
+
+export const DistrictPatch = z.object({
+  version: z.literal(1),
+  /** Repo-relative directory this patch reskins, "" = repo root. */
+  district: z.string().max(200),
+  name: z.string().max(48),
+  epithet: z.string().max(160),
+  groundTint: Hex,
+  accent: Hex.optional(),
+  props: z.array(WorldProp).max(4).optional(),
+  landmarks: z.array(DistrictLandmark).max(2).optional(),
+  questHooks: z.array(QuestHook).max(4).optional(),
+});
+export type DistrictPatch = z.infer<typeof DistrictPatch>;
+
 const base = {
   seq: z.number().int().nonnegative(),
   ts: z.number(), // epoch ms
@@ -276,6 +314,8 @@ export const AgentStatusEvent = z.object({
   type: z.literal("agent_status"),
   agentId: z.string(),
   status: AgentStatus,
+  /** Live progress line, e.g. "reads src/parser.js" — transient in the UI. */
+  detail: z.string().max(160).optional(),
 });
 
 /** Agent's attention moved to a path; renderer walks the unit there. */
@@ -364,6 +404,39 @@ export const MessageEvent = z.object({
   herald: z.string(),
 });
 
+/** An agent inscribed a presentable artifact (report, chart, chronicle). */
+export const ScrollFormat = z.enum(["markdown", "svg"]);
+export type ScrollFormat = z.infer<typeof ScrollFormat>;
+
+export const ScrollEvent = z.object({
+  ...base,
+  type: z.literal("scroll"),
+  scrollId: z.string(),
+  authorId: z.string(),
+  authorName: z.string().max(60),
+  title: z.string().max(80),
+  format: ScrollFormat,
+  /** Untrusted agent output; the web client sanitizes before rendering. */
+  content: z.string().max(24000),
+});
+
+/** Direct conversation between the Crown and one agent. */
+export const DialogueEvent = z.object({
+  ...base,
+  type: z.literal("dialogue"),
+  agentId: z.string(),
+  agentName: z.string().max(60),
+  from: z.enum(["crown", "agent"]),
+  text: z.string().max(2000),
+});
+
+/** The Worldsmith resolved a revealed district into itself. */
+export const ThemePatchEvent = z.object({
+  ...base,
+  type: z.literal("theme_patch"),
+  patch: DistrictPatch,
+});
+
 export const TokensEvent = z.object({
   ...base,
   type: z.literal("tokens"),
@@ -432,6 +505,9 @@ export const GameEvent = z.discriminatedUnion("type", [
   CommandRunEvent,
   CommandResultEvent,
   MessageEvent,
+  ScrollEvent,
+  DialogueEvent,
+  ThemePatchEvent,
   TokensEvent,
   ContextEvent,
   CompactionEvent,
