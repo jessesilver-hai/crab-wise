@@ -1,6 +1,6 @@
 # Agent Empires — public relay + frontend.
 # The sandbox app (per-session machines) is separate; see infra/README notes.
-app = "agent-empires"
+app = "crab-wise"
 primary_region = "iad"
 
 [build]

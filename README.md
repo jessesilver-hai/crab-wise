@@ -76,16 +76,16 @@ Two apps: the always-on relay and a sandbox app whose machines are created
 per-session via the Machines API.
 
 ```bash
-fly apps create agent-empires
-fly apps create agent-empires-sandbox
+fly apps create crab-wise
+fly apps create crab-wise-sandbox
 fly deploy --config fly.toml                     # relay + frontend
-fly deploy --app agent-empires-sandbox \
+fly deploy --app crab-wise-sandbox \
   --dockerfile infra/sandbox.Dockerfile --build-only --push \
   --image-label sandbox                          # push sandbox image
-fly secrets set --app agent-empires \
-  FLY_API_TOKEN=<deploy token for agent-empires-sandbox> \
-  SANDBOX_APP=agent-empires-sandbox \
-  SANDBOX_IMAGE=registry.fly.io/agent-empires-sandbox:sandbox
+fly secrets set --app crab-wise \
+  FLY_API_TOKEN=<deploy token for crab-wise-sandbox> \
+  SANDBOX_APP=crab-wise-sandbox \
+  SANDBOX_IMAGE=registry.fly.io/crab-wise-sandbox:sandbox
 ```
 
 Abuse controls are deliberately blunt: hard session TTL (30 min), small
