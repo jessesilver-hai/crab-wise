@@ -1,17 +1,19 @@
-@import url("https://fonts.googleapis.com/css2?family=Pirata+One&family=IBM+Plex+Mono:wght@400;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&family=Spectral:ital,wght@0,300;0,400;1,300&family=IBM+Plex+Mono:wght@400;600&display=swap");
 
+/* Ancient-future: Eggers ritual dread × Villeneuve monumental sci-fi.
+   Ash, bone, ochre; one dim amber glow; vast dark negative space. */
 :root {
-  --bg: #14100b;
-  --panel: #241c12;
-  --panel-2: #2e2417;
-  --border: #5a4527;
-  --gold: #d4a843;
-  --gold-bright: #f0c96a;
-  --parchment: #e8d9b0;
-  --dim: #9c8a63;
-  --red: #c0483c;
-  --green: #6f9e4c;
-  --blue: #4c7e9e;
+  --bg: #0a0908;
+  --panel: #14110d;
+  --panel-2: #1c1712;
+  --border: #3d3426;
+  --gold: #c98f4a;
+  --gold-bright: #e3b264;
+  --parchment: #d8d0bf;
+  --dim: #8a7f6a;
+  --red: #a53c31;
+  --green: #7a9e5c;
+  --blue: #7da2a8;
   font-size: 15px;
 }
 
@@ -19,32 +21,34 @@
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: radial-gradient(ellipse at 50% -20%, #171310 0%, var(--bg) 60%);
   color: var(--parchment);
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: "Spectral", Georgia, serif;
+  font-weight: 300;
   min-height: 100vh;
 }
 
 h1, h2, h3, .title-font {
-  font-family: "Pirata One", Georgia, serif;
+  font-family: "Cinzel", Georgia, serif;
   font-weight: 400;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.14em;
   color: var(--gold-bright);
   margin: 0;
+  text-transform: uppercase;
 }
 
 button {
-  font-family: "Pirata One", Georgia, serif;
-  font-size: 1.1rem;
-  background: linear-gradient(#6b5430, #4a3820);
+  font-family: "Cinzel", Georgia, serif;
+  font-size: 0.95rem;
+  letter-spacing: 0.1em;
+  background: linear-gradient(#2a2318, #1c1712);
   color: var(--parchment);
-  border: 2px solid var(--border);
-  border-radius: 4px;
-  padding: 0.5rem 1.4rem;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.55rem 1.4rem;
   cursor: pointer;
-  letter-spacing: 0.05em;
 }
-button:hover { background: linear-gradient(#7d6238, #574326); border-color: var(--gold); }
+button:hover { background: linear-gradient(#372e1e, #241d15); border-color: var(--gold); box-shadow: 0 0 14px rgba(201,143,74,0.15); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 input, select {
@@ -74,8 +78,9 @@ input:focus, select:focus { outline: none; border-color: var(--gold); }
   padding: 2.5rem 0 1.5rem;
 }
 .hero h1 {
-  font-size: 4rem;
-  text-shadow: 0 3px 0 #000, 0 0 30px rgba(212, 168, 67, 0.25);
+  font-size: 3.4rem;
+  letter-spacing: 0.32em;
+  text-shadow: 0 0 40px rgba(201, 143, 74, 0.3);
 }
 .hero .tagline {
   color: var(--dim);
@@ -116,7 +121,8 @@ input:focus, select:focus { outline: none; border-color: var(--gold); }
 }
 .task-card:hover { border-color: var(--gold); }
 .task-card.selected { border-color: var(--gold-bright); box-shadow: 0 0 12px rgba(212,168,67,0.2); }
-.task-card .t-title { font-family: "Pirata One", Georgia, serif; font-size: 1.25rem; color: var(--gold); }
+.task-card .t-title { font-family: "Cinzel", Georgia, serif; font-size: 1.05rem; letter-spacing: 0.08em; color: var(--gold); }
+.sample-label { text-align: center; color: var(--dim); font-style: italic; font-size: 0.8rem; margin: 0.9rem 0 0.6rem; letter-spacing: 0.08em; }
 .task-card .t-flavor { color: var(--dim); font-style: italic; font-size: 0.85rem; margin-top: 0.2rem; }
 
 .form-row { margin: 0.9rem 0; }
@@ -163,7 +169,21 @@ input:focus, select:focus { outline: none; border-color: var(--gold); }
   border-bottom: 2px solid var(--border);
   padding: 0.4rem 1rem;
 }
-.topbar .home-link { color: var(--gold); text-decoration: none; font-family: "Pirata One", Georgia, serif; font-size: 1.3rem; }
+.topbar .home-link { color: var(--gold); text-decoration: none; font-family: "Cinzel", Georgia, serif; font-size: 1rem; letter-spacing: 0.1em; }
+.status-chip {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.15rem 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.status-chip[data-phase="working"] { color: var(--gold-bright); border-color: var(--gold); animation: pulse 2.2s infinite; }
+.status-chip[data-phase="idle"] { color: var(--blue); }
+.status-chip:empty { display: none; }
+.patch-btn { font-size: 0.78rem; padding: 0.3rem 0.8rem; }
 .topbar .match-title { font-size: 1.1rem; color: var(--parchment); }
 .topbar .match-id { font-family: "IBM Plex Mono", monospace; font-size: 0.75rem; color: var(--dim); }
 
@@ -217,8 +237,24 @@ input:focus, select:focus { outline: none; border-color: var(--gold); }
 .feed .entry.system { color: var(--dim); font-style: italic; }
 .feed .entry.battle { color: var(--red); }
 .feed .entry.triumph { color: var(--green); }
-.feed .entry.raw { font-family: "IBM Plex Mono", monospace; font-size: 0.75rem; color: #b0a486; }
+.feed .entry.raw { font-family: "IBM Plex Mono", monospace; font-size: 0.75rem; color: #9a9080; }
 .feed .entry.raw.error { color: var(--red); }
+.feed .entry.decree { color: var(--gold-bright); border-left: 2px solid var(--gold); padding-left: 0.5rem; }
+
+/* ---------- Command bar ---------- */
+
+.command-bar {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  background: linear-gradient(transparent, rgba(10, 9, 8, 0.92) 30%);
+  z-index: 5;
+}
+.command-bar select { width: 200px; flex: none; }
+.command-bar input { flex: 1; background: rgba(20, 17, 13, 0.9); }
+.command-bar button { flex: none; }
 
 /* ---------- Overlays ---------- */
 

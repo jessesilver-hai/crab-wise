@@ -1,8 +1,8 @@
 import { Application, Container, Sprite, Text } from "pixi.js";
-import type { GameEvent } from "@agent-empires/protocol";
+import type { GameEvent, ThemePack } from "@agent-empires/protocol";
 import type { Renderer } from "../match-view.js";
 import { assignPlot, isoX, isoY, layoutMap, MapLayout, TILE_H } from "./map.js";
-import { buildTextures, TextureSet } from "./textures.js";
+import { applyTheme, buildTextures, TextureSet } from "./textures.js";
 import { Unit, Floater, makeFloater } from "./units.js";
 
 const FOG_REVEAL_RADIUS = 2;
@@ -48,9 +48,12 @@ class Game {
   private textures!: TextureSet;
   private map: MapLayout | null = null;
   private units = new Map<string, Unit>();
+  private unitRoles = new Map<string, "orchestrator" | "worker">();
   private buildings = new Map<string, Building>();
   private raiders = new Map<string, Unit>();
   private fogTiles = new Map<string, Sprite>();
+  private groundTiles: Sprite[] = [];
+  private treeSprites: Sprite[] = [];
   private floaters: Floater[] = [];
   private constructing: { building: Building; done: number }[] = [];
   private tokenThrottle = new Map<string, number>();
@@ -128,12 +131,13 @@ class Game {
 
     for (let ty = 0; ty < map.side; ty++) {
       for (let tx = 0; tx < map.side; tx++) {
-        const tile = new Sprite(map.rng() < 0.97 ? this.textures.grass[Math.floor(map.rng() * 4)]! : this.textures.grass[0]!);
+        const tile = new Sprite(this.textures.grass[Math.floor(map.rng() * this.textures.grass.length)]!);
         tile.anchor.set(0.5);
         tile.position.set(isoX(tx, ty), isoY(tx, ty));
         this.ground.addChild(tile);
+        this.groundTiles.push(tile);
 
-        // trees on unused tiles
+        // relic monoliths on unused tiles
         if (!map.used.has(`${tx},${ty}`) && map.rng() < 0.055) {
           map.used.add(`${tx},${ty}`);
           const tree = new Sprite(this.textures.tree);
@@ -141,6 +145,7 @@ class Game {
           tree.position.set(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4);
           tree.zIndex = tree.y;
           this.objects.addChild(tree);
+          this.treeSprites.push(tree);
         }
 
         const fog = new Sprite(this.textures.fog);
@@ -157,7 +162,7 @@ class Game {
       if ((region.rect.w * region.rect.h) < 6) continue;
       const label = new Text({
         text: region.label,
-        style: { fontFamily: "Pirata One, Georgia, serif", fontSize: 15, fill: 0xd4a843 },
+        style: { fontFamily: "Cinzel, Georgia, serif", fontSize: 13, fill: 0xc98f4a, letterSpacing: 2 },
       });
       label.alpha = 0.75;
       label.anchor.set(0.5);
@@ -259,6 +264,10 @@ class Game {
       this.buildWorld(e);
       return;
     }
+    if (e.type === "theme_ready") {
+      this.reskin(e.theme);
+      return;
+    }
     if (!this.map) return;
 
     switch (e.type) {
@@ -274,6 +283,7 @@ class Game {
         );
         this.objects.addChild(unit.root);
         this.units.set(e.agentId, unit);
+        this.unitRoles.set(e.agentId, e.role);
         if (!historical && e.charge) unit.say(e.charge);
         break;
       }
@@ -386,6 +396,33 @@ class Game {
       this.raiders.set(key, raider);
       if (!historical) this.float("⚔", anchor.x, anchor.y, 0xc0483c);
     }
+  }
+
+  /** A ThemePack arrived: re-skin the living world in place. */
+  private reskin(theme: ThemePack): void {
+    this.textures = applyTheme(this.app.renderer, this.textures, theme);
+    for (const tile of this.groundTiles) {
+      if (!tile.destroyed) {
+        tile.texture = this.textures.grass[Math.floor(Math.random() * this.textures.grass.length)]!;
+      }
+    }
+    for (const [, fog] of this.fogTiles) {
+      if (!fog.destroyed) fog.texture = this.textures.fog;
+    }
+    for (const tree of this.treeSprites) {
+      if (!tree.destroyed) tree.texture = this.textures.tree;
+    }
+    for (const [path, building] of this.buildings) {
+      const texSet = this.textures.buildings[building.kind] ?? this.textures.buildings.house!;
+      const constructing = this.constructing.some((c) => c.building === building);
+      if (!building.sprite.destroyed) {
+        building.sprite.texture = constructing ? texSet.scaffold : texSet.built;
+      }
+    }
+    for (const [agentId, unit] of this.units) {
+      unit.setTexture(this.unitRoles.get(agentId) === "orchestrator" ? this.textures.king : this.textures.villager);
+    }
+    for (const [, raider] of this.raiders) raider.setTexture(this.textures.raider);
   }
 
   private raiseWonder(historical: boolean): void {

@@ -55,12 +55,12 @@ export async function startDemoMatch(root: HTMLElement): Promise<void> {
   });
 
   const KING = "king";
-  const W1 = "worker-0-aldric";
-  const W2 = "worker-1-berta";
+  const W1 = "worker-0-ashka";
+  const W2 = "worker-1-veyra";
   const names: Record<string, string> = {
-    [KING]: "King Refactor III",
-    [W1]: "Aldric the Builder",
-    [W2]: "Berta the Swift",
+    [KING]: "The Hierophant",
+    [W1]: "Ashka the Unsleeping",
+    [W2]: "Veyra Signal-Bearer",
   };
   let gold = 0;
   const spend = (agentId: string, inTok: number, outTok: number) => {
@@ -86,7 +86,7 @@ export async function startDemoMatch(root: HTMLElement): Promise<void> {
           id: "demo",
           title: "Demo Skirmish: The Broken Parser",
           description: "A scripted demonstration match. No LLM tokens were spent.",
-          flavor: "Four raiders haunt the parser fields. Watch a scripted fellowship drive them out — then bring your own key and command a real one.",
+          flavor: "Four specters haunt the parser fields. Watch a scripted order drive them out — then bring your own key and rule a living settlement.",
         },
         mapSeed: 20260813,
         repoTree: DEMO_TREE,
@@ -102,7 +102,7 @@ export async function startDemoMatch(root: HTMLElement): Promise<void> {
       emitter.emit("file_read", { agentId: KING, path: "tests/parser.test.js", lines: 120 });
       spend(KING, 1400, 90);
     },
-    () => say(KING, "Four tests fail in the parser fields. Aldric takes the tokenizer, Berta the parser."),
+    () => say(KING, "Four tests fail in the parser fields. Ashka takes the tokenizer, Veyra the parser."),
     () => {
       emitter.emit("agent_spawned", { agentId: W1, role: "worker", name: names[W1]!, model: "scripted-demo", charge: "Fix the tokenizer: digit boundary bug" });
       emitter.emit("log", { agentId: W1, level: "info", text: heraldCharge(names[W1]!, "Fix the tokenizer digit bug") });
@@ -179,7 +179,7 @@ export async function startDemoMatch(root: HTMLElement): Promise<void> {
       emitter.emit("agent_done", { agentId: W1, summary: "Tokenizer and evaluator mended; all tests green." });
       emitter.emit("agent_done", { agentId: W2, summary: "Parser precedence and unary minus restored." });
     },
-    () => say(KING, "The fields are quiet. Raise the Wonder!"),
+    () => say(KING, "The fields are quiet. Light the Beacon."),
     () =>
       emitter.emit("match_ended", {
         result: "victory",

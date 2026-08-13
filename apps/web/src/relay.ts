@@ -16,21 +16,45 @@ export async function fetchMatches(): Promise<{ live: MatchSummary[]; finished: 
   return res.json();
 }
 
-/** Host side: opens the relay socket, returns the assigned match id and a publish fn. */
+/**
+ * Host side: opens the relay socket, returns the assigned match id, a publish
+ * fn, and (when repoUrl was given) a promise for the sandbox host token.
+ */
 export function hostMatch(
   taskId: string,
   taskTitle: string,
-): Promise<{ matchId: string; publish: (e: GameEvent) => void; end: () => void }> {
+  repoUrl?: string,
+): Promise<{
+  matchId: string;
+  publish: (e: GameEvent) => void;
+  end: () => void;
+  sandbox: Promise<string>;
+}> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl());
     const send = (msg: HostMessage) => ws.send(JSON.stringify(msg));
     const pending: GameEvent[] = [];
     let hosted = false;
+    let sandboxResolve: (token: string) => void = () => {};
+    let sandboxReject: (err: Error) => void = () => {};
+    const sandbox = new Promise<string>((res, rej) => {
+      sandboxResolve = res;
+      sandboxReject = rej;
+    });
+    sandbox.catch(() => {}); // demo sessions never await this
 
-    ws.onopen = () => send({ type: "host", protocolVersion: PROTOCOL_VERSION, taskId, taskTitle });
+    ws.onopen = () => send({ type: "host", protocolVersion: PROTOCOL_VERSION, taskId, taskTitle, repoUrl });
     ws.onerror = () => reject(new Error("relay connection failed"));
     ws.onmessage = (raw) => {
       const msg = RelayMessage.parse(JSON.parse(raw.data));
+      if (msg.type === "sandbox_ready") {
+        sandboxResolve(msg.token);
+        return;
+      }
+      if (msg.type === "sandbox_error") {
+        sandboxReject(new Error(msg.message));
+        return;
+      }
       if (msg.type === "hosted") {
         hosted = true;
         for (const e of pending) send({ type: "publish", event: e });
@@ -48,6 +72,7 @@ export function hostMatch(
             if (ws.readyState === WebSocket.OPEN) send({ type: "end" });
             ws.close();
           },
+          sandbox,
         });
       } else if (msg.type === "error") {
         reject(new Error(msg.message));

@@ -1,60 +1,121 @@
-import { runMatch, type TaskDefinition } from "@agent-empires/runtime";
+import { Settlement, SandboxExecutor } from "@agent-empires/runtime";
+import type { ThemePack } from "@agent-empires/protocol";
 import { hostMatch } from "./relay.js";
 import { createMatchView } from "./match-view.js";
 import { attachGameRenderer } from "./game/renderer.js";
+import { getCachedTheme, generateTheme, repoKey } from "./themer.js";
 
-export async function startHostedMatch(
-  root: HTMLElement,
-  opts: { task: TaskDefinition; apiKey: string; model: string },
-): Promise<void> {
-  const { task, apiKey, model } = opts;
+export type SettlementStart = {
+  repoUrl: string;
+  repoLabel: string;
+  apiKey: string;
+  model: string;
+  /** Auto-issued as the Crown's first decree (sample worlds use this). */
+  firstOrder?: string;
+};
 
-  const { matchId, publish, end } = await hostMatch(task.id, task.title);
-  // Update the URL without triggering the hash router (replaceState fires no hashchange).
+export async function startSettlement(root: HTMLElement, opts: SettlementStart): Promise<void> {
+  const { repoUrl, repoLabel, apiKey, model } = opts;
+
+  const { matchId, publish, end, sandbox } = await hostMatch(repoUrl, repoLabel, repoUrl);
   history.replaceState(null, "", `#/match/${matchId}`);
 
   root.innerHTML = "";
-  const view = createMatchView(root, { matchId, title: task.title, role: "host" });
-  view.showOverlay("loading", "Booting the sandbox and rallying villagers…");
+  let settlement: Settlement | null = null;
+
+  const view = createMatchView(root, {
+    matchId,
+    title: repoLabel,
+    role: "host",
+    onSpeak: (text, toName) => settlement?.speak(text, toName),
+    onPatch: async () => {
+      if (!settlement) return;
+      try {
+        const { patch, stat } = await settlement.requestPatch();
+        if (!patch.trim()) {
+          alert("The scribes report no changes yet — nothing to decree.");
+          return;
+        }
+        const blob = new Blob([patch], { type: "text/x-patch" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${repoLabel.replace(/[^\w.-]+/g, "-")}.patch`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        console.log("patch stat:\n" + stat);
+      } catch (err) {
+        alert(`The decree could not be sealed: ${String(err)}`);
+      }
+    },
+  });
+  view.showOverlay("loading", "Raising the vessel — a sandbox wakes for this repository…");
   view.attachRenderer(attachGameRenderer(view.gameMount));
 
   const abort = new AbortController();
-  const warnUnload = (e: BeforeUnloadEvent) => {
-    e.preventDefault();
-  };
+  const warnUnload = (e: BeforeUnloadEvent) => e.preventDefault();
   window.addEventListener("beforeunload", warnUnload);
   window.addEventListener(
     "hashchange",
     () => {
       abort.abort();
+      settlement?.end();
       end();
       window.removeEventListener("beforeunload", warnUnload);
     },
     { once: true },
   );
 
-  let firstEvent = true;
+  let hostToken: string;
   try {
-    await runMatch({
-      apiKey,
-      model,
-      task,
-      signal: abort.signal,
-      onEvent: (event) => {
-        if (firstEvent) {
-          view.hideOverlay();
-          firstEvent = false;
+    hostToken = await sandbox;
+  } catch (err) {
+    view.showOverlay("abandoned", `No vessel could be raised: ${String((err as Error).message ?? err)}`);
+    end();
+    return;
+  }
+
+  const executor = new SandboxExecutor(matchId, hostToken);
+  const cachedTheme: ThemePack | null = await getCachedTheme(repoKey(repoUrl));
+
+  const onEvent = (event: Parameters<typeof view.onEvent>[0]) => {
+    publish(event);
+    view.onEvent(event, false);
+  };
+
+  settlement = new Settlement({
+    apiKey,
+    model,
+    repoUrl,
+    repoLabel,
+    executor,
+    theme: cachedTheme,
+    signal: abort.signal,
+    onEvent,
+  });
+
+  view.setStatusLine("Unearthing the record — cloning the repository…");
+  try {
+    const { readme, treeSummary } = await settlement.start();
+    view.hideOverlay();
+    if (opts.firstOrder && !abort.signal.aborted) settlement.speak(opts.firstOrder);
+
+    // No cached theme: divine one in the background while the session runs.
+    if (!cachedTheme && !abort.signal.aborted) {
+      void generateTheme({ apiKey, model, repoLabel, readme, treeSummary }).then(async (theme) => {
+        if (theme && !abort.signal.aborted) {
+          settlement!.setTheme(theme);
+          await fetch(`/api/theme/${repoKey(repoUrl)}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(theme),
+          }).catch(() => {});
         }
-        publish(event);
-        view.onEvent(event, false);
-      },
-    });
+      });
+    }
   } catch (err) {
     if (!abort.signal.aborted) {
-      view.showOverlay("abandoned", `The match ended early: ${String(err)}`);
+      view.showOverlay("abandoned", `The founding failed: ${String((err as Error).message ?? err)}`);
       end();
     }
-  } finally {
-    window.removeEventListener("beforeunload", warnUnload);
   }
 }

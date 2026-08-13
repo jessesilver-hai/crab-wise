@@ -1,6 +1,7 @@
 import { TASKS } from "@agent-empires/tasks";
 import { fetchMatches } from "./relay.js";
-import { startHostedMatch } from "./host.js";
+import { startSettlement } from "./host.js";
+import { startDemoMatch } from "./demo.js";
 import { escapeHtml } from "./match-view.js";
 import type { MatchSummary } from "@agent-empires/protocol";
 
@@ -11,93 +12,126 @@ export function renderLobby(root: HTMLElement): void {
   root.innerHTML = `
     <div class="lobby">
       <div class="hero">
-        <h1>Agent Empires</h1>
-        <p class="tagline">Wherein AI agents labor upon real code, and the chronicle is told as a battle for the realm.</p>
+        <h1>AGENT EMPIRES</h1>
+        <p class="tagline">Point it at a repository. A civilization wakes upon the code —
+        agents labor, specters rise from failing tests, and you rule it all by decree.</p>
         <div class="rule"></div>
       </div>
       <div class="lobby-grid">
         <div class="panel">
-          <h2>Start a Match</h2>
-          <div id="task-list"></div>
+          <h2>Found a Settlement</h2>
+          <div class="form-row">
+            <label>Repository (public git URL)</label>
+            <input id="repo-url" type="text" placeholder="https://github.com/you/your-repo" />
+          </div>
+          <div class="sample-label">— or wake one of the old worlds —</div>
+          <div id="sample-list"></div>
           <div class="form-row">
             <label>Anthropic API key</label>
             <input id="api-key" type="password" placeholder="sk-ant-…" value="${escapeHtml(savedKey)}" />
             <div class="key-note">
-              <strong>Your key never leaves your browser.</strong> Agents call Anthropic directly from
-              this page and run code in an in-browser sandbox (WebContainers). The server only ever
-              receives game events. <label style="display:inline"><input id="remember-key" type="checkbox" style="width:auto" ${savedKey ? "checked" : ""}/> remember key in this browser</label>
+              <strong>Your key never leaves your browser.</strong> Agents call Anthropic directly
+              from this page; only tool calls (file edits, commands) travel to the sandbox. The
+              server never sees the key. <label style="display:inline"><input id="remember-key" type="checkbox" style="width:auto" ${savedKey ? "checked" : ""}/> remember key in this browser</label>
             </div>
           </div>
           <div class="form-row">
             <label>Model</label>
             <select id="model">
               <option value="claude-sonnet-4-5">Claude Sonnet 4.5 (recommended)</option>
-              <option value="claude-haiku-4-5">Claude Haiku 4.5 (cheaper, scrappier villagers)</option>
+              <option value="claude-haiku-4-5">Claude Haiku 4.5 (cheaper, scrappier workers)</option>
             </select>
           </div>
-          <button id="start-btn">⚔ Sound the Horns</button>
-          <button id="demo-btn" style="margin-left:0.6rem">👁 Watch a Demo Skirmish (no key)</button>
+          <button id="start-btn">⟡ Light the Beacon</button>
+          <button id="demo-btn" style="margin-left:0.6rem">◉ Watch a Demo (no key)</button>
           <div class="error-note" id="start-error"></div>
         </div>
         <div class="panel">
-          <h2>Live Matches</h2>
+          <h2>Living Settlements</h2>
           <div id="live-list"><p class="empty-note">Consulting the watchtower…</p></div>
-          <h2 style="margin-top:1.5rem">Chronicles</h2>
-          <div id="finished-list"><p class="empty-note">No matches recorded yet.</p></div>
+          <h2 style="margin-top:1.5rem">The Chronicle</h2>
+          <div id="finished-list"><p class="empty-note">No records yet.</p></div>
         </div>
       </div>
       <p class="footer-note">
-        A fun experiment: real software-engineering agents, rendered as a real-time-strategy chronicle.<br/>
-        Open source · no AoE assets were harmed · your API key stays client-side.
+        Real software-engineering agents, rendered as an ancient-future strategy chronicle.<br/>
+        Sessions run in isolated sandboxes · themes are divined per repository · your key stays client-side.
       </p>
     </div>`;
 
-  // Task cards
-  const taskList = root.querySelector<HTMLElement>("#task-list")!;
-  let selectedTask = TASKS[0]?.id ?? "";
-  function renderTasks() {
-    taskList.innerHTML = TASKS.map(
+  // Sample world cards
+  const sampleList = root.querySelector<HTMLElement>("#sample-list")!;
+  let selectedSample: string | null = null;
+  const repoInput = root.querySelector<HTMLInputElement>("#repo-url")!;
+  function renderSamples() {
+    sampleList.innerHTML = TASKS.map(
       (t) => `
-      <div class="task-card ${t.id === selectedTask ? "selected" : ""}" data-id="${t.id}">
+      <div class="task-card ${t.id === selectedSample ? "selected" : ""}" data-id="${t.id}">
         <div class="t-title">${escapeHtml(t.title)}</div>
         <div class="t-flavor">${escapeHtml(t.flavor)}</div>
       </div>`,
     ).join("");
-    for (const card of taskList.querySelectorAll<HTMLElement>(".task-card")) {
+    for (const card of sampleList.querySelectorAll<HTMLElement>(".task-card")) {
       card.onclick = () => {
-        selectedTask = card.dataset.id!;
-        renderTasks();
+        selectedSample = card.dataset.id === selectedSample ? null : card.dataset.id!;
+        if (selectedSample) repoInput.value = "";
+        renderSamples();
       };
     }
   }
-  renderTasks();
+  renderSamples();
+  repoInput.addEventListener("input", () => {
+    if (repoInput.value.trim() && selectedSample) {
+      selectedSample = null;
+      renderSamples();
+    }
+  });
 
-  // Start button
   const startBtn = root.querySelector<HTMLButtonElement>("#start-btn")!;
   const errorNote = root.querySelector<HTMLElement>("#start-error")!;
   startBtn.onclick = () => {
     const key = root.querySelector<HTMLInputElement>("#api-key")!.value.trim();
     const model = root.querySelector<HTMLSelectElement>("#model")!.value;
     const remember = root.querySelector<HTMLInputElement>("#remember-key")!.checked;
-    const task = TASKS.find((t) => t.id === selectedTask);
+    const typedUrl = repoInput.value.trim();
+    const sample = TASKS.find((t) => t.id === selectedSample);
+
     if (!key.startsWith("sk-ant-")) {
       errorNote.textContent = "That does not look like an Anthropic API key (sk-ant-…).";
       return;
     }
-    if (!task) {
-      errorNote.textContent = "Choose a campaign first.";
+    let repoUrl: string;
+    let repoLabel: string;
+    let firstOrder: string | undefined;
+    if (sample) {
+      repoUrl = `sample:${sample.id}`;
+      repoLabel = sample.title;
+      firstOrder = sample.description;
+    } else if (/^https:\/\/[\w.-]+\/[\w.~/-]+$/.test(typedUrl)) {
+      repoUrl = typedUrl.replace(/\.git$/, "");
+      repoLabel = repoUrl.split("/").slice(-2).join("/");
+    } else {
+      errorNote.textContent = "Enter a public https git URL, or choose an old world below.";
       return;
     }
     if (remember) localStorage.setItem(KEY_STORAGE, key);
     else localStorage.removeItem(KEY_STORAGE);
+
     startBtn.disabled = true;
-    startHostedMatch(document.getElementById("app")!, { task, apiKey: key, model }).catch((err) => {
+    startSettlement(document.getElementById("app")!, { repoUrl, repoLabel, apiKey: key, model, firstOrder }).catch(
+      (err) => {
+        errorNote.textContent = String(err);
+        startBtn.disabled = false;
+      },
+    );
+  };
+
+  root.querySelector<HTMLButtonElement>("#demo-btn")!.onclick = () => {
+    startDemoMatch(document.getElementById("app")!).catch((err) => {
       errorNote.textContent = String(err);
-      startBtn.disabled = false;
     });
   };
 
-  // Match lists
   refreshMatches(root);
   const interval = setInterval(() => {
     if (!document.body.contains(root)) return clearInterval(interval);
@@ -113,10 +147,10 @@ async function refreshMatches(root: HTMLElement) {
     if (!liveList || !finishedList) return;
     liveList.innerHTML = live.length
       ? live.map((m) => matchRow(m)).join("")
-      : '<p class="empty-note">The realm is quiet. Start a match!</p>';
+      : '<p class="empty-note">The ash is quiet. Found a settlement.</p>';
     finishedList.innerHTML = finished.length
       ? finished.map((m) => matchRow(m)).join("")
-      : '<p class="empty-note">No matches recorded yet.</p>';
+      : '<p class="empty-note">No records yet.</p>';
     for (const row of root.querySelectorAll<HTMLElement>(".match-row")) {
       row.onclick = () => (location.hash = `#/match/${row.dataset.id}`);
     }

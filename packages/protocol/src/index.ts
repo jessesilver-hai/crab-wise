@@ -36,6 +36,49 @@ export const MatchResult = z.enum(["victory", "defeat", "abandoned"]);
 export type MatchResult = z.infer<typeof MatchResult>;
 
 // ---------------------------------------------------------------------------
+// Theme pack — LLM-generated per-repo world skin
+// ---------------------------------------------------------------------------
+
+/**
+ * A pixel sprite drawn by the LLM: rows of characters indexing into the
+ * palette; "." is transparent. Rendered client-side into textures.
+ */
+export const PixelSprite = z.object({
+  /** e.g. "villager", "hero", "raider", "tree", "tile", "house", "barracks", … */
+  key: z.string(),
+  rows: z.array(z.string().max(40)).min(4).max(40),
+  palette: z.record(z.string().length(1), z.string().regex(/^#[0-9a-fA-F]{6}$/)),
+});
+export type PixelSprite = z.infer<typeof PixelSprite>;
+
+export const ThemePack = z.object({
+  factionName: z.string().max(60),
+  tagline: z.string().max(160),
+  kingName: z.string().max(48),
+  /** What failing tests / broken builds are called, e.g. "gremlins". */
+  enemyName: z.string().max(32),
+  biome: z.object({
+    grassColors: z.array(z.string().regex(/^#[0-9a-fA-F]{6}$/)).min(2).max(6),
+    fogColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  }),
+  heraldOpeners: z.array(z.string().max(60)).min(2).max(8),
+  heraldClosers: z.array(z.string().max(60)).min(2).max(8),
+  personas: z
+    .array(
+      z.object({
+        name: z.string().max(40),
+        title: z.string().max(48),
+        quirk: z.string().max(120),
+      }),
+    )
+    .min(3)
+    .max(8),
+  sprites: z.array(PixelSprite).max(14),
+});
+export type ThemePack = z.infer<typeof ThemePack>;
+
+// ---------------------------------------------------------------------------
 // Repo tree (drives map generation)
 // ---------------------------------------------------------------------------
 
@@ -78,6 +121,30 @@ export const MatchStartedEvent = z.object({
   }),
   mapSeed: z.number(),
   repoTree: FileNode,
+});
+
+/** The LLM-generated world skin arrived (may follow match_started by a while). */
+export const ThemeReadyEvent = z.object({
+  ...base,
+  type: z.literal("theme_ready"),
+  theme: ThemePack,
+});
+
+/** The player (settlement host) issued an order or spoke to an agent. */
+export const DecreeEvent = z.object({
+  ...base,
+  type: z.literal("decree"),
+  /** Target agent id; absent = addressed to the whole realm (routed to the King). */
+  toId: z.string().optional(),
+  text: z.string().max(4000),
+});
+
+/** Session lifecycle phases for the UI status line. */
+export const SessionStatusEvent = z.object({
+  ...base,
+  type: z.literal("session_status"),
+  phase: z.enum(["provisioning", "cloning", "theming", "idle", "working"]),
+  detail: z.string().optional(),
 });
 
 export const AgentSpawnedEvent = z.object({
@@ -238,6 +305,9 @@ export const LogEvent = z.object({
 
 export const GameEvent = z.discriminatedUnion("type", [
   MatchStartedEvent,
+  ThemeReadyEvent,
+  DecreeEvent,
+  SessionStatusEvent,
   AgentSpawnedEvent,
   AgentStatusEvent,
   AgentMovedEvent,
@@ -268,11 +338,24 @@ export const HostMessage = z.discriminatedUnion("type", [
     protocolVersion: z.number(),
     taskId: z.string(),
     taskTitle: z.string(),
+    /** Git URL or "sample:<id>". Absent for demo/scripted sessions. */
+    repoUrl: z.string().optional(),
   }),
   z.object({ type: z.literal("publish"), event: GameEvent }),
   z.object({ type: z.literal("end") }),
 ]);
 export type HostMessage = z.infer<typeof HostMessage>;
+
+// ---------------------------------------------------------------------------
+// Sandbox API (browser -> relay proxy -> sandboxd), REST bodies
+// ---------------------------------------------------------------------------
+
+export const SandboxExecResult = z.object({
+  exitCode: z.number(),
+  output: z.string(),
+  timedOut: z.boolean(),
+});
+export type SandboxExecResult = z.infer<typeof SandboxExecResult>;
 
 /** Spectator -> relay */
 export const SpectatorMessage = z.discriminatedUnion("type", [
@@ -283,6 +366,9 @@ export type SpectatorMessage = z.infer<typeof SpectatorMessage>;
 /** Relay -> clients */
 export const RelayMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("hosted"), matchId: z.string() }),
+  /** Sandbox provisioned and repo cloned; token authorizes /api/sandbox calls. */
+  z.object({ type: z.literal("sandbox_ready"), token: z.string() }),
+  z.object({ type: z.literal("sandbox_error"), message: z.string() }),
   z.object({ type: z.literal("history"), matchId: z.string(), events: z.array(GameEvent) }),
   z.object({ type: z.literal("event"), event: GameEvent }),
   z.object({ type: z.literal("match_over") }),
@@ -322,16 +408,16 @@ export function buildingKindFor(path: string): z.infer<typeof BuildingKind> {
   return "house";
 }
 
-/** Fixed villager name pool; deterministic per spawn order. */
+/** Fallback worker name pool (ancient-future register); themes override it. */
 export const VILLAGER_NAMES = [
-  "Aldric",
-  "Berta",
-  "Cedric",
-  "Doria",
-  "Edmund",
-  "Freya",
-  "Godwin",
-  "Hilda",
+  "Ashka",
+  "Veyra",
+  "Odran",
+  "Sable",
+  "Imre",
+  "Noor",
+  "Talvi",
+  "Ezel",
 ] as const;
 
-export const ORCHESTRATOR_NAME = "King Refactor III";
+export const ORCHESTRATOR_NAME = "The Hierophant";

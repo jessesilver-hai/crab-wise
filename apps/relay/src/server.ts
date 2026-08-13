@@ -12,6 +12,7 @@ import {
   MatchSummary,
   PROTOCOL_VERSION,
 } from "@agent-empires/protocol";
+import { SandboxManager, driverFromEnv } from "./sandbox.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const MAX_FINISHED_MATCHES = 50;
@@ -37,6 +38,11 @@ type Match = {
 };
 
 const matches = new Map<string, Match>();
+const sandboxes = new SandboxManager(driverFromEnv());
+
+// In-memory theme cache: repeat visitors to the same repo pay no theming tokens.
+const themeCache = new Map<string, string>();
+const THEME_CACHE_MAX = 200;
 
 function newMatchId(): string {
   const adjectives = ["iron", "gilded", "swift", "burning", "silent", "royal", "feral", "amber"];
@@ -100,6 +106,46 @@ app.get("/api/matches", async () => {
 
 app.get("/healthz", async () => ({ ok: true }));
 
+// --- Sandbox tool-call proxy (host-only, bearer hostToken) -------------------
+
+app.post<{ Params: { matchId: string; op: string } }>(
+  "/api/sandbox/:matchId/:op",
+  async (req, reply) => {
+    const auth = req.headers.authorization ?? "";
+    const hostToken = auth.replace(/^Bearer /, "");
+    try {
+      const result = await sandboxes.proxy(
+        req.params.matchId,
+        hostToken,
+        req.params.op,
+        req.body,
+      );
+      reply.code(result.status).header("content-type", "application/json").send(result.body);
+    } catch (err) {
+      reply.code(502).send({ error: `sandbox unreachable: ${String(err)}` });
+    }
+  },
+);
+
+// --- Theme cache --------------------------------------------------------------
+
+app.get<{ Params: { repoKey: string } }>("/api/theme/:repoKey", async (req, reply) => {
+  const cached = themeCache.get(req.params.repoKey);
+  if (!cached) return reply.code(404).send({ error: "no cached theme" });
+  reply.header("content-type", "application/json").send(cached);
+});
+
+app.put<{ Params: { repoKey: string } }>("/api/theme/:repoKey", async (req, reply) => {
+  const body = JSON.stringify(req.body);
+  if (body.length > 300_000) return reply.code(413).send({ error: "theme too large" });
+  if (themeCache.size >= THEME_CACHE_MAX) {
+    const oldest = themeCache.keys().next().value;
+    if (oldest) themeCache.delete(oldest);
+  }
+  themeCache.set(req.params.repoKey, body);
+  reply.send({ ok: true });
+});
+
 // Serve built frontend when present (production); dev uses Vite directly.
 const webDist = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -123,9 +169,10 @@ await app.listen({ port: PORT, host: "0.0.0.0" });
 
 const wss = new WebSocketServer({ server: app.server, path: "/ws" });
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
   let role: "host" | "spectator" | null = null;
   let match: Match | null = null;
+  const ip = String(req.headers["fly-client-ip"] ?? req.socket.remoteAddress ?? "unknown");
 
   ws.on("message", (data) => {
     let raw: unknown;
@@ -158,6 +205,14 @@ wss.on("connection", (ws) => {
           };
           matches.set(match.matchId, match);
           send(ws, { type: "hosted", matchId: match.matchId });
+          // General mode: provision a sandbox for the settlement.
+          if (msg.repoUrl) {
+            const target = match;
+            sandboxes
+              .provision(target.matchId, ip)
+              .then(({ hostToken }) => send(ws, { type: "sandbox_ready", token: hostToken }))
+              .catch((err) => send(ws, { type: "sandbox_error", message: String(err?.message ?? err) }));
+          }
           return;
         }
         if (msg.type === "publish" && role === "host" && match) {
@@ -203,6 +258,9 @@ wss.on("connection", (ws) => {
     } else if (role === "host" && match.status === "live") {
       // The villagers have abandoned the town.
       finishMatch(match, "abandoned");
+      sandboxes.hostDisconnected(match.matchId);
+    } else if (role === "host") {
+      void sandboxes.destroy(match.matchId);
     }
   });
 });

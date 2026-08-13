@@ -37,6 +37,10 @@ export class Unit {
     if (instant) this.root.position.set(x, y);
   }
 
+  setTexture(texture: Texture): void {
+    this.sprite.texture = texture;
+  }
+
   say(text: string): void {
     this.bubble?.destroy();
     const bubble = new Container();
