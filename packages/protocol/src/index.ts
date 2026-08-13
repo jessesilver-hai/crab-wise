@@ -61,6 +61,10 @@ export const ThemePack = z.object({
     grassColors: z.array(z.string().regex(/^#[0-9a-fA-F]{6}$/)).min(2).max(6),
     fogColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
     accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    /** World-form; selects terrain patterning, prop sets, and ambient weather client-side. */
+    archetype: z
+      .enum(["ash-steppe", "harbor-citadel", "oracle-forge", "glacier-vault", "verdant-ruin", "dune-monolith"])
+      .optional(),
   }),
   heraldOpeners: z.array(z.string().max(60)).min(2).max(8),
   heraldClosers: z.array(z.string().max(60)).min(2).max(8),

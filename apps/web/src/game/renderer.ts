@@ -1,193 +1,598 @@
-import { Application, Container, Sprite, Text } from "pixi.js";
-import type { GameEvent, ThemePack } from "@agent-empires/protocol";
+import Phaser from "phaser";
+import type { AgentStatus, GameEvent, ThemePack } from "@agent-empires/protocol";
 import type { Renderer } from "../match-view.js";
-import { assignPlot, isoX, isoY, layoutMap, MapLayout, TILE_H } from "./map.js";
-import { applyTheme, buildTextures, TextureSet } from "./textures.js";
-import { Unit, Floater, makeFloater } from "./units.js";
+import { assignPlot, isoX, isoY, layoutMap, MapLayout, TILE_H, TILE_W } from "./map.js";
+import {
+  applyTheme,
+  buildTextures,
+  particleTextures,
+  pruneGeneration,
+  skyTexture,
+  TextureSet,
+  TEX_SCALE,
+} from "./textures.js";
+import { Unit } from "./units.js";
+import { Archetype, ParticleKind, resolveArchetype } from "./archetypes.js";
 
 const FOG_REVEAL_RADIUS = 2;
 const CONSTRUCTION_MS = 1400;
+const MAX_RAIDERS = 8;
+const CARD_W = 264;
+
+// Depth bands: everything lives directly on the scene, ordered by depth.
+const D_SKY = -200000;
+const D_GROUND = -100000;
+const D_MARKER = -50000;
+// objects (props / buildings / units) use their screen y (≈ -3k..+4k)
+const D_FOG = 50000;
+const D_LABEL = 60000;
+const D_FX = 70000;
+const D_PARTICLE = 80000;
+const D_UI = 90000;
+
+const DPR = Math.min(2, (typeof window !== "undefined" && window.devicePixelRatio) || 1);
+
+function hex(color: number): string {
+  return `#${(color & 0xffffff).toString(16).padStart(6, "0")}`;
+}
 
 export function attachGameRenderer(mount: HTMLElement): Renderer {
-  const queue: [GameEvent, boolean][] = [];
-  let impl: Game | null = null;
-  let destroyed = false;
-
-  Game.create(mount).then((game) => {
-    if (destroyed) {
-      game.destroy();
-      return;
-    }
-    impl = game;
-    for (const [e, h] of queue) game.handleEvent(e, h);
-    queue.length = 0;
+  const scene = new MainScene();
+  const game = new Phaser.Game({
+    type: Phaser.AUTO,
+    parent: mount,
+    backgroundColor: "#0d0a06",
+    banner: false,
+    scale: {
+      mode: Phaser.Scale.RESIZE,
+      width: mount.clientWidth || 800,
+      height: mount.clientHeight || 600,
+    },
+    render: { antialias: true },
+    audio: { noAudio: true },
+    scene,
   });
-
   return {
     handleEvent(e, historical) {
-      if (impl) impl.handleEvent(e, historical);
-      else queue.push([e, historical]);
+      scene.enqueue(e, historical);
     },
     destroy() {
-      destroyed = true;
-      impl?.destroy();
+      game.destroy(true);
     },
   };
 }
 
-type Building = { sprite: Sprite; kind: string; builtAt: number };
+// ---------------------------------------------------------------------------
+// Scene state records
+// ---------------------------------------------------------------------------
 
-class Game {
-  private world = new Container();
-  private ground = new Container();
-  private objects = new Container(); // buildings + units, y-sorted
-  private fogLayer = new Container();
-  private labels = new Container();
-  private effects = new Container();
+const IDLE_STATUSES: ReadonlySet<AgentStatus> = new Set(["idle", "resting", "done"]);
 
-  private textures!: TextureSet;
+type AgentRec = {
+  unit: Unit;
+  role: "orchestrator" | "worker";
+  name: string;
+  charge: string | null;
+  status: AgentStatus;
+  /** Where this agent's attention is: the building of the last file it touched. */
+  site: { x: number; y: number } | null;
+  sitePath: string | null;
+  nextMoveAt: number;
+};
+
+type BuildingRec = {
+  img: Phaser.GameObjects.Image;
+  kind: string;
+  path: string;
+  tx: number;
+  ty: number;
+  writes: number;
+  linesAdded: number;
+  linesRemoved: number;
+  constructUntil: number; // 0 = fully built
+  pulse: Phaser.Tweens.Tween | null;
+};
+
+type RaiderRec = {
+  unit: Unit;
+  cx: number;
+  cy: number;
+  r: number;
+  angle: number;
+  speed: number; // rad/s prowl orbit
+};
+
+type PropRec = { img: Phaser.GameObjects.Image; variant: number };
+
+type Particle = {
+  img: Phaser.GameObjects.Image;
+  vx: number;
+  vy: number;
+  sway: number;
+  rate: number;
+  phase: number;
+  baseAlpha: number;
+  flicker: boolean;
+};
+
+type PartCfg = {
+  tex: "soft" | "mist" | "streak";
+  add: boolean;
+  scale: [number, number];
+  alpha: [number, number];
+  vx: [number, number];
+  vy: [number, number];
+  sway: number;
+  flicker: boolean;
+};
+
+const PART_CFG: Record<ParticleKind, PartCfg> = {
+  ash: { tex: "soft", add: false, scale: [0.35, 0.8], alpha: [0.2, 0.45], vx: [-8, 2], vy: [8, 20], sway: 8, flicker: false },
+  embers: { tex: "soft", add: true, scale: [0.25, 0.6], alpha: [0.4, 0.85], vx: [-8, 8], vy: [-40, -14], sway: 10, flicker: true },
+  mist: { tex: "mist", add: false, scale: [1.6, 3.6], alpha: [0.05, 0.1], vx: [5, 16], vy: [-2, 2], sway: 3, flicker: false },
+  snow: { tex: "soft", add: false, scale: [0.25, 0.6], alpha: [0.35, 0.75], vx: [-6, 6], vy: [10, 28], sway: 14, flicker: false },
+  spores: { tex: "soft", add: true, scale: [0.2, 0.5], alpha: [0.25, 0.55], vx: [-6, 6], vy: [-8, 6], sway: 12, flicker: true },
+  dust: { tex: "streak", add: false, scale: [0.8, 1.8], alpha: [0.08, 0.22], vx: [50, 130], vy: [2, 12], sway: 4, flicker: false },
+};
+
+const KIND_NAMES: Record<string, string> = {
+  house: "Dwelling",
+  barracks: "Bastion",
+  market: "Trade-Vault",
+  monastery: "Sanctum",
+  mill: "Engine-Granary",
+  towncenter: "The Citadel",
+};
+
+type Selection = { kind: "unit"; id: string } | { kind: "building"; path: string } | null;
+
+// ---------------------------------------------------------------------------
+
+class MainScene extends Phaser.Scene {
+  private ready = false;
+  private pending: [GameEvent, boolean][] = [];
+
+  private gen = 0;
+  private mapSeed = 1;
+  private archetype: Archetype = resolveArchetype(undefined, 0);
+  private theme: ThemePack | null = null;
+  private accent = 0xe3b264;
+  private tex!: TextureSet;
+  private fxTex!: { soft: string; mist: string; streak: string };
+
   private map: MapLayout | null = null;
-  private units = new Map<string, Unit>();
-  private unitRoles = new Map<string, "orchestrator" | "worker">();
-  private buildings = new Map<string, Building>();
-  private raiders = new Map<string, Unit>();
-  private fogTiles = new Map<string, Sprite>();
-  private groundTiles: Sprite[] = [];
-  private treeSprites: Sprite[] = [];
-  private floaters: Floater[] = [];
-  private constructing: { building: Building; done: number }[] = [];
+  private citadel = { x: 0, y: 0, tx: 0, ty: 0 };
+  private agents = new Map<string, AgentRec>();
+  private buildings = new Map<string, BuildingRec>();
+  private raiders = new Map<string, RaiderRec>();
+  private fogTiles = new Map<string, Phaser.GameObjects.Image>();
+  private groundTiles: Phaser.GameObjects.Image[] = [];
+  private props: PropRec[] = [];
+  private regionLabels: Phaser.GameObjects.Text[] = [];
+  private particles: Particle[] = [];
+  private skyImg: Phaser.GameObjects.Image | null = null;
+  private wonderImg: Phaser.GameObjects.Image | null = null;
   private tokenThrottle = new Map<string, number>();
-  private lastNow = performance.now();
 
-  private constructor(private app: Application, private mount: HTMLElement) {}
+  // interactivity
+  private selected: Selection = null;
+  private followId: string | null = null;
+  private hovered: Phaser.GameObjects.GameObject | null = null;
+  private hoverMarker!: Phaser.GameObjects.Image;
+  private selectMarker!: Phaser.GameObjects.Image;
+  private card!: Phaser.GameObjects.Container;
+  private cardBg!: Phaser.GameObjects.Graphics;
+  private cardTitle!: Phaser.GameObjects.Text;
+  private cardBody!: Phaser.GameObjects.Text;
+  private cardH = 0;
+  private lastClickAt = 0;
+  private lastClickX = 0;
+  private lastClickY = 0;
 
-  static async create(mount: HTMLElement): Promise<Game> {
-    const app = new Application();
-    await app.init({ background: 0x0d0a06, resizeTo: mount, antialias: true, resolution: window.devicePixelRatio });
-    mount.appendChild(app.canvas);
-    const game = new Game(app, mount);
-    game.textures = buildTextures(app.renderer);
-    game.objects.sortableChildren = true;
-    game.world.addChild(game.ground, game.objects, game.fogLayer, game.labels, game.effects);
-    app.stage.addChild(game.world);
-    game.setupCamera();
-    app.ticker.add(() => game.tick());
-    return game;
+  constructor() {
+    super("main");
   }
 
-  // --- camera --------------------------------------------------------------
-  private setupCamera(): void {
-    const canvas = this.app.canvas;
-    let dragging = false;
-    let lastX = 0;
-    let lastY = 0;
-    canvas.addEventListener("pointerdown", (e) => {
-      dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
+  enqueue(e: GameEvent, historical: boolean): void {
+    if (this.ready) this.dispatch(e, historical);
+    else this.pending.push([e, historical]);
+  }
+
+  create(): void {
+    this.tex = buildTextures(this, this.archetype, this.gen);
+    this.fxTex = particleTextures(this);
+    this.accent = this.archetype.glow;
+
+    this.hoverMarker = this.add
+      .image(0, 0, this.tex.highlight)
+      .setScale(TEX_SCALE)
+      .setDepth(D_MARKER)
+      .setAlpha(0.5)
+      .setVisible(false);
+    this.selectMarker = this.add
+      .image(0, 0, this.tex.highlight)
+      .setScale(TEX_SCALE)
+      .setDepth(D_MARKER + 1)
+      .setVisible(false);
+
+    this.buildCard();
+    this.setupInput();
+
+    this.scale.on("resize", () => {
+      this.sizeSky();
+      this.positionCard();
     });
-    window.addEventListener("pointerup", () => (dragging = false));
-    window.addEventListener("pointermove", (e) => {
-      if (!dragging) return;
-      this.world.x += e.clientX - lastX;
-      this.world.y += e.clientY - lastY;
-      lastX = e.clientX;
-      lastY = e.clientY;
+
+    this.ready = true;
+    for (const [e, h] of this.pending) this.dispatch(e, h);
+    this.pending = [];
+  }
+
+  // --- camera + input --------------------------------------------------------
+
+  private setupInput(): void {
+    const cam = this.cameras.main;
+    let dragLastX = 0;
+    let dragLastY = 0;
+
+    this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
+      dragLastX = p.x;
+      dragLastY = p.y;
     });
-    canvas.addEventListener(
-      "wheel",
-      (e) => {
-        e.preventDefault();
-        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-        const next = Math.min(2.5, Math.max(0.35, this.world.scale.x * factor));
-        const rect = canvas.getBoundingClientRect();
-        const px = e.clientX - rect.left;
-        const py = e.clientY - rect.top;
-        const wx = (px - this.world.x) / this.world.scale.x;
-        const wy = (py - this.world.y) / this.world.scale.y;
-        this.world.scale.set(next);
-        this.world.x = px - wx * next;
-        this.world.y = py - wy * next;
+
+    this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
+      if (!p.isDown) return;
+      const dx = p.x - dragLastX;
+      const dy = p.y - dragLastY;
+      dragLastX = p.x;
+      dragLastY = p.y;
+      if (p.getDistance() > 6) {
+        this.stopFollowing();
+        cam.scrollX -= dx / cam.zoom;
+        cam.scrollY -= dy / cam.zoom;
+      }
+    });
+
+    this.input.on("pointerup", (p: Phaser.Input.Pointer) => {
+      if (p.getDistance() > 8) return; // that was a pan, not a click
+      const now = performance.now();
+      const isDouble =
+        now - this.lastClickAt < 350 &&
+        Math.hypot(p.x - this.lastClickX, p.y - this.lastClickY) < 24;
+      this.lastClickAt = now;
+      this.lastClickX = p.x;
+      this.lastClickY = p.y;
+      if (isDouble) {
+        this.recenter();
+        return;
+      }
+      if (this.hovered) this.select(this.hovered);
+      else this.clearSelection();
+    });
+
+    this.input.on(
+      "gameobjectover",
+      (_p: Phaser.Input.Pointer, obj: Phaser.GameObjects.GameObject) => {
+        this.hovered = obj;
+        this.input.setDefaultCursor("pointer");
       },
-      { passive: false },
     );
+    this.input.on(
+      "gameobjectout",
+      (_p: Phaser.Input.Pointer, obj: Phaser.GameObjects.GameObject) => {
+        if (this.hovered === obj) {
+          this.hovered = null;
+          this.input.setDefaultCursor("default");
+        }
+      },
+    );
+
+    this.game.canvas.addEventListener("wheel", this.onWheel, { passive: false });
+    this.events.once("destroy", () => {
+      this.game.canvas?.removeEventListener("wheel", this.onWheel);
+    });
+  }
+
+  private onWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    const cam = this.cameras.main;
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const next = Phaser.Math.Clamp(cam.zoom * factor, 0.35, 2.5);
+    if (this.followId) {
+      cam.setZoom(next);
+      return;
+    }
+    const rect = this.game.canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    // keep the world point under the cursor fixed through the zoom
+    const wx = cam.scrollX + cam.width / 2 + (px - cam.width / 2) / cam.zoom;
+    const wy = cam.scrollY + cam.height / 2 + (py - cam.height / 2) / cam.zoom;
+    cam.setZoom(next);
+    cam.scrollX = wx - cam.width / 2 - (px - cam.width / 2) / next;
+    cam.scrollY = wy - cam.height / 2 - (py - cam.height / 2) / next;
+  };
+
+  private recenter(): void {
+    this.stopFollowing();
+    this.cameras.main.pan(this.citadel.x, this.citadel.y, 600, "Sine.easeInOut");
+  }
+
+  private stopFollowing(): void {
+    if (this.followId !== null) {
+      this.cameras.main.stopFollow();
+      this.followId = null;
+    }
   }
 
   private fitCamera(): void {
     if (!this.map) return;
-    const b = this.ground.getLocalBounds();
-    const vw = this.mount.clientWidth || 800;
-    const vh = this.mount.clientHeight || 600;
-    const scale = Math.min(2, Math.min(vw / (b.width + 80), vh / (b.height + 80)));
-    this.world.scale.set(scale);
-    this.world.x = vw / 2 - (b.x + b.width / 2) * scale;
-    this.world.y = vh / 2 - (b.y + b.height / 2) * scale;
+    const side = this.map.side;
+    const left = isoX(0, side - 1) - TILE_W / 2;
+    const right = isoX(side - 1, 0) + TILE_W / 2;
+    const top = isoY(0, 0) - TILE_H / 2;
+    const bottom = isoY(side - 1, side - 1) + TILE_H / 2;
+    const vw = this.scale.width || 800;
+    const vh = this.scale.height || 600;
+    const zoom = Phaser.Math.Clamp(
+      Math.min(vw / (right - left + 80), vh / (bottom - top + 120)),
+      0.35,
+      2,
+    );
+    const cam = this.cameras.main;
+    cam.setZoom(zoom);
+    cam.centerOn((left + right) / 2, (top + bottom) / 2);
   }
 
-  // --- world construction ----------------------------------------------------
+  // --- selection + info card ---------------------------------------------------
+
+  private select(obj: Phaser.GameObjects.GameObject): void {
+    const kind = obj.getData("kind") as string | undefined;
+    if (kind === "unit") {
+      const id = obj.getData("id") as string;
+      const rec = this.agents.get(id);
+      if (!rec) return;
+      this.selected = { kind: "unit", id };
+      this.followId = id;
+      this.cameras.main.startFollow(rec.unit.root, false, 0.08, 0.08);
+    } else if (kind === "building") {
+      const path = obj.getData("path") as string;
+      const rec = this.buildings.get(path);
+      if (!rec) return;
+      this.stopFollowing();
+      this.selected = { kind: "building", path };
+      this.selectMarker.setPosition(isoX(rec.tx, rec.ty), isoY(rec.tx, rec.ty)).setVisible(true);
+    } else {
+      return;
+    }
+    this.refreshCard();
+  }
+
+  private clearSelection(): void {
+    this.stopFollowing();
+    this.selected = null;
+    this.selectMarker.setVisible(false);
+    this.card.setVisible(false);
+  }
+
+  private buildCard(): void {
+    this.cardBg = this.add.graphics();
+    this.cardTitle = this.add
+      .text(12, 10, "", {
+        fontFamily: "Cinzel, Georgia, serif",
+        fontSize: "13px",
+        color: "#e8d9b0",
+      })
+      .setResolution(DPR);
+    this.cardBody = this.add
+      .text(12, 30, "", {
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: "11px",
+        color: "#b8b0a0",
+        wordWrap: { width: CARD_W - 24 },
+        lineSpacing: 4,
+      })
+      .setResolution(DPR);
+    this.card = this.add
+      .container(0, 0, [this.cardBg, this.cardTitle, this.cardBody])
+      .setScrollFactor(0)
+      .setDepth(D_UI)
+      .setVisible(false);
+  }
+
+  private refreshCard(): void {
+    if (!this.selected) {
+      this.card.setVisible(false);
+      return;
+    }
+    let title = "";
+    const lines: string[] = [];
+    if (this.selected.kind === "unit") {
+      const rec = this.agents.get(this.selected.id);
+      if (!rec) return this.clearSelection();
+      title = rec.name;
+      lines.push(rec.role === "orchestrator" ? "sovereign · orchestrator" : "worker");
+      lines.push(`status: ${rec.status}`);
+      if (rec.sitePath) lines.push(`at: ${truncPath(rec.sitePath)}`);
+      if (rec.charge) lines.push(`charge: ${rec.charge.length > 120 ? rec.charge.slice(0, 120) + "…" : rec.charge}`);
+    } else {
+      const rec = this.buildings.get(this.selected.path);
+      if (!rec) return this.clearSelection();
+      const name = rec.path === "__towncenter__" ? "The Citadel" : rec.path.split("/").pop() ?? rec.path;
+      title = name;
+      lines.push(KIND_NAMES[rec.kind] ?? rec.kind);
+      if (rec.path !== "__towncenter__") lines.push(truncPath(rec.path));
+      lines.push(`reinforced ×${rec.writes}`);
+      lines.push(`+${rec.linesAdded} / −${rec.linesRemoved} lines`);
+    }
+    this.cardTitle.setText(title);
+    this.cardTitle.setColor(hex(this.accent));
+    this.cardBody.setText(lines.join("\n"));
+    this.cardBody.setY(this.cardTitle.y + this.cardTitle.height + 6);
+    const h = this.cardBody.y + this.cardBody.height + 12;
+    this.cardH = h;
+    this.cardBg.clear();
+    this.cardBg.fillStyle(0x120e08, 0.92);
+    this.cardBg.fillRoundedRect(0, 0, CARD_W, h, 8);
+    this.cardBg.lineStyle(1.5, this.accent, 0.85);
+    this.cardBg.strokeRoundedRect(0, 0, CARD_W, h, 8);
+    this.card.setVisible(true);
+    this.positionCard();
+  }
+
+  private positionCard(): void {
+    this.card.setPosition(14, this.scale.height - this.cardH - 14);
+  }
+
+  // --- sky + ambient particles -------------------------------------------------
+
+  private sizeSky(): void {
+    this.skyImg?.setDisplaySize(this.scale.width, this.scale.height * 0.55);
+  }
+
+  private redrawSky(): void {
+    const key = skyTexture(this, this.archetype.horizonColor, this.gen);
+    if (this.skyImg) this.skyImg.setTexture(key);
+    else {
+      this.skyImg = this.add
+        .image(0, 0, key)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(D_SKY)
+        .setAlpha(0.55);
+    }
+    this.sizeSky();
+  }
+
+  private initParticles(): void {
+    for (const p of this.particles) p.img.destroy();
+    this.particles = [];
+    const { kind, color, count } = this.archetype.particle;
+    const cfg = PART_CFG[kind];
+    const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
+    const w = this.scale.width || 800;
+    const h = this.scale.height || 600;
+    for (let i = 0; i < count; i++) {
+      const img = this.add
+        .image(Math.random() * w, Math.random() * h, this.fxTex[cfg.tex])
+        .setScrollFactor(0)
+        .setDepth(D_PARTICLE)
+        .setTint(color)
+        .setScale(rand(cfg.scale[0], cfg.scale[1]));
+      if (cfg.add) img.setBlendMode(Phaser.BlendModes.ADD);
+      const baseAlpha = rand(cfg.alpha[0], cfg.alpha[1]);
+      img.setAlpha(baseAlpha);
+      this.particles.push({
+        img,
+        vx: rand(cfg.vx[0], cfg.vx[1]),
+        vy: rand(cfg.vy[0], cfg.vy[1]),
+        sway: cfg.sway,
+        rate: rand(0.6, 2.2),
+        phase: Math.random() * Math.PI * 2,
+        baseAlpha,
+        flicker: cfg.flicker,
+      });
+    }
+  }
+
+  // --- world construction --------------------------------------------------------
+
   private buildWorld(event: Extract<GameEvent, { type: "match_started" }>): void {
+    this.mapSeed = event.mapSeed;
+    this.retexture();
+
     const map = layoutMap(event.repoTree, event.mapSeed);
     this.map = map;
 
     for (let ty = 0; ty < map.side; ty++) {
       for (let tx = 0; tx < map.side; tx++) {
-        const tile = new Sprite(this.textures.grass[Math.floor(map.rng() * this.textures.grass.length)]!);
-        tile.anchor.set(0.5);
-        tile.position.set(isoX(tx, ty), isoY(tx, ty));
-        this.ground.addChild(tile);
-        this.groundTiles.push(tile);
+        const groundKey = this.tex.ground[Math.floor(map.rng() * this.tex.ground.length)]!;
+        this.groundTiles.push(
+          this.add.image(isoX(tx, ty), isoY(tx, ty), groundKey).setScale(TEX_SCALE).setDepth(D_GROUND),
+        );
 
-        // relic monoliths on unused tiles
-        if (!map.used.has(`${tx},${ty}`) && map.rng() < 0.055) {
+        // archetype props (relic monoliths, masts, shards, …) on unused tiles
+        if (!map.used.has(`${tx},${ty}`) && map.rng() < this.archetype.propDensity) {
           map.used.add(`${tx},${ty}`);
-          const tree = new Sprite(this.textures.tree);
-          tree.anchor.set(0.5, 1);
-          tree.position.set(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4);
-          tree.zIndex = tree.y;
-          this.objects.addChild(tree);
-          this.treeSprites.push(tree);
+          const variant = Math.floor(map.rng() * this.tex.props.length);
+          const img = this.add
+            .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, this.tex.props[variant]!)
+            .setOrigin(0.5, 1)
+            .setScale(TEX_SCALE);
+          img.setDepth(img.y);
+          this.props.push({ img, variant });
         }
 
-        const fog = new Sprite(this.textures.fog);
-        fog.anchor.set(0.5);
-        fog.alpha = 0.88;
-        fog.position.set(isoX(tx, ty), isoY(tx, ty));
-        this.fogLayer.addChild(fog);
+        const fog = this.add
+          .image(isoX(tx, ty), isoY(tx, ty), this.tex.fog)
+          .setScale(TEX_SCALE)
+          .setAlpha(0.88)
+          .setDepth(D_FOG);
         this.fogTiles.set(`${tx},${ty}`, fog);
       }
     }
 
     // territory labels
     for (const region of map.regions) {
-      if ((region.rect.w * region.rect.h) < 6) continue;
-      const label = new Text({
-        text: region.label,
-        style: { fontFamily: "Cinzel, Georgia, serif", fontSize: 13, fill: 0xc98f4a, letterSpacing: 2 },
-      });
-      label.alpha = 0.75;
-      label.anchor.set(0.5);
+      if (region.rect.w * region.rect.h < 6) continue;
       const cx = region.rect.x + region.rect.w / 2;
       const cy = region.rect.y;
-      label.position.set(isoX(cx, cy), isoY(cx, cy) - 10);
-      this.labels.addChild(label);
+      const label = this.add
+        .text(isoX(cx, cy), isoY(cx, cy) - 10, region.label, {
+          fontFamily: "Cinzel, Georgia, serif",
+          fontSize: "13px",
+          color: hex(this.theme ? this.accent : 0xc98f4a),
+        })
+        .setOrigin(0.5)
+        .setAlpha(0.75)
+        .setDepth(D_LABEL)
+        .setResolution(DPR);
+      label.setLetterSpacing(2);
+      this.regionLabels.push(label);
     }
 
-    // Town Center stands from the start
+    // The Citadel stands from the start
     const tc = map.townCenter;
+    this.citadel = { x: isoX(tc.tx, tc.ty), y: isoY(tc.tx, tc.ty), tx: tc.tx, ty: tc.ty };
     this.placeBuilding("__towncenter__", "towncenter", tc.tx, tc.ty, true);
-    this.reveal(tc.tx, tc.ty, 3);
+    this.reveal(tc.tx, tc.ty, 3, true);
     this.fitCamera();
   }
 
-  private reveal(tx: number, ty: number, radius: number): void {
+  /** Rebuild every generated texture for the current archetype + theme. */
+  private retexture(): void {
+    const oldGen = this.gen;
+    this.gen++;
+    this.archetype = resolveArchetype(this.theme?.biome.archetype, this.mapSeed);
+    let tex = buildTextures(this, this.archetype, this.gen);
+    if (this.theme) tex = applyTheme(this, tex, this.theme, this.archetype, this.gen);
+    this.tex = tex;
+
+    const themeAccent = this.theme ? parseInt(this.theme.biome.accentColor.slice(1), 16) : NaN;
+    this.accent = Number.isNaN(themeAccent) ? this.archetype.glow : themeAccent;
+
+    this.cameras.main.setBackgroundColor(this.archetype.skyColor);
+    this.redrawSky();
+    this.initParticles();
+    this.hoverMarker.setTexture(this.tex.highlight);
+    this.selectMarker.setTexture(this.tex.highlight);
+    this.wonderImg?.setTexture(this.tex.wonder);
+    // In-flight effects (fog fades, pings) may still show old-gen textures for
+    // a moment; prune once they are certainly gone.
+    this.time.delayedCall(5000, () => pruneGeneration(this, oldGen));
+  }
+
+  private reveal(tx: number, ty: number, radius: number, historical: boolean): void {
     for (let dy = -radius; dy <= radius; dy++) {
       for (let dx = -radius; dx <= radius; dx++) {
         if (Math.abs(dx) + Math.abs(dy) > radius + 1) continue;
         const key = `${tx + dx},${ty + dy}`;
         const fog = this.fogTiles.get(key);
-        if (fog) {
-          fog.destroy();
-          this.fogTiles.delete(key);
+        if (!fog) continue;
+        this.fogTiles.delete(key);
+        if (historical) fog.destroy();
+        else {
+          this.tweens.add({ targets: fog, alpha: 0, duration: 350, onComplete: () => fog.destroy() });
         }
       }
     }
@@ -212,54 +617,109 @@ class Game {
     return { x: isoX(cell.tx, cell.ty), y: isoY(cell.tx, cell.ty), tx: cell.tx, ty: cell.ty };
   }
 
-  private placeBuilding(path: string, kind: string, tx: number, ty: number, instant: boolean): Building {
+  private placeBuilding(path: string, kind: string, tx: number, ty: number, instant: boolean): BuildingRec {
     const existing = this.buildings.get(path);
-    const texSet = this.textures.buildings[kind] ?? this.textures.buildings.house!;
+    const texSet = this.tex.buildings[kind] ?? this.tex.buildings.house!;
     if (existing) {
-      if (!instant) {
-        existing.sprite.texture = texSet.scaffold;
-        this.constructing.push({ building: existing, done: performance.now() + CONSTRUCTION_MS });
-      }
+      if (!instant) this.startConstruction(existing);
       return existing;
     }
-    const sprite = new Sprite(instant ? texSet.built : texSet.scaffold);
-    sprite.anchor.set(0.5, 1);
-    sprite.position.set(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4);
-    sprite.zIndex = sprite.y;
-    this.objects.addChild(sprite);
-    const building: Building = { sprite, kind, builtAt: 0 };
-    this.buildings.set(path, building);
-    if (!instant) this.constructing.push({ building, done: performance.now() + CONSTRUCTION_MS });
-    return building;
+    const img = this.add
+      .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, instant ? texSet.built : texSet.scaffold)
+      .setOrigin(0.5, 1)
+      .setScale(TEX_SCALE);
+    img.setDepth(img.y);
+    img.setInteractive(new Phaser.Geom.Rectangle(36, 52, 128, 144), Phaser.Geom.Rectangle.Contains);
+    img.setData("kind", "building");
+    img.setData("path", path);
+    const rec: BuildingRec = {
+      img,
+      kind,
+      path,
+      tx,
+      ty,
+      writes: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      constructUntil: 0,
+      pulse: null,
+    };
+    this.buildings.set(path, rec);
+    if (!instant) this.startConstruction(rec);
+    return rec;
+  }
+
+  private startConstruction(rec: BuildingRec): void {
+    const texSet = this.tex.buildings[rec.kind] ?? this.tex.buildings.house!;
+    rec.img.setTexture(texSet.scaffold);
+    rec.constructUntil = this.time.now + CONSTRUCTION_MS;
+    if (!rec.pulse) {
+      rec.pulse = this.tweens.add({
+        targets: rec.img,
+        alpha: 0.65,
+        duration: 260,
+        yoyo: true,
+        repeat: -1,
+      });
+    }
+  }
+
+  private finishConstruction(rec: BuildingRec): void {
+    rec.constructUntil = 0;
+    rec.pulse?.stop();
+    rec.pulse = null;
+    rec.img.setAlpha(1);
+    const texSet = this.tex.buildings[rec.kind] ?? this.tex.buildings.house!;
+    rec.img.setTexture(texSet.built);
+    rec.img.setScale(TEX_SCALE * 1.18);
+    this.tweens.add({ targets: rec.img, scale: TEX_SCALE, duration: 320, ease: "Back.easeOut" });
   }
 
   private ping(x: number, y: number): void {
-    const s = new Sprite(this.textures.highlight);
-    s.anchor.set(0.5);
-    s.position.set(x, y);
-    this.effects.addChild(s);
-    const started = performance.now();
-    const fade = () => {
-      const t = (performance.now() - started) / 900;
-      if (t >= 1 || s.destroyed) {
-        if (!s.destroyed) s.destroy();
-        return;
-      }
-      s.alpha = 1 - t;
-      s.scale.set(1 + t * 0.5);
-      requestAnimationFrame(fade);
-    };
-    fade();
+    const s = this.add.image(x, y, this.tex.highlight).setScale(TEX_SCALE).setDepth(D_FX);
+    this.tweens.add({
+      targets: s,
+      alpha: 0,
+      scale: TEX_SCALE * 1.5,
+      duration: 900,
+      onComplete: () => s.destroy(),
+    });
   }
 
   private float(text: string, x: number, y: number, color: number): void {
-    const f = makeFloater(text, x, y - 24, color, performance.now());
-    this.effects.addChild(f.obj);
-    this.floaters.push(f);
+    const t = this.add
+      .text(x, y - 24, text, {
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: "13px",
+        color: hex(color),
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5, 1)
+      .setDepth(D_FX)
+      .setResolution(DPR);
+    this.tweens.add({ targets: t, y: y - 70, duration: 1600, ease: "Sine.easeOut" });
+    this.tweens.add({ targets: t, alpha: 0, delay: 900, duration: 700, onComplete: () => t.destroy() });
+  }
+
+  /** Point an agent's attention at a path: walk its unit to that building. */
+  private setSite(agentId: string, path: string, historical: boolean): void {
+    const rec = this.agents.get(agentId);
+    if (!rec) return;
+    const pos = this.posForPath(path);
+    rec.site = { x: pos.x, y: pos.y };
+    rec.sitePath = path;
+    rec.unit.walkTo(
+      pos.x + (Math.random() - 0.5) * 30,
+      pos.y + 18 + (Math.random() - 0.5) * 10,
+      historical,
+    );
+    rec.nextMoveAt = this.time.now + 2200 + Math.random() * 1500;
+    if (this.selected?.kind === "unit" && this.selected.id === agentId) this.refreshCard();
   }
 
   // --- event handling --------------------------------------------------------
-  handleEvent(e: GameEvent, historical: boolean): void {
+
+  private dispatch(e: GameEvent, historical: boolean): void {
     if (e.type === "match_started") {
       this.buildWorld(e);
       return;
@@ -272,90 +732,129 @@ class Game {
 
     switch (e.type) {
       case "agent_spawned": {
-        const tc = this.map.townCenter;
         const jitter = () => (Math.random() - 0.5) * 50;
         const unit = new Unit(
-          e.role === "orchestrator" ? this.textures.king : this.textures.villager,
+          this,
+          e.role === "orchestrator" ? this.tex.king : this.tex.villager,
           e.name,
-          isoX(tc.tx, tc.ty) + jitter(),
-          isoY(tc.tx, tc.ty) + 26 + jitter() / 2,
-          e.role === "orchestrator" ? 0xf0c96a : 0xd8e4ec,
+          this.citadel.x + jitter(),
+          this.citadel.y + 26 + jitter() / 2,
+          e.role === "orchestrator" ? "#f0c96a" : "#d8e4ec",
         );
-        this.objects.addChild(unit.root);
-        this.units.set(e.agentId, unit);
-        this.unitRoles.set(e.agentId, e.role);
+        unit.root.setInteractive(
+          new Phaser.Geom.Rectangle(-14, -30, 28, 48),
+          Phaser.Geom.Rectangle.Contains,
+        );
+        unit.root.setData("kind", "unit");
+        unit.root.setData("id", e.agentId);
+        this.agents.set(e.agentId, {
+          unit,
+          role: e.role,
+          name: e.name,
+          charge: e.charge ?? null,
+          status: "idle",
+          site: null,
+          sitePath: null,
+          nextMoveAt: this.time.now + 1000 + Math.random() * 3000,
+        });
         if (!historical && e.charge) unit.say(e.charge);
         break;
       }
+      case "agent_status": {
+        const rec = this.agents.get(e.agentId);
+        if (!rec) break;
+        rec.status = e.status;
+        if (IDLE_STATUSES.has(e.status)) rec.nextMoveAt = this.time.now + 600 + Math.random() * 1200;
+        else if (rec.site) rec.unit.walkTo(rec.site.x + (Math.random() - 0.5) * 30, rec.site.y + 18, historical);
+        if (this.selected?.kind === "unit" && this.selected.id === e.agentId) this.refreshCard();
+        break;
+      }
       case "agent_moved": {
-        const unit = this.units.get(e.agentId);
         const pos = this.posForPath(e.path);
-        unit?.walkTo(pos.x + (Math.random() - 0.5) * 24, pos.y + 18, historical);
-        this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS);
+        this.setSite(e.agentId, e.path, historical);
+        this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
         break;
       }
       case "file_read": {
         const pos = this.posForPath(e.path);
-        this.reveal(pos.tx, pos.ty, 1);
+        this.reveal(pos.tx, pos.ty, 1, historical);
         if (!historical) this.ping(pos.x, pos.y);
+        this.setSite(e.agentId, e.path, historical);
         break;
       }
       case "list_dir": {
         const pos = this.posForPath(e.path);
-        this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS + 1);
+        this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS + 1, historical);
+        this.setSite(e.agentId, e.path, historical);
         break;
       }
       case "search": {
         for (const path of e.paths.slice(0, 10)) {
           const pos = this.posForPath(path);
-          this.reveal(pos.tx, pos.ty, 1);
+          this.reveal(pos.tx, pos.ty, 1, historical);
           if (!historical) this.ping(pos.x, pos.y);
         }
+        const first = e.paths[0];
+        if (first) this.setSite(e.agentId, first, historical);
         break;
       }
       case "file_write": {
         const pos = this.posForPath(e.path);
-        this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS);
-        this.placeBuilding(e.path, e.buildingKind, pos.tx, pos.ty, historical);
+        this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
+        const rec = this.placeBuilding(e.path, e.buildingKind, pos.tx, pos.ty, historical);
+        rec.writes++;
+        rec.linesAdded += e.linesAdded;
+        rec.linesRemoved += e.linesRemoved;
         if (!historical) this.float(`+${e.linesAdded}`, pos.x, pos.y, 0x9ecf7a);
+        this.setSite(e.agentId, e.path, historical);
+        if (this.selected?.kind === "building" && this.selected.path === e.path) this.refreshCard();
         break;
       }
       case "command_result": {
         if (e.kind !== "test") break;
         this.reconcileRaiders(e.failures ?? [], historical);
         if ((e.testsFailed ?? 0) === 0 && !historical) {
-          const tc = this.map.townCenter;
-          this.float("⚑ tests green!", isoX(tc.tx, tc.ty), isoY(tc.tx, tc.ty) - 40, 0x9ecf7a);
+          this.float("⚑ tests green!", this.citadel.x, this.citadel.y - 40, 0x9ecf7a);
         }
         break;
       }
       case "message": {
-        if (!historical) this.units.get(e.fromId)?.say(e.text);
+        if (!historical) this.agents.get(e.fromId)?.unit.say(e.text);
         break;
       }
       case "compaction": {
-        const unit = this.units.get(e.agentId);
-        const tc = this.map.townCenter;
-        unit?.walkTo(isoX(tc.tx, tc.ty) + 30, isoY(tc.tx, tc.ty) + 30, historical);
-        if (unit && !historical) this.float("🍖", unit.x, unit.y, 0xc98d5a);
+        const rec = this.agents.get(e.agentId);
+        if (rec) {
+          rec.site = null;
+          rec.sitePath = null;
+          rec.unit.walkTo(this.citadel.x + 30, this.citadel.y + 30, historical);
+          if (!historical) this.float("🍖", rec.unit.x, rec.unit.y, 0xc98d5a);
+        }
         break;
       }
       case "tokens": {
         if (historical) break;
         const n = (this.tokenThrottle.get(e.agentId) ?? 0) + 1;
         this.tokenThrottle.set(e.agentId, n);
-        const unit = this.units.get(e.agentId);
-        if (unit && n % 3 === 0) {
-          this.float(`+${e.inputTokens + e.outputTokens}🪙`, unit.x, unit.y, 0xf0c96a);
+        const rec = this.agents.get(e.agentId);
+        if (rec && n % 3 === 0) {
+          this.float(`+${e.inputTokens + e.outputTokens}🪙`, rec.unit.x, rec.unit.y, 0xf0c96a);
         }
         break;
       }
       case "agent_done": {
-        const unit = this.units.get(e.agentId);
-        if (unit) {
-          const tc = this.map.townCenter;
-          unit.walkTo(isoX(tc.tx, tc.ty) + (Math.random() - 0.5) * 70, isoY(tc.tx, tc.ty) + 34, historical);
-          unit.dimmed = true;
+        const rec = this.agents.get(e.agentId);
+        if (rec) {
+          rec.status = "done";
+          rec.site = null;
+          rec.sitePath = null;
+          rec.unit.walkTo(
+            this.citadel.x + (Math.random() - 0.5) * 70,
+            this.citadel.y + 34,
+            historical,
+          );
+          rec.unit.dimmed = true;
+          if (this.selected?.kind === "unit" && this.selected.id === e.agentId) this.refreshCard();
         }
         break;
       }
@@ -367,145 +866,202 @@ class Game {
     }
   }
 
+  private makeRaider(x: number, y: number): Unit {
+    const name = this.theme?.enemyName ? this.theme.enemyName.slice(0, 14) : "raider";
+    return new Unit(this, this.tex.raider, name, x, y, "#c0483c");
+  }
+
   private reconcileRaiders(failures: { name: string; path?: string }[], historical: boolean): void {
-    const map = this.map!;
     const nextKeys = new Set(failures.map((f) => `${f.path ?? "?"}::${f.name}`));
-    for (const [key, raider] of this.raiders) {
+    for (const [key, rec] of this.raiders) {
       if (!nextKeys.has(key)) {
-        if (!historical) this.float("✕", raider.x, raider.y - 10, 0xd4a843);
-        raider.root.destroy();
+        if (!historical) this.float("✕", rec.unit.x, rec.unit.y - 10, 0xd4a843);
+        rec.unit.destroy();
         this.raiders.delete(key);
       }
     }
     for (const f of failures) {
+      if (this.raiders.size >= MAX_RAIDERS) break;
       const key = `${f.path ?? "?"}::${f.name}`;
       if (this.raiders.has(key)) continue;
-      const anchor = f.path ? this.posForPath(f.path) : (() => {
-        const tc = map.townCenter;
-        return { x: isoX(tc.tx, tc.ty), y: isoY(tc.tx, tc.ty), tx: tc.tx, ty: tc.ty };
-      })();
-      this.reveal(anchor.tx, anchor.ty, 1);
-      const raider = new Unit(
-        this.textures.raider,
-        "raider",
+      const anchor = f.path
+        ? this.posForPath(f.path)
+        : { x: this.citadel.x, y: this.citadel.y, tx: this.citadel.tx, ty: this.citadel.ty };
+      this.reveal(anchor.tx, anchor.ty, 1, historical);
+      const unit = this.makeRaider(
         anchor.x + (Math.random() - 0.5) * 70,
         anchor.y + 20 + (Math.random() - 0.5) * 30,
-        0xc0483c,
       );
-      this.objects.addChild(raider.root);
-      this.raiders.set(key, raider);
+      this.raiders.set(key, {
+        unit,
+        cx: anchor.x,
+        cy: anchor.y + 16,
+        r: 16 + Math.random() * 16,
+        angle: Math.random() * Math.PI * 2,
+        speed: 0.5 + Math.random() * 0.7,
+      });
       if (!historical) this.float("⚔", anchor.x, anchor.y, 0xc0483c);
     }
   }
 
   /** A ThemePack arrived: re-skin the living world in place. */
   private reskin(theme: ThemePack): void {
-    this.textures = applyTheme(this.app.renderer, this.textures, theme);
+    this.theme = theme;
+    if (!this.map) return; // buildWorld will apply it
+    this.retexture();
+
     for (const tile of this.groundTiles) {
-      if (!tile.destroyed) {
-        tile.texture = this.textures.grass[Math.floor(Math.random() * this.textures.grass.length)]!;
-      }
+      if (tile.active) tile.setTexture(this.tex.ground[Math.floor(Math.random() * this.tex.ground.length)]!);
     }
     for (const [, fog] of this.fogTiles) {
-      if (!fog.destroyed) fog.texture = this.textures.fog;
+      if (fog.active) fog.setTexture(this.tex.fog);
     }
-    for (const tree of this.treeSprites) {
-      if (!tree.destroyed) tree.texture = this.textures.tree;
+    for (const prop of this.props) {
+      if (prop.img.active) prop.img.setTexture(this.tex.props[prop.variant % this.tex.props.length]!);
     }
-    for (const [path, building] of this.buildings) {
-      const texSet = this.textures.buildings[building.kind] ?? this.textures.buildings.house!;
-      const constructing = this.constructing.some((c) => c.building === building);
-      if (!building.sprite.destroyed) {
-        building.sprite.texture = constructing ? texSet.scaffold : texSet.built;
-      }
+    for (const [, rec] of this.buildings) {
+      const texSet = this.tex.buildings[rec.kind] ?? this.tex.buildings.house!;
+      if (rec.img.active) rec.img.setTexture(rec.constructUntil > 0 ? texSet.scaffold : texSet.built);
     }
-    for (const [agentId, unit] of this.units) {
-      unit.setTexture(this.unitRoles.get(agentId) === "orchestrator" ? this.textures.king : this.textures.villager);
+    for (const [, rec] of this.agents) {
+      rec.unit.setTexture(rec.role === "orchestrator" ? this.tex.king : this.tex.villager);
     }
-    for (const [, raider] of this.raiders) raider.setTexture(this.textures.raider);
+    for (const [, rec] of this.raiders) rec.unit.setTexture(this.tex.raider);
+    for (const label of this.regionLabels) label.setColor(hex(this.accent));
+    this.refreshCard();
   }
 
   private raiseWonder(historical: boolean): void {
-    const map = this.map!;
-    // The wonder rises beside the Town Center.
-    const tc = map.townCenter;
-    const wonder = new Sprite(this.textures.wonder);
-    wonder.anchor.set(0.5, 1);
-    wonder.position.set(isoX(tc.tx + 3, tc.ty + 3), isoY(tc.tx + 3, tc.ty + 3) + TILE_H / 4);
-    wonder.zIndex = wonder.y;
-    this.objects.addChild(wonder);
-    this.reveal(tc.tx + 3, tc.ty + 3, 4);
-    for (const [, raider] of this.raiders) raider.root.destroy();
+    // The Beacon rises beside the Citadel.
+    const tx = this.citadel.tx + 3;
+    const ty = this.citadel.ty + 3;
+    const wonder = this.add
+      .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, this.tex.wonder)
+      .setOrigin(0.5, 1)
+      .setScale(TEX_SCALE);
+    wonder.setDepth(wonder.y);
+    this.wonderImg = wonder;
+    this.reveal(tx, ty, 4, historical);
+    for (const [, rec] of this.raiders) rec.unit.destroy();
     this.raiders.clear();
     if (!historical) {
-      for (let i = 0; i < 26; i++) {
-        setTimeout(() => {
-          if (wonder.destroyed) return;
-          this.float("✦", wonder.x + (Math.random() - 0.5) * 160, wonder.y - Math.random() * 120, 0xf0c96a);
-        }, i * 120);
-      }
+      this.stopFollowing();
+      this.cameras.main.pan(wonder.x, wonder.y - 40, 900, "Sine.easeInOut");
+      this.time.addEvent({
+        delay: 120,
+        repeat: 25,
+        callback: () => {
+          if (!wonder.active) return;
+          this.float(
+            "✦",
+            wonder.x + (Math.random() - 0.5) * 160,
+            wonder.y - Math.random() * 120,
+            this.accent,
+          );
+        },
+      });
     }
   }
 
   private stageDefeat(): void {
-    const map = this.map!;
-    const tc = map.townCenter;
     for (let i = 0; i < 6; i++) {
       const angle = (i / 6) * Math.PI * 2;
-      const raider = new Unit(
-        this.textures.raider,
-        "raider",
-        isoX(tc.tx, tc.ty) + Math.cos(angle) * 80,
-        isoY(tc.tx, tc.ty) + 24 + Math.sin(angle) * 40,
-        0xc0483c,
+      const unit = this.makeRaider(
+        this.citadel.x + Math.cos(angle) * 80,
+        this.citadel.y + 24 + Math.sin(angle) * 40,
       );
-      this.objects.addChild(raider.root);
-      this.raiders.set(`victory-lap-${i}`, raider);
+      this.raiders.set(`victory-lap-${i}`, {
+        unit,
+        cx: this.citadel.x,
+        cy: this.citadel.y + 24,
+        r: 80,
+        angle,
+        speed: 0.35,
+      });
     }
   }
 
   // --- frame tick --------------------------------------------------------------
-  private tick(): void {
-    const now = performance.now();
-    const dt = Math.min(100, now - this.lastNow);
-    this.lastNow = now;
 
-    for (const unit of this.units.values()) unit.root.zIndex = unit.tick(dt, now);
-    for (const raider of this.raiders.values()) {
-      raider.root.zIndex = raider.tick(dt, now);
-      if (Math.random() < 0.008) {
-        raider.walkTo(raider.x + (Math.random() - 0.5) * 40, raider.y + (Math.random() - 0.5) * 20);
+  override update(time: number, delta: number): void {
+    if (!this.ready) return;
+    const dt = Math.min(100, delta);
+    const now = this.time.now;
+
+    // agents: bob/bubbles + continuous life
+    for (const rec of this.agents.values()) {
+      rec.unit.tick(dt, now);
+      if (rec.unit.isWalking || now < rec.nextMoveAt) continue;
+      if (IDLE_STATUSES.has(rec.status) || !rec.site) {
+        // idle-wander near the citadel
+        const a = Math.random() * Math.PI * 2;
+        const d = 30 + Math.random() * 80;
+        rec.unit.walkTo(
+          this.citadel.x + Math.cos(a) * d,
+          this.citadel.y + 26 + Math.sin(a) * d * 0.5,
+        );
+        rec.nextMoveAt = now + 2600 + Math.random() * 4200;
+      } else {
+        // laboring: small moves around the worksite
+        rec.unit.walkTo(
+          rec.site.x + (Math.random() - 0.5) * 36,
+          rec.site.y + 18 + (Math.random() - 0.5) * 14,
+        );
+        rec.nextMoveAt = now + 1800 + Math.random() * 2600;
       }
     }
 
-    const doneBuilding = this.constructing.filter((c) => c.done <= now);
-    if (doneBuilding.length) {
-      this.constructing = this.constructing.filter((c) => c.done > now);
-      for (const { building } of doneBuilding) {
-        const texSet = this.textures.buildings[building.kind] ?? this.textures.buildings.house!;
-        building.sprite.texture = texSet.built;
-        building.sprite.scale.set(1.15);
-        const shrink = () => {
-          if (building.sprite.destroyed) return;
-          building.sprite.scale.set(Math.max(1, building.sprite.scale.x - 0.015));
-          if (building.sprite.scale.x > 1) requestAnimationFrame(shrink);
-        };
-        shrink();
-      }
+    // raiders prowl in small orbits while their test fails
+    for (const rec of this.raiders.values()) {
+      rec.angle += (rec.speed * dt) / 1000;
+      const nx = rec.cx + Math.cos(rec.angle) * rec.r;
+      const ny = rec.cy + Math.sin(rec.angle) * rec.r * 0.5;
+      rec.unit.sprite.setFlipX(nx < rec.unit.x);
+      rec.unit.root.setPosition(nx, ny);
+      rec.unit.tick(dt, now);
     }
 
-    this.floaters = this.floaters.filter((f) => {
-      if (f.expiry <= now || f.obj.destroyed) {
-        if (!f.obj.destroyed) f.obj.destroy();
-        return false;
-      }
-      f.obj.y += (f.vy * dt) / 1000;
-      f.obj.alpha = Math.min(1, (f.expiry - now) / 700);
-      return true;
-    });
-  }
+    // construction completion
+    for (const rec of this.buildings.values()) {
+      if (rec.constructUntil > 0 && rec.constructUntil <= now) this.finishConstruction(rec);
+    }
 
-  destroy(): void {
-    this.app.destroy(true, { children: true });
+    // ambient weather
+    const w = this.scale.width;
+    const h = this.scale.height;
+    const m = 48;
+    for (const p of this.particles) {
+      p.phase += (dt / 1000) * p.rate;
+      p.img.x += ((p.vx + Math.sin(p.phase) * p.sway) * dt) / 1000;
+      p.img.y += (p.vy * dt) / 1000;
+      if (p.flicker) p.img.setAlpha(p.baseAlpha * (0.55 + 0.45 * Math.sin(p.phase * 5)));
+      if (p.img.x > w + m) p.img.x = -m;
+      if (p.img.x < -m) p.img.x = w + m;
+      if (p.img.y > h + m) p.img.y = -m;
+      if (p.img.y < -m) p.img.y = h + m;
+    }
+
+    // markers
+    if (this.selected?.kind === "unit") {
+      const rec = this.agents.get(this.selected.id);
+      if (rec) this.selectMarker.setPosition(rec.unit.x, rec.unit.y + 2).setVisible(true);
+    }
+    if (this.hovered && (this.hovered as Phaser.GameObjects.GameObject).active) {
+      const kind = this.hovered.getData("kind") as string | undefined;
+      if (kind === "unit") {
+        const obj = this.hovered as Phaser.GameObjects.Container;
+        this.hoverMarker.setPosition(obj.x, obj.y + 2).setVisible(true);
+      } else if (kind === "building") {
+        const rec = this.buildings.get(this.hovered.getData("path") as string);
+        if (rec) this.hoverMarker.setPosition(isoX(rec.tx, rec.ty), isoY(rec.tx, rec.ty)).setVisible(true);
+      }
+    } else {
+      this.hoverMarker.setVisible(false);
+      if (this.hovered) this.hovered = null;
+    }
   }
+}
+
+function truncPath(path: string): string {
+  return path.length > 42 ? "…" + path.slice(-40) : path;
 }

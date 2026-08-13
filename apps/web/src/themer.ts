@@ -51,6 +51,10 @@ Adapt that register to THIS repository's domain. Examples of the move:
 - a CLI tool → a wandering order of blade-scribes
 - a game engine → the foundry of worlds
 
+Also set biome.archetype to whichever of "ash-steppe", "harbor-citadel", "oracle-forge",
+"glacier-vault", "verdant-ruin", "dune-monolith" best fits this repository's domain — it
+selects the world's terrain, props, and weather.
+
 Rules for text: faction name ≤ 5 words; tagline one evocative sentence; the king is the
 sovereign-figure title; enemyName is what failing tests are called (plural, ominous, domain-tied);
 herald openers/closers are short liturgical fragments; personas are 4-6 workers with name,

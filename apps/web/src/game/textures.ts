@@ -1,221 +1,635 @@
-import { Graphics, Renderer, Texture } from "pixi.js";
+import Phaser from "phaser";
 import type { PixelSprite, ThemePack } from "@agent-empires/protocol";
 import { TILE_W, TILE_H } from "./map.js";
+import type { Archetype } from "./archetypes.js";
 
 /**
  * Default world skin: ancient-future — a civilization so old its technology
- * reads as ritual. Ashen steppe, monolithic structures with dim glow seams,
- * robed figures, wraith-specters. All drawn procedurally into textures; a
- * repo's ThemePack overrides pieces with LLM-drawn pixel sprites.
+ * reads as ritual. All art is drawn procedurally into canvas textures keyed
+ * into Phaser's texture manager; a repo's ThemePack overrides pieces with
+ * LLM-drawn pixel sprites, and the world archetype decides terrain patterns,
+ * prop sets, and glow accents.
  */
+
+/** Canvases are drawn at 2x and displayed at 0.5 scale for crispness. */
+export const TEX_RES = 2;
+export const TEX_SCALE = 1 / TEX_RES;
+
 export type TextureSet = {
-  grass: Texture[];
-  fog: Texture;
-  tree: Texture;
-  buildings: Record<string, { built: Texture; scaffold: Texture }>;
-  wonder: Texture;
-  villager: Texture;
-  king: Texture;
-  raider: Texture;
-  highlight: Texture;
+  ground: string[];
+  fog: string;
+  /** Archetype prop variants (monoliths, masts, shards, …). */
+  props: string[];
+  buildings: Record<string, { built: string; scaffold: string }>;
+  wonder: string;
+  villager: string;
+  king: string;
+  raider: string;
+  highlight: string;
 };
 
-const GLOW = 0xe3b264;
+// ---------------------------------------------------------------------------
+// Canvas helpers
+// ---------------------------------------------------------------------------
 
-function diamond(g: Graphics, w: number, h: number, color: number): Graphics {
-  g.moveTo(0, -h / 2).lineTo(w / 2, 0).lineTo(0, h / 2).lineTo(-w / 2, 0).closePath().fill(color);
-  return g;
+type Ctx = CanvasRenderingContext2D;
+
+function css(color: number, alpha = 1): string {
+  const hex = (color & 0xffffff).toString(16).padStart(6, "0");
+  if (alpha >= 1) return `#${hex}`;
+  const r = (color >> 16) & 0xff;
+  const g = (color >> 8) & 0xff;
+  const b = color & 0xff;
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
-/** Isometric box: top diamond + two side faces. */
+/** Multiply a color's channels by `f` (>1 lightens, <1 darkens). */
+function shade(color: number, f: number): number {
+  const ch = (n: number) => Math.max(0, Math.min(255, Math.round(n * f)));
+  return (ch((color >> 16) & 0xff) << 16) | (ch((color >> 8) & 0xff) << 8) | ch(color & 0xff);
+}
+
+function canvasTexture(
+  scene: Phaser.Scene,
+  key: string,
+  w: number,
+  h: number,
+  draw: (ctx: Ctx) => void,
+): string {
+  if (scene.textures.exists(key)) scene.textures.remove(key);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(w * TEX_RES);
+  canvas.height = Math.ceil(h * TEX_RES);
+  const ctx = canvas.getContext("2d")!;
+  ctx.scale(TEX_RES, TEX_RES);
+  draw(ctx);
+  scene.textures.addCanvas(key, canvas);
+  return key;
+}
+
+function poly(ctx: Ctx, points: [number, number][], fill: string): void {
+  ctx.beginPath();
+  ctx.moveTo(points[0]![0], points[0]![1]);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i]![0], points[i]![1]);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+function diamondPath(ctx: Ctx, cx: number, cy: number, w: number, h: number): void {
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - h / 2);
+  ctx.lineTo(cx + w / 2, cy);
+  ctx.lineTo(cx, cy + h / 2);
+  ctx.lineTo(cx - w / 2, cy);
+  ctx.closePath();
+}
+
+/** Isometric box drawn around a translated origin at the base center. */
 function isoBox(
-  g: Graphics,
+  ctx: Ctx,
   w: number,
   depth: number,
   height: number,
   top: number,
   left: number,
   right: number,
-): Graphics {
+): void {
   const hw = w / 2;
   const hd = depth / 2;
-  g.moveTo(-hw, -height).lineTo(0, hd - height).lineTo(0, hd).lineTo(-hw, 0).closePath().fill(left);
-  g.moveTo(hw, -height).lineTo(0, hd - height).lineTo(0, hd).lineTo(hw, 0).closePath().fill(right);
-  g.moveTo(0, -hd - height).lineTo(hw, -height).lineTo(0, hd - height).lineTo(-hw, -height).closePath().fill(top);
-  return g;
+  poly(ctx, [[-hw, -height], [0, hd - height], [0, hd], [-hw, 0]], css(left));
+  poly(ctx, [[hw, -height], [0, hd - height], [0, hd], [hw, 0]], css(right));
+  poly(ctx, [[0, -hd - height], [hw, -height], [0, hd - height], [-hw, -height]], css(top));
 }
 
 /** Thin vertical glow seam on a structure face. */
-function seam(g: Graphics, x: number, yTop: number, height: number, color = GLOW): void {
-  g.rect(x - 0.8, yTop, 1.6, height).fill({ color, alpha: 0.9 });
+function seam(ctx: Ctx, x: number, yTop: number, height: number, glow: number, alpha = 0.9): void {
+  ctx.fillStyle = css(glow, alpha);
+  ctx.fillRect(x - 0.8, yTop, 1.6, height);
 }
 
-export function buildTextures(renderer: Renderer): TextureSet {
-  const gen = (g: Graphics) => {
-    const tex = renderer.generateTexture({ target: g, resolution: 2 });
-    g.destroy();
-    return tex;
-  };
+function groundShadow(ctx: Ctx, rx: number, ry: number, alpha = 0.3): void {
+  ctx.beginPath();
+  ctx.ellipse(0, 1, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = css(0x000000, alpha);
+  ctx.fill();
+}
 
-  // --- terrain: ashen steppe -----------------------------------------------
-  const grass = makeGroundTextures(renderer, [0x6a6152, 0x726858, 0x615847, 0x79705f]);
+function circle(ctx: Ctx, x: number, y: number, r: number, fill: string): void {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
 
-  const fogG = new Graphics();
-  diamond(fogG, TILE_W + 2, TILE_H + 2, 0x060504);
-  const fog = gen(fogG);
+function ring(ctx: Ctx, x: number, y: number, rx: number, ry: number, stroke: string, width: number): void {
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
 
-  // "tree" = standing stone relic with a faint sigil glow
-  const treeG = new Graphics();
-  treeG.moveTo(-5, 0).lineTo(-3, -26).lineTo(3, -28).lineTo(5, 0).closePath().fill(0x4a453d);
-  treeG.moveTo(-3, -26).lineTo(3, -28).lineTo(5, 0).lineTo(1, 0).closePath().fill(0x3a362f);
-  treeG.circle(0, -18, 1.6).fill({ color: GLOW, alpha: 0.8 });
-  treeG.ellipse(0, 1, 8, 3).fill({ color: 0x000000, alpha: 0.3 });
-  const tree = gen(treeG);
+// ---------------------------------------------------------------------------
+// Terrain
+// ---------------------------------------------------------------------------
 
-  // --- structures: brutalist monoliths --------------------------------------
-  const mk = (draw: (g: Graphics) => void): Texture => {
-    const g = new Graphics();
-    draw(g);
-    return gen(g);
-  };
-
-  const scaffoldFor = (w: number, d: number, h: number): Texture =>
-    mk((g) => {
-      isoBox(g, w, d, h * 0.4, 0x5c554a, 0x4a4439, 0x3b362d);
-      for (const [x] of [[-w / 2 + 2], [w / 2 - 2], [0]] as const) {
-        g.rect(x - 1, -h, 2, h).fill(0x55503f);
+function drawTilePattern(ctx: Ctx, arch: Archetype, base: number): void {
+  const dark = css(shade(base, 0.78));
+  const light = css(shade(base, 1.22));
+  const r = Math.random;
+  switch (arch.pattern) {
+    case "cinder": {
+      for (let i = 0; i < 5; i++) {
+        circle(ctx, (r() - 0.5) * TILE_W * 0.6, (r() - 0.5) * TILE_H * 0.6, 0.8 + r(), dark);
       }
-      g.rect(-w / 4, -h - 2, w / 2, 2).fill({ color: GLOW, alpha: 0.35 });
-    });
+      if (r() < 0.25) circle(ctx, (r() - 0.5) * 20, (r() - 0.5) * 10, 0.9, css(arch.glow, 0.35));
+      break;
+    }
+    case "wave": {
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 2; i++) {
+        const y = (r() - 0.5) * TILE_H * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(-14 + r() * 6, y);
+        ctx.quadraticCurveTo(0, y - 2 - r() * 2, 14 - r() * 6, y);
+        ctx.stroke();
+      }
+      break;
+    }
+    case "crack": {
+      ctx.strokeStyle = css(shade(base, 0.6));
+      ctx.lineWidth = 1;
+      const x0 = (r() - 0.5) * 20;
+      const y0 = (r() - 0.5) * 8;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x0 + 5 + r() * 5, y0 + (r() - 0.5) * 6);
+      ctx.lineTo(x0 + 12 + r() * 6, y0 + (r() - 0.5) * 8);
+      ctx.stroke();
+      if (r() < 0.3) circle(ctx, x0 + 6, y0, 1, css(arch.glow, 0.45));
+      break;
+    }
+    case "shard": {
+      ctx.strokeStyle = light;
+      ctx.lineWidth = 0.8;
+      for (let i = 0; i < 3; i++) {
+        const x = (r() - 0.5) * TILE_W * 0.5;
+        const y = (r() - 0.5) * TILE_H * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + (r() - 0.5) * 12, y + (r() - 0.5) * 6);
+        ctx.stroke();
+      }
+      break;
+    }
+    case "moss": {
+      for (let i = 0; i < 3; i++) {
+        circle(ctx, (r() - 0.5) * TILE_W * 0.55, (r() - 0.5) * TILE_H * 0.55, 1.6 + r() * 2, css(shade(base, 0.82), 0.8));
+      }
+      if (r() < 0.4) circle(ctx, (r() - 0.5) * 18, (r() - 0.5) * 8, 1, light);
+      break;
+    }
+    case "ripple": {
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 3; i++) {
+        const y = -TILE_H * 0.3 + i * (TILE_H * 0.3) + (r() - 0.5) * 3;
+        ctx.beginPath();
+        ctx.arc((r() - 0.5) * 10, y + 8, 10 + r() * 6, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.stroke();
+      }
+      break;
+    }
+  }
+}
+
+export function groundTextures(
+  scene: Phaser.Scene,
+  arch: Archetype,
+  colors: number[],
+  gen: number,
+  tag: string,
+): string[] {
+  const w = TILE_W + 2;
+  const h = TILE_H + 2;
+  return colors.map((color, i) =>
+    canvasTexture(scene, `g${gen}-${tag}-${i}`, w, h, (ctx) => {
+      ctx.translate(w / 2, h / 2);
+      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+      ctx.fillStyle = css(color);
+      ctx.fill();
+      ctx.save();
+      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+      ctx.clip();
+      drawTilePattern(ctx, arch, color);
+      ctx.restore();
+      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+      ctx.strokeStyle = css(0x2e2a22, 0.5);
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }),
+  );
+}
+
+export function fogTexture(scene: Phaser.Scene, color: number, gen: number): string {
+  const w = TILE_W + 2;
+  const h = TILE_H + 2;
+  return canvasTexture(scene, `g${gen}-fog`, w, h, (ctx) => {
+    ctx.translate(w / 2, h / 2);
+    diamondPath(ctx, 0, 0, TILE_W + 2, TILE_H + 2);
+    ctx.fillStyle = css(color);
+    ctx.fill();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Props — per-archetype scatter objects, 3 variants each
+// ---------------------------------------------------------------------------
+
+const PROP_W = 56;
+const PROP_H = 76;
+
+function drawProp(ctx: Ctx, arch: Archetype, variant: number): void {
+  const glow = arch.glow;
+  switch (arch.id) {
+    case "ash-steppe": {
+      groundShadow(ctx, 8, 3);
+      if (variant === 0) {
+        // standing stone with sigil glow
+        poly(ctx, [[-5, 0], [-3, -26], [3, -28], [5, 0]], css(0x4a453d));
+        poly(ctx, [[-3, -26], [3, -28], [5, 0], [1, 0]], css(0x3a362f));
+        circle(ctx, 0, -18, 1.6, css(glow, 0.8));
+      } else if (variant === 1) {
+        // taller shard-stone, twin sigils
+        poly(ctx, [[-4, 0], [-2, -36], [2, -40], [5, 0]], css(0x504b42));
+        poly(ctx, [[-2, -36], [2, -40], [5, 0], [1, 0]], css(0x3e3a33));
+        circle(ctx, 0, -30, 1.3, css(glow, 0.8));
+        circle(ctx, 0.5, -22, 1.1, css(glow, 0.55));
+      } else {
+        // leaning slab with bone banner pole
+        poly(ctx, [[-8, 0], [-12, -18], [-6, -20], [0, 0]], css(0x46423a));
+        ctx.fillStyle = css(0x8d8577);
+        ctx.fillRect(5, -30, 1.4, 30);
+        poly(ctx, [[6.4, -30], [16, -27], [6.4, -22]], css(0x9a9184, 0.85));
+      }
+      break;
+    }
+    case "harbor-citadel": {
+      groundShadow(ctx, 8, 3);
+      if (variant === 0) {
+        // mast with yard and rope
+        ctx.fillStyle = css(0x4c443a);
+        ctx.fillRect(-1, -42, 2, 42);
+        ctx.fillRect(-11, -34, 22, 1.6);
+        ctx.strokeStyle = css(0x6d6152, 0.9);
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(-11, -33);
+        ctx.quadraticCurveTo(-8, -14, 0, 0);
+        ctx.moveTo(11, -33);
+        ctx.quadraticCurveTo(8, -14, 0, 0);
+        ctx.stroke();
+        circle(ctx, 0, -43, 1.6, css(glow, 0.9));
+      } else if (variant === 1) {
+        // mooring bollard with rope loop
+        isoBox(ctx, 8, 6, 10, 0x5b5b60, 0x47474d, 0x38383e);
+        ring(ctx, 0, -10, 5.5, 2.4, css(0x6d6152), 1.6);
+      } else {
+        // signal lantern pole
+        ctx.fillStyle = css(0x44444a);
+        ctx.fillRect(-1, -30, 2, 30);
+        circle(ctx, 0, -32, 2.6, css(glow, 0.9));
+        ring(ctx, 0, -32, 4.6, 4.6, css(glow, 0.35), 1);
+      }
+      break;
+    }
+    case "oracle-forge": {
+      groundShadow(ctx, 9, 3.2);
+      if (variant === 0) {
+        // obsidian slag mound, ember seams
+        poly(ctx, [[-12, 0], [-6, -9], [0, -12], [7, -8], [12, 0]], css(0x201c1c));
+        poly(ctx, [[0, -12], [7, -8], [12, 0], [3, 0]], css(0x161314));
+        ctx.strokeStyle = css(glow, 0.6);
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(-7, -4);
+        ctx.lineTo(-2, -8);
+        ctx.moveTo(3, -6);
+        ctx.lineTo(7, -3);
+        ctx.stroke();
+      } else if (variant === 1) {
+        // obsidian shard cluster
+        poly(ctx, [[-9, 0], [-6, -16], [-3, 0]], css(0x231f20));
+        poly(ctx, [[-2, 0], [2, -24], [6, 0]], css(0x1a1718));
+        poly(ctx, [[5, 0], [9, -12], [12, 0]], css(0x262223));
+        ctx.strokeStyle = css(glow, 0.5);
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(2, -24);
+        ctx.lineTo(4, -6);
+        ctx.stroke();
+      } else {
+        // broken ritual ring
+        ctx.strokeStyle = css(0x3c3436);
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(0, -12, 10, Math.PI * 0.85, Math.PI * 2.05);
+        ctx.stroke();
+        circle(ctx, 0, -12, 1.6, css(glow, 0.85));
+      }
+      break;
+    }
+    case "glacier-vault": {
+      groundShadow(ctx, 9, 3.2, 0.22);
+      if (variant === 0) {
+        // ice shard cluster
+        poly(ctx, [[-10, 0], [-6, -18], [-2, 0]], css(0xb8d2e2, 0.92));
+        poly(ctx, [[-3, 0], [2, -28], [7, 0]], css(0xcfe4f0, 0.92));
+        poly(ctx, [[6, 0], [10, -12], [13, 0]], css(0xaac6d8, 0.92));
+        ctx.strokeStyle = css(0xffffff, 0.7);
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(2, -28);
+        ctx.lineTo(4, -4);
+        ctx.stroke();
+      } else if (variant === 1) {
+        // frost-etched pillar
+        poly(ctx, [[-4, 0], [-3, -30], [3, -32], [4, 0]], css(0x9db4c2));
+        poly(ctx, [[-3, -30], [3, -32], [4, 0], [1, 0]], css(0x84a0b0));
+        seam(ctx, 0, -28, 24, glow, 0.6);
+      } else {
+        // snowdrift with embedded shard
+        ctx.beginPath();
+        ctx.ellipse(0, -2, 11, 5, 0, 0, Math.PI * 2);
+        ctx.fillStyle = css(0xdcebf4);
+        ctx.fill();
+        poly(ctx, [[2, -4], [6, -16], [9, -3]], css(0xb8d2e2));
+      }
+      break;
+    }
+    case "verdant-ruin": {
+      groundShadow(ctx, 9, 3.4);
+      if (variant === 0) {
+        // broken column, moss cap
+        poly(ctx, [[-5, 0], [-5, -20], [5, -22], [5, 0]], css(0x8a8474));
+        poly(ctx, [[0, -21], [5, -22], [5, 0], [1, 0]], css(0x6e695b));
+        ctx.beginPath();
+        ctx.ellipse(0, -21, 6, 2.6, 0, 0, Math.PI * 2);
+        ctx.fillStyle = css(0x5d7a4a);
+        ctx.fill();
+        circle(ctx, -3, -10, 2, css(0x55704a, 0.85));
+      } else if (variant === 1) {
+        // vine-choked arch stump
+        ctx.strokeStyle = css(0x7d7568);
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(0, -4, 9, Math.PI, Math.PI * 1.8);
+        ctx.stroke();
+        ctx.strokeStyle = css(0x5d7a4a, 0.9);
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(-9, -4);
+        ctx.quadraticCurveTo(-4, -16, 4, -11);
+        ctx.stroke();
+        circle(ctx, 3, -11, 1.2, css(glow, 0.7));
+      } else {
+        // relic stone swallowed by growth
+        poly(ctx, [[-6, 0], [-4, -16], [4, -18], [6, 0]], css(0x6f6a5c));
+        circle(ctx, -2, -14, 3, css(0x55704a));
+        circle(ctx, 3, -6, 2.4, css(0x5d7a4a));
+        circle(ctx, 0, -10, 1, css(glow, 0.6));
+      }
+      break;
+    }
+    case "dune-monolith": {
+      groundShadow(ctx, 10, 3.2, 0.24);
+      if (variant === 0) {
+        // half-buried tilted monolith
+        ctx.save();
+        ctx.rotate(-0.16);
+        poly(ctx, [[-5, 2], [-4, -24], [4, -26], [5, 2]], css(0x8a7c60));
+        poly(ctx, [[-4, -24], [4, -26], [5, 2], [1, 2]], css(0x6f6350));
+        circle(ctx, 0, -18, 1.4, css(glow, 0.7));
+        ctx.restore();
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 10, 3.4, 0, 0, Math.PI * 2);
+        ctx.fillStyle = css(0xa3936f);
+        ctx.fill();
+      } else if (variant === 1) {
+        // colossal rib bones
+        ctx.strokeStyle = css(0xcfc2a4);
+        ctx.lineWidth = 2;
+        for (const [dx, r] of [[-6, 12], [0, 15], [6, 11]] as const) {
+          ctx.beginPath();
+          ctx.arc(dx, 0, r, Math.PI * 1.05, Math.PI * 1.6);
+          ctx.stroke();
+        }
+      } else {
+        // cairn of stones
+        circle(ctx, -4, -3, 4, css(0x847a64));
+        circle(ctx, 4, -3, 3.4, css(0x8f8266));
+        circle(ctx, 0, -8, 3, css(0x9a8c6e));
+        circle(ctx, 0, -8, 0.9, css(glow, 0.6));
+      }
+      break;
+    }
+  }
+}
+
+function propTextures(scene: Phaser.Scene, arch: Archetype, gen: number): string[] {
+  return [0, 1, 2].map((v) =>
+    canvasTexture(scene, `g${gen}-prop-${v}`, PROP_W, PROP_H, (ctx) => {
+      ctx.translate(PROP_W / 2, PROP_H - 4);
+      drawProp(ctx, arch, v);
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Structures + figures
+// ---------------------------------------------------------------------------
+
+const B_W = 100;
+const B_H = 100;
+
+function buildingTexture(scene: Phaser.Scene, key: string, draw: (ctx: Ctx) => void): string {
+  return canvasTexture(scene, key, B_W, B_H, (ctx) => {
+    ctx.translate(B_W / 2, B_H - 4);
+    draw(ctx);
+  });
+}
+
+function drawScaffold(ctx: Ctx, w: number, d: number, h: number, glow: number): void {
+  isoBox(ctx, w, d, h * 0.4, 0x5c554a, 0x4a4439, 0x3b362d);
+  for (const x of [-w / 2 + 2, w / 2 - 2, 0]) {
+    ctx.fillStyle = css(0x55503f);
+    ctx.fillRect(x - 1, -h, 2, h);
+  }
+  ctx.fillStyle = css(glow, 0.35);
+  ctx.fillRect(-w / 4, -h - 2, w / 2, 2);
+}
+
+export function buildTextures(scene: Phaser.Scene, arch: Archetype, gen: number): TextureSet {
+  const glow = arch.glow;
+  const g = (name: string) => `g${gen}-${name}`;
+
+  const ground = groundTextures(scene, arch, arch.groundColors, gen, "ground");
+  const fog = fogTexture(scene, arch.fogColor, gen);
+  const props = propTextures(scene, arch, gen);
+
+  const scaffoldFor = (name: string, w: number, d: number, h: number): string =>
+    buildingTexture(scene, g(`${name}-scaffold`), (ctx) => drawScaffold(ctx, w, d, h, glow));
 
   const buildings: TextureSet["buildings"] = {
     // dwelling: low adobe block, one glow door
     house: {
-      built: mk((g) => {
-        isoBox(g, 40, 24, 22, 0x8d8577, 0x6e675b, 0x585247);
-        seam(g, 10, -18, 18);
-        g.moveTo(0, -34).lineTo(20, -22).lineTo(0, -12).lineTo(-20, -22).closePath().fill(0x77705f);
+      built: buildingTexture(scene, g("house"), (ctx) => {
+        groundShadow(ctx, 22, 7);
+        isoBox(ctx, 40, 24, 22, 0x8d8577, 0x6e675b, 0x585247);
+        seam(ctx, 10, -18, 18, glow);
+        poly(ctx, [[0, -34], [20, -22], [0, -12], [-20, -22]], css(0x77705f));
       }),
-      scaffold: scaffoldFor(40, 24, 24),
+      scaffold: scaffoldFor("house", 40, 24, 24),
     },
     // bastion: angular fortress with antenna-spike
     barracks: {
-      built: mk((g) => {
-        isoBox(g, 48, 30, 28, 0x6f6f74, 0x55555c, 0x424248);
-        g.moveTo(-24, -28).lineTo(-14, -40).lineTo(-4, -28).closePath().fill(0x62626a);
-        g.rect(-0.8, -54, 1.6, 26).fill(0x50505a);
-        g.circle(0, -55, 1.8).fill({ color: 0xb5564a, alpha: 0.95 });
-        seam(g, -18, -22, 20, 0xb5564a);
+      built: buildingTexture(scene, g("barracks"), (ctx) => {
+        groundShadow(ctx, 26, 8);
+        isoBox(ctx, 48, 30, 28, 0x6f6f74, 0x55555c, 0x424248);
+        poly(ctx, [[-24, -28], [-14, -40], [-4, -28]], css(0x62626a));
+        ctx.fillStyle = css(0x50505a);
+        ctx.fillRect(-0.8, -54, 1.6, 26);
+        circle(ctx, 0, -55, 1.8, css(0xb5564a, 0.95));
+        seam(ctx, -18, -22, 20, 0xb5564a);
       }),
-      scaffold: scaffoldFor(48, 30, 28),
+      scaffold: scaffoldFor("barracks", 48, 30, 28),
     },
     // trade-vault: low dome over a causeway gate
     market: {
-      built: mk((g) => {
-        isoBox(g, 46, 28, 14, 0x8d8577, 0x6e675b, 0x585247);
-        g.circle(0, -20, 13).fill(0x77705f);
-        g.circle(0, -20, 13).stroke({ color: 0x4a4439, width: 1.5 });
-        g.rect(-6, -12, 12, 12).fill({ color: GLOW, alpha: 0.5 });
-        seam(g, -16, -12, 10);
-        seam(g, 16, -12, 10);
+      built: buildingTexture(scene, g("market"), (ctx) => {
+        groundShadow(ctx, 25, 8);
+        isoBox(ctx, 46, 28, 14, 0x8d8577, 0x6e675b, 0x585247);
+        circle(ctx, 0, -20, 13, css(0x77705f));
+        ring(ctx, 0, -20, 13, 13, css(0x4a4439), 1.5);
+        ctx.fillStyle = css(glow, 0.5);
+        ctx.fillRect(-6, -12, 12, 12);
+        seam(ctx, -16, -12, 10, glow);
+        seam(ctx, 16, -12, 10, glow);
       }),
-      scaffold: scaffoldFor(46, 28, 22),
+      scaffold: scaffoldFor("market", 46, 28, 22),
     },
     // sanctum: tall thin obelisk, apex glow
     monastery: {
-      built: mk((g) => {
-        g.moveTo(-9, 0).lineTo(-5, -44).lineTo(0, -48).lineTo(5, -44).lineTo(9, 0).closePath().fill(0x7d7568);
-        g.moveTo(0, -48).lineTo(5, -44).lineTo(9, 0).lineTo(0, 0).closePath().fill(0x655e51);
-        g.circle(0, -50, 2.4).fill({ color: GLOW, alpha: 0.95 });
-        seam(g, 0, -40, 34);
-        g.ellipse(0, 1, 12, 4).fill({ color: 0x000000, alpha: 0.3 });
+      built: buildingTexture(scene, g("monastery"), (ctx) => {
+        groundShadow(ctx, 12, 4);
+        poly(ctx, [[-9, 0], [-5, -44], [0, -48], [5, -44], [9, 0]], css(0x7d7568));
+        poly(ctx, [[0, -48], [5, -44], [9, 0], [0, 0]], css(0x655e51));
+        circle(ctx, 0, -50, 2.4, css(glow, 0.95));
+        seam(ctx, 0, -40, 34, glow);
       }),
-      scaffold: scaffoldFor(38, 24, 30),
+      scaffold: scaffoldFor("monastery", 38, 24, 30),
     },
     // engine-granary: tiered silo with a slow ring
     mill: {
-      built: mk((g) => {
-        isoBox(g, 34, 22, 18, 0x837b6c, 0x685f50, 0x534b3e);
-        isoBox(g, 24, 16, 10, 0x8d8577, 0x6e675b, 0x585247);
-        g.translateTransform(0, -28);
-        g.ellipse(0, 0, 15, 5).stroke({ color: GLOW, width: 1.4, alpha: 0.7 });
-        g.translateTransform(0, 28);
+      built: buildingTexture(scene, g("mill"), (ctx) => {
+        groundShadow(ctx, 20, 7);
+        isoBox(ctx, 34, 22, 18, 0x837b6c, 0x685f50, 0x534b3e);
+        ctx.save();
+        ctx.translate(0, -17);
+        isoBox(ctx, 24, 16, 10, 0x8d8577, 0x6e675b, 0x585247);
+        ctx.restore();
+        ring(ctx, 0, -31, 15, 5, css(glow, 0.7), 1.4);
       }),
-      scaffold: scaffoldFor(34, 22, 24),
+      scaffold: scaffoldFor("mill", 34, 22, 24),
     },
     // the Citadel: stepped monolith, apex beacon
     towncenter: {
-      built: mk((g) => {
-        isoBox(g, 64, 40, 20, 0x7d7568, 0x615a4c, 0x4c463b);
-        g.translateTransform(0, -20);
-        isoBox(g, 46, 30, 16, 0x877f70, 0x6a6254, 0x544d40);
-        g.translateTransform(0, -16);
-        isoBox(g, 28, 18, 14, 0x91897a, 0x746c5c, 0x5c5547);
-        g.translateTransform(0, 36);
-        seam(g, -20, -34, 30);
-        seam(g, 20, -34, 30);
-        g.circle(0, -66, 3).fill(GLOW);
-        g.circle(0, -66, 6).stroke({ color: GLOW, width: 1, alpha: 0.4 });
+      built: buildingTexture(scene, g("towncenter"), (ctx) => {
+        groundShadow(ctx, 34, 11);
+        isoBox(ctx, 64, 40, 20, 0x7d7568, 0x615a4c, 0x4c463b);
+        ctx.save();
+        ctx.translate(0, -20);
+        isoBox(ctx, 46, 30, 16, 0x877f70, 0x6a6254, 0x544d40);
+        ctx.translate(0, -16);
+        isoBox(ctx, 28, 18, 14, 0x91897a, 0x746c5c, 0x5c5547);
+        ctx.restore();
+        seam(ctx, -20, -34, 30, glow);
+        seam(ctx, 20, -34, 30, glow);
+        circle(ctx, 0, -66, 3, css(glow));
+        ring(ctx, 0, -66, 6, 6, css(glow, 0.4), 1);
       }),
-      scaffold: scaffoldFor(64, 40, 34),
+      scaffold: scaffoldFor("towncenter", 64, 40, 34),
     },
   };
 
   // the Beacon: a spire casting a light column
-  const wonder = mk((g) => {
-    g.rect(-2.5, -70, 5, 200).fill({ color: GLOW, alpha: 0.12 });
-    g.moveTo(-14, 0).lineTo(-6, -58).lineTo(0, -64).lineTo(6, -58).lineTo(14, 0).closePath().fill(0x8d8577);
-    g.moveTo(0, -64).lineTo(6, -58).lineTo(14, 0).lineTo(0, 0).closePath().fill(0x6e675b);
-    seam(g, 0, -58, 52);
-    g.circle(0, -68, 4).fill(GLOW);
-    g.circle(0, -68, 9).stroke({ color: GLOW, width: 1.2, alpha: 0.5 });
-    g.ellipse(0, 1, 18, 6).fill({ color: 0x000000, alpha: 0.3 });
+  const W_W = 140;
+  const W_H = 240;
+  const wonder = canvasTexture(scene, g("wonder"), W_W, W_H, (ctx) => {
+    ctx.translate(W_W / 2, W_H - 6);
+    ctx.fillStyle = css(glow, 0.12);
+    ctx.fillRect(-6, -226, 12, 162);
+    ctx.fillStyle = css(glow, 0.2);
+    ctx.fillRect(-2.5, -226, 5, 162);
+    groundShadow(ctx, 18, 6);
+    poly(ctx, [[-14, 0], [-6, -58], [0, -64], [6, -58], [14, 0]], css(0x8d8577));
+    poly(ctx, [[0, -64], [6, -58], [14, 0], [0, 0]], css(0x6e675b));
+    seam(ctx, 0, -58, 52, glow);
+    circle(ctx, 0, -68, 4, css(glow));
+    ring(ctx, 0, -68, 9, 9, css(glow, 0.5), 1.2);
   });
 
-  // --- figures ----------------------------------------------------------------
+  // --- figures ---------------------------------------------------------------
+  const U_W = 44;
+  const U_H = 44;
+  const unitTexture = (name: string, draw: (ctx: Ctx) => void): string =>
+    canvasTexture(scene, g(name), U_W, U_H, (ctx) => {
+      ctx.translate(U_W / 2, U_H - 4);
+      draw(ctx);
+    });
+
   // robed worker
-  const villager = mk((g) => {
-    g.ellipse(0, 1, 8, 3.5).fill({ color: 0x000000, alpha: 0.35 });
-    g.moveTo(-5, 0).lineTo(-4, -13).lineTo(4, -13).lineTo(5, 0).closePath().fill(0xa39a86);
-    g.circle(0, -15, 4).fill(0x8d8577);
-    g.moveTo(-4, -15).lineTo(0, -20).lineTo(4, -15).closePath().fill(0xa39a86); // hood
-    g.rect(-1, -10, 2, 6).fill({ color: 0x4a4439 }); // sash
+  const villager = unitTexture("villager", (ctx) => {
+    groundShadow(ctx, 8, 3.5, 0.35);
+    poly(ctx, [[-5, 0], [-4, -13], [4, -13], [5, 0]], css(0xa39a86));
+    circle(ctx, 0, -15, 4, css(0x8d8577));
+    poly(ctx, [[-4, -15], [0, -20], [4, -15]], css(0xa39a86)); // hood
+    ctx.fillStyle = css(0x4a4439);
+    ctx.fillRect(-1, -10, 2, 6); // sash
   });
   // hierophant: taller, halo ring
-  const king = mk((g) => {
-    g.ellipse(0, 1, 9, 4).fill({ color: 0x000000, alpha: 0.35 });
-    g.moveTo(-6, 0).lineTo(-4, -17).lineTo(4, -17).lineTo(6, 0).closePath().fill(0x8a7a58);
-    g.circle(0, -19, 4).fill(0x9a8f79);
-    g.moveTo(-4, -19).lineTo(0, -25).lineTo(4, -19).closePath().fill(0x8a7a58);
-    g.ellipse(0, -22, 8, 3).stroke({ color: GLOW, width: 1.3, alpha: 0.9 });
+  const king = unitTexture("king", (ctx) => {
+    groundShadow(ctx, 9, 4, 0.35);
+    poly(ctx, [[-6, 0], [-4, -17], [4, -17], [6, 0]], css(0x8a7a58));
+    circle(ctx, 0, -19, 4, css(0x9a8f79));
+    poly(ctx, [[-4, -19], [0, -25], [4, -19]], css(0x8a7a58));
+    ring(ctx, 0, -22, 8, 3, css(glow, 0.9), 1.3);
   });
   // specter: black wraith, pale eyes
-  const raider = mk((g) => {
-    g.ellipse(0, 1, 8, 3.5).fill({ color: 0x000000, alpha: 0.25 });
-    g.moveTo(-5, 0).lineTo(-4, -14).lineTo(0, -18).lineTo(4, -14).lineTo(5, 0).closePath().fill({ color: 0x16141a, alpha: 0.95 });
-    g.moveTo(-5, 0).lineTo(-2, -4).lineTo(1, 0).closePath().fill({ color: 0x16141a, alpha: 0.5 });
-    g.circle(-1.6, -13, 1).fill(0xbfd4d8);
-    g.circle(1.6, -13, 1).fill(0xbfd4d8);
+  const raider = unitTexture("raider", (ctx) => {
+    groundShadow(ctx, 8, 3.5, 0.25);
+    poly(ctx, [[-5, 0], [-4, -14], [0, -18], [4, -14], [5, 0]], css(0x16141a, 0.95));
+    poly(ctx, [[-5, 0], [-2, -4], [1, 0]], css(0x16141a, 0.5));
+    circle(ctx, -1.6, -13, 1, css(0xbfd4d8));
+    circle(ctx, 1.6, -13, 1, css(0xbfd4d8));
   });
 
-  const hlG = new Graphics();
-  hlG.moveTo(0, -TILE_H / 2).lineTo(TILE_W / 2, 0).lineTo(0, TILE_H / 2).lineTo(-TILE_W / 2, 0).closePath()
-    .stroke({ color: GLOW, width: 2 });
-  const highlight = gen(hlG);
-
-  return { grass, fog, tree, buildings, wonder, villager, king, raider, highlight };
-}
-
-function makeGroundTextures(renderer: Renderer, colors: number[]): Texture[] {
-  return colors.map((c) => {
-    const g = new Graphics();
-    diamond(g, TILE_W, TILE_H, c);
-    g.moveTo(0, -TILE_H / 2).lineTo(TILE_W / 2, 0).lineTo(0, TILE_H / 2).lineTo(-TILE_W / 2, 0).closePath()
-      .stroke({ color: 0x2e2a22, width: 1, alpha: 0.5 });
-    const tex = renderer.generateTexture({ target: g, resolution: 2 });
-    g.destroy();
-    return tex;
+  const hlW = TILE_W + 8;
+  const hlH = TILE_H + 8;
+  const highlight = canvasTexture(scene, g("highlight"), hlW, hlH, (ctx) => {
+    ctx.translate(hlW / 2, hlH / 2);
+    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+    ctx.fillStyle = css(glow, 0.08);
+    ctx.fill();
+    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+    ctx.strokeStyle = css(glow);
+    ctx.lineWidth = 2;
+    ctx.stroke();
   });
+
+  return { ground, fog, props, buildings, wonder, villager, king, raider, highlight };
 }
 
 // ---------------------------------------------------------------------------
@@ -223,71 +637,127 @@ function makeGroundTextures(renderer: Renderer, colors: number[]): Texture[] {
 // ---------------------------------------------------------------------------
 
 export function pixelSpriteTexture(
-  renderer: Renderer,
+  scene: Phaser.Scene,
+  key: string,
   sprite: PixelSprite,
   pixelSize: number,
-): Texture {
-  const g = new Graphics();
+): string {
   const width = Math.max(...sprite.rows.map((r) => r.length));
   const height = sprite.rows.length;
-  const ox = (-width * pixelSize) / 2;
-  sprite.rows.forEach((row, y) => {
-    for (let x = 0; x < row.length; x++) {
-      const ch = row[x]!;
-      if (ch === "." || ch === " ") continue;
-      const hex = sprite.palette[ch];
-      if (!hex) continue;
-      g.rect(ox + x * pixelSize, (y - height) * pixelSize, pixelSize, pixelSize).fill(
-        parseInt(hex.slice(1), 16),
-      );
-    }
+  const w = width * pixelSize + 8;
+  const h = height * pixelSize + 10;
+  return canvasTexture(scene, key, w, h, (ctx) => {
+    ctx.translate(w / 2, h - 4);
+    // soft ground shadow so themed sprites sit in the world
+    groundShadow(ctx, (width * pixelSize) / 3, 3.5);
+    const ox = (-width * pixelSize) / 2;
+    sprite.rows.forEach((row, y) => {
+      for (let x = 0; x < row.length; x++) {
+        const ch = row[x]!;
+        if (ch === "." || ch === " ") continue;
+        const hex = sprite.palette[ch];
+        if (!hex) continue;
+        ctx.fillStyle = hex;
+        ctx.fillRect(ox + x * pixelSize, (y - height) * pixelSize, pixelSize, pixelSize);
+      }
+    });
   });
-  // soft ground shadow so themed sprites sit in the world
-  g.ellipse(0, 1, (width * pixelSize) / 3, 3.5).fill({ color: 0x000000, alpha: 0.3 });
-  const tex = renderer.generateTexture({ target: g, resolution: 2 });
-  g.destroy();
-  return tex;
 }
 
 const UNIT_KEYS = new Set(["villager", "hero", "raider"]);
 const BUILDING_KEYS = new Set(["house", "barracks", "market", "monastery", "mill", "towncenter"]);
 
 /** Merge a ThemePack over the default set. Missing pieces keep defaults. */
-export function applyTheme(renderer: Renderer, base: TextureSet, theme: ThemePack): TextureSet {
-  const out: TextureSet = {
-    ...base,
-    buildings: { ...base.buildings },
-  };
+export function applyTheme(
+  scene: Phaser.Scene,
+  base: TextureSet,
+  theme: ThemePack,
+  arch: Archetype,
+  gen: number,
+): TextureSet {
+  const out: TextureSet = { ...base, buildings: { ...base.buildings } };
 
   const grassColors = theme.biome.grassColors
     .map((c) => parseInt(c.slice(1), 16))
     .filter((n) => !Number.isNaN(n));
-  if (grassColors.length >= 2) out.grass = makeGroundTextures(renderer, grassColors);
+  if (grassColors.length >= 2) out.ground = groundTextures(scene, arch, grassColors, gen, "tground");
 
   const fogColor = parseInt(theme.biome.fogColor.slice(1), 16);
   if (!Number.isNaN(fogColor)) {
-    const g = new Graphics();
-    diamond(g, TILE_W + 2, TILE_H + 2, fogColor);
-    out.fog = renderer.generateTexture({ target: g, resolution: 2 });
-    g.destroy();
+    out.fog = canvasTexture(scene, `g${gen}-tfog`, TILE_W + 2, TILE_H + 2, (ctx) => {
+      ctx.translate((TILE_W + 2) / 2, (TILE_H + 2) / 2);
+      diamondPath(ctx, 0, 0, TILE_W + 2, TILE_H + 2);
+      ctx.fillStyle = css(fogColor);
+      ctx.fill();
+    });
   }
 
   for (const sprite of theme.sprites) {
+    const key = `g${gen}-t-${sprite.key}`;
     if (UNIT_KEYS.has(sprite.key)) {
-      const tex = pixelSpriteTexture(renderer, sprite, 2);
+      const tex = pixelSpriteTexture(scene, key, sprite, 2);
       if (sprite.key === "villager") out.villager = tex;
       if (sprite.key === "hero") out.king = tex;
       if (sprite.key === "raider") out.raider = tex;
     } else if (sprite.key === "tree") {
-      out.tree = pixelSpriteTexture(renderer, sprite, 2);
+      // themed relic/flora replaces every archetype prop variant
+      const tex = pixelSpriteTexture(scene, key, sprite, 2);
+      out.props = [tex, tex, tex];
     } else if (BUILDING_KEYS.has(sprite.key)) {
       out.buildings[sprite.key] = {
-        built: pixelSpriteTexture(renderer, sprite, sprite.key === "towncenter" ? 3 : 2.5),
+        built: pixelSpriteTexture(scene, key, sprite, sprite.key === "towncenter" ? 3 : 2.5),
         scaffold: base.buildings[sprite.key]?.scaffold ?? base.buildings.house!.scaffold,
       };
     } else if (sprite.key === "wonder") {
-      out.wonder = pixelSpriteTexture(renderer, sprite, 3);
+      out.wonder = pixelSpriteTexture(scene, key, sprite, 3);
     }
   }
   return out;
+}
+
+/** Horizon gradient fixed to the top of the viewport (skyline tint). */
+export function skyTexture(scene: Phaser.Scene, color: number, gen: number): string {
+  return canvasTexture(scene, `g${gen}-sky`, 16, 160, (ctx) => {
+    const grad = ctx.createLinearGradient(0, 0, 0, 160);
+    grad.addColorStop(0, css(color, 0.9));
+    grad.addColorStop(1, css(color, 0));
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 16, 160);
+  });
+}
+
+/** Shared ambient-particle textures (tinted per archetype at spawn). */
+export function particleTextures(scene: Phaser.Scene): { soft: string; mist: string; streak: string } {
+  const soft = canvasTexture(scene, "fx-soft", 24, 24, (ctx) => {
+    const grad = ctx.createRadialGradient(12, 12, 0, 12, 12, 12);
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.55, "rgba(255,255,255,0.55)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 24, 24);
+  });
+  const mist = canvasTexture(scene, "fx-mist", 96, 96, (ctx) => {
+    const grad = ctx.createRadialGradient(48, 48, 0, 48, 48, 48);
+    grad.addColorStop(0, "rgba(255,255,255,0.9)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 96, 96);
+  });
+  const streak = canvasTexture(scene, "fx-streak", 28, 6, (ctx) => {
+    const grad = ctx.createLinearGradient(0, 0, 28, 0);
+    grad.addColorStop(0, "rgba(255,255,255,0)");
+    grad.addColorStop(0.5, "rgba(255,255,255,1)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 1, 28, 4);
+  });
+  return { soft, mist, streak };
+}
+
+/** Drop every canvas texture belonging to an older generation. */
+export function pruneGeneration(scene: Phaser.Scene, gen: number): void {
+  const prefix = `g${gen}-`;
+  for (const key of Object.keys(scene.textures.list)) {
+    if (key.startsWith(prefix)) scene.textures.remove(key);
+  }
 }

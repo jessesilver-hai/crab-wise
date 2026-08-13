@@ -12,7 +12,7 @@
     "@agent-empires/protocol": "*",
     "@agent-empires/runtime": "*",
     "@agent-empires/tasks": "*",
-    "pixi.js": "^8.6.6"
+    "phaser": "^4.2.1"
   },
   "devDependencies": {
     "typescript": "^5.7.3",
