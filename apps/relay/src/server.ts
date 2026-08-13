@@ -11,6 +11,7 @@ import {
   RelayMessage,
   MatchSummary,
   PROTOCOL_VERSION,
+  ThemePack,
 } from "@agent-empires/protocol";
 import { SandboxManager, driverFromEnv } from "./sandbox.js";
 
@@ -181,11 +182,19 @@ app.get<{ Params: { repoKey: string } }>("/api/theme/:repoKey", async (req, repl
 app.put<{ Params: { repoKey: string } }>("/api/theme/:repoKey", async (req, reply) => {
   const body = JSON.stringify(req.body);
   if (body.length > 300_000) return reply.code(413).send({ error: "theme too large" });
+  // Never trust cached blobs: only schema-valid ThemePacks enter the cache.
+  const parsed = ThemePack.safeParse(req.body);
+  if (!parsed.success) {
+    return reply.code(422).send({
+      error: "theme failed validation",
+      issues: parsed.error.issues.slice(0, 5).map((i) => `${i.path.join(".")}: ${i.message}`),
+    });
+  }
   if (themeCache.size >= THEME_CACHE_MAX) {
     const oldest = themeCache.keys().next().value;
     if (oldest) themeCache.delete(oldest);
   }
-  themeCache.set(req.params.repoKey, body);
+  themeCache.set(req.params.repoKey, JSON.stringify(parsed.data));
   reply.send({ ok: true });
 });
 

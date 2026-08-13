@@ -15,6 +15,8 @@ export class Unit {
   private walkTween: Phaser.Tweens.Tween | null = null;
   private bobPhase = Math.random() * Math.PI * 2;
   dimmed = false;
+  /** WorldSpec gaitBounce → walk-bob amplitude multiplier (1 = default). */
+  gaitScale = 1;
 
   constructor(
     private scene: Phaser.Scene,
@@ -68,6 +70,12 @@ export class Unit {
     this.sprite.setScale(TEX_SCALE);
   }
 
+  /** WorldSpec unit tint (multiplies the sprite); undefined clears it. */
+  applyTint(color?: number): void {
+    if (color === undefined) this.sprite.clearTint();
+    else this.sprite.setTint(color);
+  }
+
   say(text: string): void {
     this.bubble?.destroy();
     const label = this.scene.add
@@ -99,7 +107,7 @@ export class Unit {
   tick(dtMs: number, now: number): void {
     const moving = this.isWalking;
     this.bobPhase += dtMs / (moving ? 90 : 400);
-    this.sprite.setY(Math.sin(this.bobPhase) * (moving ? 2.2 : 0.8));
+    this.sprite.setY(Math.sin(this.bobPhase) * (moving ? 2.2 : 0.8) * this.gaitScale);
     this.root.setAlpha(this.dimmed ? 0.55 : 1);
     this.root.setDepth(this.root.y);
 

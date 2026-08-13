@@ -118,9 +118,18 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
 
     // No cached theme: divine one in the background while the session runs.
     if (!cachedTheme && !abort.signal.aborted) {
+      const narrate = (text: string) =>
+        onEvent({ seq: 0, ts: Date.now(), type: "log", level: "info", text });
+      narrate(`⟡ The chroniclers read the record of ${repoLabel}…`);
       void generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary }).then(async (theme) => {
         if (abort.signal.aborted) return;
         if (theme) {
+          // Fake-stream the world's own loading narration while it morphs in.
+          theme.worldSpec?.lore.loadingLines.forEach((line, i) => {
+            window.setTimeout(() => {
+              if (!abort.signal.aborted) narrate(`⟡ ${line}`);
+            }, i * 4000);
+          });
           settlement!.setTheme(theme);
           await fetch(`/api/theme/${repoKey(repoUrl)}`, {
             method: "PUT",

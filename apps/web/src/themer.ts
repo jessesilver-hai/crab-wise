@@ -65,7 +65,36 @@ palette (ash, bone, ochre, umber, one dim glow accent), "." = transparent, each 
 length, subject centered with its base on the bottom row. Required keys and max sizes:
 villager 18x18, hero 20x20, raider 18x18, tree 20x20 (a relic/monolith/flora of the realm),
 house 26x26, barracks 26x26, market 26x26, monastery 26x26, mill 26x26, towncenter 32x32.
-Palette maps single characters to #rrggbb.`;
+Palette maps single characters to #rrggbb.
+
+Also author worldSpec — the composed geometry of this world, which the engine renders.
+You do not draw here; you PARAMETERIZE a fixed vocabulary. All colors are "#rrggbb".
+- lore: placeName; epithet (one sentence); loadingLines: 3-6 short in-fiction lines that
+  reference THIS repository's actual domain (its real modules, purpose, rituals of its
+  craft) as if chroniclers were reading its record aloud while the world forms. Each ≤160
+  chars.
+- sky: { top, horizon, hazeAlpha 0-0.5 } — vertical gradient plus haze.
+- terrain: { base: 3-6 ground hex colors dark→light, pattern: one of
+  plates|dunes|floes|moss|tessellae|shale, reliefIntensity 0-1,
+  optional waterline { color, coverage 0-0.35 } for harbor/glacier worlds }.
+- props: up to 12 scatter objects. Each has silhouette: 1-6 primitives, density 0-1,
+  placement: ridges|edges|scatter|districts, optional glow { color, pulseSec 2-20 }.
+- Primitive vocabulary (the ONLY shapes that exist): slab (block), obelisk (tapered
+  pillar), arch (legs + curve), mast (thin pole + yard), orb (sphere), shard (spike
+  triangle), frond (fanned fibers), coil (sinuous column), ring (hoop), beam (light
+  column). Each: { shape, w 2-48, h 2-72 (integers), color, tilt -30..30 degrees }.
+  Props compose primitives side-by-side at the ground; buildings STACK them bottom→top.
+- architecture: for each of house, barracks, market, monastery, mill, towncenter:
+  { silhouette: 1-5 stacked primitives, roofColor, wallColor, optional emissive } —
+  make the towncenter monumental and the six kinds distinguishable at a glance.
+- ambience: { particles: embers|mist|snow|spores|dust|rain|none, tint, rate 0-1,
+  optional skyEvents { kind: flare|drift|aurora|birds, everySec 20-120 } }.
+- units: { villagerTint, heroTint, raiderTint, gaitBounce 0-1 } — tints multiply the
+  figure sprites, so keep them bright-ish; gaitBounce is how springy the walk is.
+- version must be the number 1.
+When worldSpec is present it supplies terrain, props, and building geometry, so the
+tree and building pixel sprites become optional — but villager/hero/raider sprites are
+still required.`;
 
 export async function generateTheme(opts: {
   apiKey: string;
@@ -132,10 +161,55 @@ export async function generateTheme(opts: {
                   required: ["key", "rows", "palette"],
                 },
               },
+              worldSpec: {
+                type: "object",
+                description:
+                  "Composed world geometry per the worldSpec rules in the system prompt (version, lore, sky, terrain, props, architecture, ambience, units).",
+                properties: {
+                  version: { type: "number", enum: [1] },
+                  lore: {
+                    type: "object",
+                    properties: {
+                      placeName: { type: "string" },
+                      epithet: { type: "string" },
+                      loadingLines: { type: "array", items: { type: "string" } },
+                    },
+                    required: ["placeName", "epithet", "loadingLines"],
+                  },
+                  sky: {
+                    type: "object",
+                    properties: {
+                      top: { type: "string" },
+                      horizon: { type: "string" },
+                      hazeAlpha: { type: "number" },
+                    },
+                    required: ["top", "horizon", "hazeAlpha"],
+                  },
+                  terrain: {
+                    type: "object",
+                    properties: {
+                      base: { type: "array", items: { type: "string" } },
+                      pattern: { type: "string", enum: ["plates", "dunes", "floes", "moss", "tessellae", "shale"] },
+                      reliefIntensity: { type: "number" },
+                      waterline: {
+                        type: "object",
+                        properties: { color: { type: "string" }, coverage: { type: "number" } },
+                        required: ["color", "coverage"],
+                      },
+                    },
+                    required: ["base", "pattern", "reliefIntensity"],
+                  },
+                  props: { type: "array", items: { type: "object" } },
+                  architecture: { type: "object" },
+                  ambience: { type: "object" },
+                  units: { type: "object" },
+                },
+                required: ["version", "lore", "sky", "terrain", "props", "architecture", "ambience", "units"],
+              },
             },
             required: [
               "factionName", "tagline", "kingName", "enemyName", "biome",
-              "heraldOpeners", "heraldClosers", "personas", "sprites",
+              "heraldOpeners", "heraldClosers", "personas", "sprites", "worldSpec",
             ],
           },
         },
@@ -161,11 +235,18 @@ Deliver the theme via set_theme.`,
     if (!call || call.type !== "tool_use") return null;
     const candidate = normalizeCandidate(call.input as Record<string, unknown>);
     const parsed = ThemePack.safeParse(candidate);
-    if (!parsed.success) {
-      console.warn("theme validation failed", parsed.error.issues.slice(0, 5));
-      return null;
+    if (parsed.success) return parsed.data;
+    // Never fail the whole theme because the worldSpec was bad: strip it and retry.
+    if ("worldSpec" in candidate) {
+      const { worldSpec: _dropped, ...rest } = candidate;
+      const retry = ThemePack.safeParse(rest);
+      if (retry.success) {
+        console.warn("worldSpec validation failed; keeping theme without it", parsed.error.issues.slice(0, 5));
+        return retry.data;
+      }
     }
-    return parsed.data;
+    console.warn("theme validation failed", parsed.error.issues.slice(0, 5));
+    return null;
   } catch (err) {
     console.warn("theme generation failed", err);
     return null;
@@ -193,6 +274,39 @@ function normalizeCandidate(input: Record<string, unknown>): Record<string, unkn
       })
       .filter((s) => s.rows.length >= 4)
       .slice(0, 14);
+  }
+  if (out.worldSpec && typeof out.worldSpec === "object") {
+    out.worldSpec = normalizeWorldSpec(out.worldSpec as Record<string, unknown>);
+  }
+  return out;
+}
+
+/**
+ * Round/clamp primitive numerics before strict validation — models emit
+ * floats and slightly-out-of-range tilts far more often than bad structure.
+ */
+function normalizeWorldSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+  const fixPrimitive = (p: unknown): unknown => {
+    if (!p || typeof p !== "object") return p;
+    const prim = { ...(p as Record<string, unknown>) };
+    if (typeof prim.w === "number") prim.w = clamp(Math.round(prim.w), 2, 48);
+    if (typeof prim.h === "number") prim.h = clamp(Math.round(prim.h), 2, 72);
+    if (typeof prim.tilt === "number") prim.tilt = clamp(prim.tilt, -30, 30);
+    return prim;
+  };
+  const fixSilhouette = (o: unknown): unknown => {
+    if (!o || typeof o !== "object") return o;
+    const rec = { ...(o as Record<string, unknown>) };
+    if (Array.isArray(rec.silhouette)) rec.silhouette = rec.silhouette.map(fixPrimitive);
+    return rec;
+  };
+  const out = { ...spec };
+  if (Array.isArray(out.props)) out.props = out.props.map(fixSilhouette);
+  if (out.architecture && typeof out.architecture === "object") {
+    out.architecture = Object.fromEntries(
+      Object.entries(out.architecture as Record<string, unknown>).map(([k, v]) => [k, fixSilhouette(v)]),
+    );
   }
   return out;
 }

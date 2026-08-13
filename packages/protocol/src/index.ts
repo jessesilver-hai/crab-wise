@@ -51,6 +51,112 @@ export const PixelSprite = z.object({
 });
 export type PixelSprite = z.infer<typeof PixelSprite>;
 
+// ---------------------------------------------------------------------------
+// WorldSpec — bounded LLM-authored world geometry (Level 2 agentic worlds).
+// The engine is fixed code; a world is pure data. Anything that fails this
+// schema falls back to the nearest archetype client-side.
+// ---------------------------------------------------------------------------
+
+const Hex = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+
+/** Fixed drawing vocabulary; the renderer composes these into textures. */
+export const PrimitiveShape = z.enum([
+  "slab",
+  "obelisk",
+  "arch",
+  "mast",
+  "orb",
+  "shard",
+  "frond",
+  "coil",
+  "ring",
+  "beam",
+]);
+export type PrimitiveShape = z.infer<typeof PrimitiveShape>;
+
+export const Primitive = z.object({
+  shape: PrimitiveShape,
+  /** Logical canvas px; the renderer rescales composed silhouettes to fit. */
+  w: z.number().int().min(2).max(48),
+  h: z.number().int().min(2).max(72),
+  color: Hex,
+  /** Degrees around the base point. */
+  tilt: z.number().min(-30).max(30),
+});
+export type Primitive = z.infer<typeof Primitive>;
+
+export const WorldProp = z.object({
+  silhouette: z.array(Primitive).min(1).max(6),
+  density: z.number().min(0).max(1),
+  placement: z.enum(["ridges", "edges", "scatter", "districts"]),
+  glow: z
+    .object({ color: Hex, pulseSec: z.number().min(2).max(20) })
+    .optional(),
+});
+export type WorldProp = z.infer<typeof WorldProp>;
+
+export const BuildingSpec = z.object({
+  /** Stacked bottom-to-top into the structure's body. */
+  silhouette: z.array(Primitive).min(1).max(5),
+  roofColor: Hex,
+  wallColor: Hex,
+  emissive: Hex.optional(),
+});
+export type BuildingSpec = z.infer<typeof BuildingSpec>;
+
+export const WorldSpec = z.object({
+  version: z.literal(1),
+  lore: z.object({
+    placeName: z.string().max(60),
+    epithet: z.string().max(200),
+    /** Fake-streamed loading narration; each line herald-logged. */
+    loadingLines: z.array(z.string().max(160)).min(3).max(6),
+  }),
+  sky: z.object({
+    top: Hex,
+    horizon: Hex,
+    hazeAlpha: z.number().min(0).max(0.5),
+  }),
+  terrain: z.object({
+    /** Ground ramp, darkest to lightest. */
+    base: z.array(Hex).min(3).max(6),
+    pattern: z.enum(["plates", "dunes", "floes", "moss", "tessellae", "shale"]),
+    reliefIntensity: z.number().min(0).max(1),
+    waterline: z
+      .object({ color: Hex, coverage: z.number().min(0).max(0.35) })
+      .optional(),
+  }),
+  props: z.array(WorldProp).max(12),
+  /** Per building kind; absent kinds keep archetype defaults. */
+  architecture: z.object({
+    house: BuildingSpec.optional(),
+    barracks: BuildingSpec.optional(),
+    market: BuildingSpec.optional(),
+    monastery: BuildingSpec.optional(),
+    mill: BuildingSpec.optional(),
+    towncenter: BuildingSpec.optional(),
+  }),
+  ambience: z.object({
+    particles: z.enum(["embers", "mist", "snow", "spores", "dust", "rain", "none"]),
+    tint: Hex,
+    rate: z.number().min(0).max(1),
+    skyEvents: z
+      .object({
+        kind: z.enum(["flare", "drift", "aurora", "birds"]),
+        everySec: z.number().min(20).max(120),
+      })
+      .optional(),
+  }),
+  units: z.object({
+    villagerTint: Hex,
+    heroTint: Hex,
+    raiderTint: Hex,
+    /** Scales the walk bob amplitude. */
+    gaitBounce: z.number().min(0).max(1),
+  }),
+});
+export type WorldSpec = z.infer<typeof WorldSpec>;
+
 export const ThemePack = z.object({
   factionName: z.string().max(60),
   tagline: z.string().max(160),
@@ -79,6 +185,8 @@ export const ThemePack = z.object({
     .min(3)
     .max(8),
   sprites: z.array(PixelSprite).max(14),
+  /** Optional composed world geometry; invalid specs are dropped, not fatal. */
+  worldSpec: WorldSpec.optional(),
 });
 export type ThemePack = z.infer<typeof ThemePack>;
 

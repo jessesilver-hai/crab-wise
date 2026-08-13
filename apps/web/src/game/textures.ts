@@ -1,5 +1,12 @@
 import Phaser from "phaser";
-import type { PixelSprite, ThemePack } from "@agent-empires/protocol";
+import type {
+  BuildingSpec,
+  PixelSprite,
+  Primitive,
+  ThemePack,
+  WorldProp,
+  WorldSpec,
+} from "@agent-empires/protocol";
 import { TILE_W, TILE_H } from "./map.js";
 import type { Archetype } from "./archetypes.js";
 
@@ -15,6 +22,14 @@ import type { Archetype } from "./archetypes.js";
 export const TEX_RES = 2;
 export const TEX_SCALE = 1 / TEX_RES;
 
+/** A WorldSpec prop rendered to a texture plus its placement directives. */
+export type SpecProp = {
+  tex: string;
+  density: number;
+  placement: WorldProp["placement"];
+  pulseSec: number | null;
+};
+
 export type TextureSet = {
   ground: string[];
   fog: string;
@@ -26,6 +41,10 @@ export type TextureSet = {
   king: string;
   raider: string;
   highlight: string;
+  /** WorldSpec waterline tile; band of tiles at the map's low corner. */
+  water?: string;
+  /** WorldSpec props (replace archetype props when present). */
+  specProps?: SpecProp[];
 };
 
 // ---------------------------------------------------------------------------
@@ -43,8 +62,14 @@ function css(color: number, alpha = 1): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+/** "#rrggbb" → numeric color; undefined when malformed. */
+export function hexColor(s: string): number | undefined {
+  if (!/^#[0-9a-fA-F]{6}$/.test(s)) return undefined;
+  return parseInt(s.slice(1), 16);
+}
+
 /** Multiply a color's channels by `f` (>1 lightens, <1 darkens). */
-function shade(color: number, f: number): number {
+export function shade(color: number, f: number): number {
   const ch = (n: number) => Math.max(0, Math.min(255, Math.round(n * f)));
   return (ch((color >> 16) & 0xff) << 16) | (ch((color >> 8) & 0xff) << 8) | ch(color & 0xff);
 }
@@ -448,6 +473,413 @@ function propTextures(scene: Phaser.Scene, arch: Archetype, gen: number): string
 }
 
 // ---------------------------------------------------------------------------
+// WorldSpec interpretation — bounded LLM data composed by fixed code
+// ---------------------------------------------------------------------------
+
+/**
+ * Draw one primitive with its base at the current origin (y grows downward;
+ * structures rise into negative y). Tilt rotates around the base point.
+ */
+function drawPrimitive(ctx: Ctx, prim: Primitive): void {
+  const c = hexColor(prim.color) ?? 0x8d8577;
+  const { w, h } = prim;
+  ctx.save();
+  ctx.rotate((prim.tilt * Math.PI) / 180);
+  switch (prim.shape) {
+    case "slab": {
+      ctx.fillStyle = css(c);
+      ctx.fillRect(-w / 2, -h, w, h);
+      ctx.fillStyle = css(shade(c, 0.76));
+      ctx.fillRect(w / 6, -h, w / 3, h);
+      ctx.fillStyle = css(shade(c, 1.24));
+      ctx.fillRect(-w / 2, -h, w, Math.max(1, h * 0.08));
+      break;
+    }
+    case "obelisk": {
+      poly(ctx, [[-w / 2, 0], [-w * 0.18, -h], [w * 0.18, -h], [w / 2, 0]], css(c));
+      poly(ctx, [[0, -h], [w * 0.18, -h], [w / 2, 0], [0, 0]], css(shade(c, 0.74)));
+      poly(ctx, [[-w * 0.18, -h], [w * 0.18, -h], [0, -h - Math.max(2, w * 0.2)]], css(shade(c, 1.28)));
+      break;
+    }
+    case "arch": {
+      const t = Math.max(2, w * 0.18);
+      const r = w / 2 - t / 2;
+      ctx.strokeStyle = css(c);
+      ctx.lineWidth = t;
+      ctx.beginPath();
+      ctx.moveTo(-w / 2 + t / 2, 0);
+      ctx.lineTo(-w / 2 + t / 2, -Math.max(0, h - w / 2));
+      ctx.arc(0, -Math.max(0, h - w / 2), r, Math.PI, 0);
+      ctx.lineTo(w / 2 - t / 2, 0);
+      ctx.stroke();
+      break;
+    }
+    case "mast": {
+      const t = Math.max(1.5, w * 0.12);
+      ctx.fillStyle = css(c);
+      ctx.fillRect(-t / 2, -h, t, h);
+      ctx.fillStyle = css(shade(c, 1.12));
+      ctx.fillRect(-w / 2, -h * 0.78, w, Math.max(1.2, t * 0.8));
+      circle(ctx, 0, -h, Math.max(1.2, t * 0.7), css(shade(c, 1.4)));
+      break;
+    }
+    case "orb": {
+      ctx.beginPath();
+      ctx.ellipse(0, -h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+      ctx.fillStyle = css(c);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(-w * 0.14, -h * 0.62, w * 0.16, h * 0.14, 0, 0, Math.PI * 2);
+      ctx.fillStyle = css(shade(c, 1.4), 0.6);
+      ctx.fill();
+      break;
+    }
+    case "shard": {
+      poly(ctx, [[-w / 2, 0], [0, -h], [w / 2, 0]], css(c));
+      poly(ctx, [[0, -h], [w / 2, 0], [0, 0]], css(shade(c, 0.7)));
+      break;
+    }
+    case "frond": {
+      const blades = 5;
+      ctx.lineWidth = Math.max(1, w * 0.08);
+      for (let i = 0; i < blades; i++) {
+        const f = i / (blades - 1) - 0.5; // -0.5..0.5 fan position
+        ctx.strokeStyle = css(shade(c, 0.85 + Math.abs(f) * 0.5));
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.quadraticCurveTo(f * w * 0.4, -h * 0.62, f * w, -h * (1 - Math.abs(f) * 0.4));
+        ctx.stroke();
+      }
+      break;
+    }
+    case "coil": {
+      const t = Math.max(2, w * 0.28);
+      ctx.strokeStyle = css(c);
+      ctx.lineWidth = t;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      const segs = 4;
+      for (let i = 1; i <= segs; i++) {
+        const y = (-h * i) / segs;
+        const x = (i % 2 === 0 ? -1 : 1) * (w / 2 - t / 2);
+        ctx.quadraticCurveTo(x, y + h / (segs * 2), i === segs ? 0 : x * 0.4, y);
+      }
+      ctx.stroke();
+      circle(ctx, 0, -h, t * 0.7, css(shade(c, 1.3)));
+      break;
+    }
+    case "ring": {
+      ring(ctx, 0, -h / 2, w / 2, h / 2, css(c), Math.max(2, Math.min(w, h) * 0.14));
+      break;
+    }
+    case "beam": {
+      const grad = ctx.createLinearGradient(0, -h, 0, 0);
+      grad.addColorStop(0, css(c, 0));
+      grad.addColorStop(0.35, css(c, 0.28));
+      grad.addColorStop(1, css(c, 0.5));
+      ctx.fillStyle = grad;
+      ctx.fillRect(-w / 2, -h, w, h);
+      ctx.fillStyle = css(shade(c, 1.3), 0.55);
+      ctx.fillRect(-w / 6, -h, w / 3, h);
+      break;
+    }
+  }
+  ctx.restore();
+}
+
+/** Compose a WorldSpec prop's primitives, side by side at the ground, into a texture. */
+function specPropTexture(scene: Phaser.Scene, key: string, prop: WorldProp): string {
+  const prims = prop.silhouette;
+  const spread = prims.length > 1 ? prims.reduce((s, p) => s + p.w, 0) * 0.62 : 0;
+  const maxW = Math.max(...prims.map((p) => p.w));
+  const maxH = Math.max(...prims.map((p) => p.h));
+  const w = Math.min(128, Math.max(44, spread + maxW + 24));
+  const h = Math.min(104, maxH + 22);
+  // positions across the cluster; primitives overlap slightly like a rock pile
+  let cursor = -spread / 2;
+  const xs = prims.map((p) => {
+    if (prims.length === 1) return 0;
+    const x = cursor + p.w * 0.31;
+    cursor += p.w * 0.62;
+    return x;
+  });
+  let tallest = 0;
+  prims.forEach((p, i) => {
+    if (p.h > (prims[tallest]?.h ?? 0)) tallest = i;
+  });
+  return canvasTexture(scene, key, w, h, (ctx) => {
+    ctx.translate(w / 2, h - 4);
+    groundShadow(ctx, Math.max(7, (spread + maxW) / 2.6), 3.2);
+    prims.forEach((p, i) => {
+      ctx.save();
+      ctx.translate(xs[i]!, 0);
+      drawPrimitive(ctx, p);
+      ctx.restore();
+    });
+    if (prop.glow) {
+      const g = hexColor(prop.glow.color) ?? 0xe3b264;
+      const gx = xs[tallest]!;
+      const gy = -maxH - 3;
+      circle(ctx, gx, gy, 2.2, css(g, 0.95));
+      ring(ctx, gx, gy, 4.6, 4.6, css(g, 0.35), 1);
+    }
+  });
+}
+
+/** Stack a BuildingSpec's primitives bottom→top over a wall-colored plinth. */
+function specBuildingTexture(scene: Phaser.Scene, key: string, spec: BuildingSpec): string {
+  const prims = spec.silhouette;
+  const sumH = prims.reduce((s, p) => s + p.h, 0);
+  const maxW = Math.max(...prims.map((p) => p.w));
+  const s = Math.min(1, 74 / sumH, 68 / maxW);
+  const wall = hexColor(spec.wallColor) ?? 0x6e675b;
+  const roof = hexColor(spec.roofColor) ?? 0x77705f;
+  const emissive = spec.emissive ? hexColor(spec.emissive) : undefined;
+  return buildingTexture(scene, key, (ctx) => {
+    const baseW = Math.max(18, maxW * s + 8);
+    groundShadow(ctx, baseW * 0.62, baseW * 0.2);
+    isoBox(ctx, baseW, baseW * 0.6, 4, shade(wall, 1.1), wall, shade(wall, 0.78));
+    let y = -4;
+    let topW = baseW;
+    for (const p of prims) {
+      ctx.save();
+      ctx.translate(0, y);
+      ctx.scale(s, s);
+      drawPrimitive(ctx, p);
+      ctx.restore();
+      y -= p.h * s;
+      topW = p.w * s;
+    }
+    // roof cap: a diamond lid in roofColor over the top primitive
+    const rw = Math.max(8, topW * 1.15);
+    poly(ctx, [[0, y - rw * 0.28], [rw / 2, y], [0, y + rw * 0.28], [-rw / 2, y]], css(roof));
+    poly(ctx, [[rw / 2, y], [0, y + rw * 0.28], [-rw / 2, y]], css(shade(roof, 0.8)));
+    if (emissive !== undefined) {
+      seam(ctx, 0, y + 4, Math.max(6, -y * 0.55), emissive);
+      ctx.fillStyle = css(emissive, 0.85);
+      ctx.fillRect(-2.4, -8, 4.8, 8); // lit doorway
+      circle(ctx, 0, y - 3, 1.8, css(emissive, 0.95));
+    }
+  });
+}
+
+/** WorldSpec tile detailing; reliefIntensity scales contrast and clutter. */
+function drawSpecTilePattern(
+  ctx: Ctx,
+  pattern: WorldSpec["terrain"]["pattern"],
+  base: number,
+  relief: number,
+): void {
+  const dark = css(shade(base, 1 - 0.12 - 0.3 * relief));
+  const light = css(shade(base, 1 + 0.1 + 0.3 * relief));
+  const r = Math.random;
+  const n = 1 + Math.round(relief * 2);
+  switch (pattern) {
+    case "plates": {
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < n; i++) {
+        const y0 = (r() - 0.5) * TILE_H * 0.6;
+        ctx.beginPath();
+        ctx.moveTo(-16 + r() * 8, y0);
+        ctx.lineTo(-2 + r() * 4, y0 + (r() - 0.5) * 5);
+        ctx.lineTo(14 - r() * 6, y0 + (r() - 0.5) * 8);
+        ctx.stroke();
+      }
+      if (r() < 0.3) {
+        poly(ctx, [[-4, -2], [4, -3], [6, 2], [-3, 3]], css(shade(base, 1.08), 0.7));
+      }
+      break;
+    }
+    case "dunes": {
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < n + 1; i++) {
+        const y = -TILE_H * 0.3 + i * ((TILE_H * 0.6) / (n + 1)) + (r() - 0.5) * 3;
+        ctx.beginPath();
+        ctx.moveTo(-13 + r() * 5, y);
+        ctx.quadraticCurveTo(0, y - 2.5 - relief * 2, 13 - r() * 5, y);
+        ctx.stroke();
+      }
+      break;
+    }
+    case "floes": {
+      for (let i = 0; i < n; i++) {
+        const x = (r() - 0.5) * TILE_W * 0.45;
+        const y = (r() - 0.5) * TILE_H * 0.45;
+        poly(
+          ctx,
+          [[x - 6, y], [x - 1, y - 3.5], [x + 6, y - 1], [x + 4, y + 3], [x - 3, y + 3.4]],
+          light,
+        );
+        ctx.strokeStyle = dark;
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(x - 6, y - 3.5, 12, 7);
+      }
+      break;
+    }
+    case "moss": {
+      for (let i = 0; i < n + 1; i++) {
+        circle(
+          ctx,
+          (r() - 0.5) * TILE_W * 0.55,
+          (r() - 0.5) * TILE_H * 0.55,
+          1.4 + r() * (1.5 + relief * 1.6),
+          css(shade(base, 0.84), 0.85),
+        );
+      }
+      if (r() < 0.4) circle(ctx, (r() - 0.5) * 18, (r() - 0.5) * 8, 0.9, light);
+      break;
+    }
+    case "tessellae": {
+      // mosaic fragments on a loose diamond grid
+      for (let i = 0; i < n + 2; i++) {
+        const x = (r() - 0.5) * TILE_W * 0.55;
+        const y = (r() - 0.5) * TILE_H * 0.55;
+        const sz = 1.6 + r() * 2;
+        poly(
+          ctx,
+          [[x, y - sz / 2], [x + sz, y], [x, y + sz / 2], [x - sz, y]],
+          r() < 0.5 ? dark : light,
+        );
+      }
+      break;
+    }
+    case "shale": {
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 0.9;
+      for (let i = 0; i < n + 1; i++) {
+        const y = (r() - 0.5) * TILE_H * 0.7;
+        const x = (r() - 0.5) * 10;
+        ctx.beginPath();
+        ctx.moveTo(x - 9, y);
+        ctx.lineTo(x + 9, y - 1 - relief * 2);
+        ctx.stroke();
+      }
+      if (r() < 0.3) {
+        ctx.strokeStyle = light;
+        ctx.beginPath();
+        const y = (r() - 0.5) * 8;
+        ctx.moveTo(-6, y);
+        ctx.lineTo(7, y - 2);
+        ctx.stroke();
+      }
+      break;
+    }
+  }
+}
+
+function specGroundTextures(
+  scene: Phaser.Scene,
+  terrain: WorldSpec["terrain"],
+  gen: number,
+): string[] {
+  const w = TILE_W + 2;
+  const h = TILE_H + 2;
+  const colors = terrain.base
+    .map((c) => hexColor(c))
+    .filter((c): c is number => c !== undefined);
+  return colors.map((color, i) =>
+    canvasTexture(scene, `g${gen}-wground-${i}`, w, h, (ctx) => {
+      ctx.translate(w / 2, h / 2);
+      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+      ctx.fillStyle = css(color);
+      ctx.fill();
+      ctx.save();
+      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+      ctx.clip();
+      drawSpecTilePattern(ctx, terrain.pattern, color, terrain.reliefIntensity);
+      ctx.restore();
+      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+      ctx.strokeStyle = css(0x2e2a22, 0.5);
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }),
+  );
+}
+
+function waterTexture(scene: Phaser.Scene, color: number, gen: number): string {
+  const w = TILE_W + 2;
+  const h = TILE_H + 2;
+  return canvasTexture(scene, `g${gen}-water`, w, h, (ctx) => {
+    ctx.translate(w / 2, h / 2);
+    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+    ctx.fillStyle = css(color);
+    ctx.fill();
+    ctx.save();
+    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+    ctx.clip();
+    ctx.strokeStyle = css(shade(color, 1.35), 0.8);
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 2; i++) {
+      const y = (Math.random() - 0.5) * TILE_H * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(-12 + Math.random() * 6, y);
+      ctx.quadraticCurveTo(0, y - 2, 12 - Math.random() * 6, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
+    ctx.strokeStyle = css(shade(color, 0.7), 0.6);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  });
+}
+
+/** Vertical sky gradient from a WorldSpec: top → horizon → haze. */
+export function specSkyTexture(scene: Phaser.Scene, sky: WorldSpec["sky"], gen: number): string {
+  const top = hexColor(sky.top) ?? 0x2a2118;
+  const horizon = hexColor(sky.horizon) ?? 0x2a2118;
+  return canvasTexture(scene, `g${gen}-sky`, 16, 160, (ctx) => {
+    const grad = ctx.createLinearGradient(0, 0, 0, 160);
+    grad.addColorStop(0, css(top, 0.95));
+    grad.addColorStop(0.6, css(horizon, 0.75));
+    grad.addColorStop(1, css(horizon, Math.min(0.8, sky.hazeAlpha * 1.6)));
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 16, 160);
+  });
+}
+
+/**
+ * Override archetype visuals with WorldSpec geometry: ground ramp + pattern,
+ * waterline tile, composed props, and per-kind building silhouettes. Pixel
+ * sprites (applyTheme) still layer over whatever the spec does not claim.
+ */
+export function applyWorldSpec(
+  scene: Phaser.Scene,
+  base: TextureSet,
+  spec: WorldSpec,
+  gen: number,
+): TextureSet {
+  const out: TextureSet = { ...base, buildings: { ...base.buildings } };
+
+  const ground = specGroundTextures(scene, spec.terrain, gen);
+  if (ground.length >= 2) out.ground = ground;
+
+  if (spec.terrain.waterline) {
+    const c = hexColor(spec.terrain.waterline.color);
+    if (c !== undefined) out.water = waterTexture(scene, c, gen);
+  }
+
+  out.specProps = spec.props.map((prop, i) => ({
+    tex: specPropTexture(scene, `g${gen}-wprop-${i}`, prop),
+    density: prop.density,
+    placement: prop.placement,
+    pulseSec: prop.glow ? prop.glow.pulseSec : null,
+  }));
+
+  for (const [kind, b] of Object.entries(spec.architecture)) {
+    if (!b) continue;
+    out.buildings[kind] = {
+      built: specBuildingTexture(scene, `g${gen}-w-${kind}`, b),
+      scaffold: base.buildings[kind]?.scaffold ?? base.buildings.house!.scaffold,
+    };
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Structures + figures
 // ---------------------------------------------------------------------------
 
@@ -667,20 +1099,31 @@ export function pixelSpriteTexture(
 const UNIT_KEYS = new Set(["villager", "hero", "raider"]);
 const BUILDING_KEYS = new Set(["house", "barracks", "market", "monastery", "mill", "towncenter"]);
 
-/** Merge a ThemePack over the default set. Missing pieces keep defaults. */
+/**
+ * Merge a ThemePack over the default set. Missing pieces keep defaults.
+ * When a WorldSpec is present it owns terrain, props, and any building kind
+ * named in its architecture; pixel sprites keep the rest (notably units).
+ */
 export function applyTheme(
   scene: Phaser.Scene,
   base: TextureSet,
   theme: ThemePack,
   arch: Archetype,
   gen: number,
+  spec?: WorldSpec,
 ): TextureSet {
   const out: TextureSet = { ...base, buildings: { ...base.buildings } };
+  const specOwnsProps = (spec?.props.length ?? 0) > 0;
+  const specBuildingKinds = new Set(
+    spec ? Object.entries(spec.architecture).filter(([, b]) => b).map(([k]) => k) : [],
+  );
 
   const grassColors = theme.biome.grassColors
     .map((c) => parseInt(c.slice(1), 16))
     .filter((n) => !Number.isNaN(n));
-  if (grassColors.length >= 2) out.ground = groundTextures(scene, arch, grassColors, gen, "tground");
+  if (!spec && grassColors.length >= 2) {
+    out.ground = groundTextures(scene, arch, grassColors, gen, "tground");
+  }
 
   const fogColor = parseInt(theme.biome.fogColor.slice(1), 16);
   if (!Number.isNaN(fogColor)) {
@@ -700,10 +1143,12 @@ export function applyTheme(
       if (sprite.key === "hero") out.king = tex;
       if (sprite.key === "raider") out.raider = tex;
     } else if (sprite.key === "tree") {
+      if (specOwnsProps) continue; // spec props are the world's flora
       // themed relic/flora replaces every archetype prop variant
       const tex = pixelSpriteTexture(scene, key, sprite, 2);
       out.props = [tex, tex, tex];
     } else if (BUILDING_KEYS.has(sprite.key)) {
+      if (specBuildingKinds.has(sprite.key)) continue; // spec architecture wins
       out.buildings[sprite.key] = {
         built: pixelSpriteTexture(scene, key, sprite, sprite.key === "towncenter" ? 3 : 2.5),
         scaffold: base.buildings[sprite.key]?.scaffold ?? base.buildings.house!.scaffold,

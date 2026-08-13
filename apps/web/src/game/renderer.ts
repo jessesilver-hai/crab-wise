@@ -1,13 +1,17 @@
 import Phaser from "phaser";
-import type { AgentStatus, GameEvent, ThemePack } from "@agent-empires/protocol";
+import type { AgentStatus, GameEvent, ThemePack, WorldSpec } from "@agent-empires/protocol";
 import type { Renderer } from "../match-view.js";
-import { assignPlot, isoX, isoY, layoutMap, MapLayout, TILE_H, TILE_W } from "./map.js";
+import { assignPlot, isoX, isoY, layoutMap, MapLayout, mulberry32, TILE_H, TILE_W } from "./map.js";
 import {
   applyTheme,
+  applyWorldSpec,
   buildTextures,
+  hexColor,
   particleTextures,
   pruneGeneration,
+  shade,
   skyTexture,
+  specSkyTexture,
   TextureSet,
   TEX_SCALE,
 } from "./textures.js";
@@ -102,7 +106,13 @@ type RaiderRec = {
   speed: number; // rad/s prowl orbit
 };
 
-type PropRec = { img: Phaser.GameObjects.Image; variant: number };
+type PropRec = {
+  img: Phaser.GameObjects.Image;
+  variant: number;
+  tx: number;
+  ty: number;
+  pulse: Phaser.Tweens.Tween | null;
+};
 
 type Particle = {
   img: Phaser.GameObjects.Image;
@@ -124,16 +134,53 @@ type PartCfg = {
   vy: [number, number];
   sway: number;
   flicker: boolean;
+  /** Sprite rotation in degrees (rain streaks fall steeply). */
+  angle?: number;
 };
 
-const PART_CFG: Record<ParticleKind, PartCfg> = {
+/** WorldSpec ambience adds "rain" on top of the archetype particle kinds. */
+const PART_CFG: Record<ParticleKind | "rain", PartCfg> = {
   ash: { tex: "soft", add: false, scale: [0.35, 0.8], alpha: [0.2, 0.45], vx: [-8, 2], vy: [8, 20], sway: 8, flicker: false },
   embers: { tex: "soft", add: true, scale: [0.25, 0.6], alpha: [0.4, 0.85], vx: [-8, 8], vy: [-40, -14], sway: 10, flicker: true },
   mist: { tex: "mist", add: false, scale: [1.6, 3.6], alpha: [0.05, 0.1], vx: [5, 16], vy: [-2, 2], sway: 3, flicker: false },
   snow: { tex: "soft", add: false, scale: [0.25, 0.6], alpha: [0.35, 0.75], vx: [-6, 6], vy: [10, 28], sway: 14, flicker: false },
   spores: { tex: "soft", add: true, scale: [0.2, 0.5], alpha: [0.25, 0.55], vx: [-6, 6], vy: [-8, 6], sway: 12, flicker: true },
   dust: { tex: "streak", add: false, scale: [0.8, 1.8], alpha: [0.08, 0.22], vx: [50, 130], vy: [2, 12], sway: 4, flicker: false },
+  rain: { tex: "streak", add: false, scale: [0.5, 1.0], alpha: [0.14, 0.32], vx: [-30, -14], vy: [230, 360], sway: 0, flicker: false, angle: 80 },
 };
+
+/** Which tiles a WorldSpec placement rule may claim. */
+function propTileEligible(
+  placement: "ridges" | "edges" | "scatter" | "districts",
+  tx: number,
+  ty: number,
+  side: number,
+  regionCenters: { x: number; y: number }[],
+): boolean {
+  switch (placement) {
+    case "scatter":
+      return true;
+    case "edges":
+      return tx < 2 || ty < 2 || tx >= side - 2 || ty >= side - 2;
+    case "ridges":
+      // strata lines running screen-horizontal across the diamond
+      return (tx + ty) % 5 === 0;
+    case "districts":
+      return regionCenters.some((c) => Math.abs(c.x - tx) + Math.abs(c.y - ty) <= 2);
+  }
+}
+
+/** Tiles with tx+ty ≥ returned threshold are water, ≈ coverage of the map. */
+function waterThreshold(side: number, coverage: number): number {
+  if (coverage <= 0.01) return 2 * side; // unreachable: no water
+  const target = coverage * side * side;
+  let acc = 0;
+  for (let v = 2 * side - 2; v >= 0; v--) {
+    acc += side - Math.abs(v - (side - 1));
+    if (acc >= target) return v;
+  }
+  return 0;
+}
 
 const KIND_NAMES: Record<string, string> = {
   house: "Dwelling",
@@ -156,9 +203,12 @@ class MainScene extends Phaser.Scene {
   private mapSeed = 1;
   private archetype: Archetype = resolveArchetype(undefined, 0);
   private theme: ThemePack | null = null;
+  private spec: WorldSpec | null = null;
   private accent = 0xe3b264;
   private tex!: TextureSet;
   private fxTex!: { soft: string; mist: string; streak: string };
+  private waterT = Number.POSITIVE_INFINITY;
+  private skyEventTimer: Phaser.Time.TimerEvent | null = null;
 
   private map: MapLayout | null = null;
   private citadel = { x: 0, y: 0, tx: 0, ty: 0 };
@@ -451,35 +501,46 @@ class MainScene extends Phaser.Scene {
   }
 
   private redrawSky(): void {
-    const key = skyTexture(this, this.archetype.horizonColor, this.gen);
+    const key = this.spec
+      ? specSkyTexture(this, this.spec.sky, this.gen)
+      : skyTexture(this, this.archetype.horizonColor, this.gen);
     if (this.skyImg) this.skyImg.setTexture(key);
     else {
       this.skyImg = this.add
         .image(0, 0, key)
         .setOrigin(0, 0)
         .setScrollFactor(0)
-        .setDepth(D_SKY)
-        .setAlpha(0.55);
+        .setDepth(D_SKY);
     }
+    this.skyImg.setAlpha(this.spec ? 0.7 : 0.55);
     this.sizeSky();
   }
 
   private initParticles(): void {
     for (const p of this.particles) p.img.destroy();
     this.particles = [];
-    const { kind, color, count } = this.archetype.particle;
-    const cfg = PART_CFG[kind];
+    const amb = this.spec?.ambience;
+    const eff: { kind: ParticleKind | "rain" | "none"; color: number; count: number } = amb
+      ? {
+          kind: amb.particles,
+          color: hexColor(amb.tint) ?? 0xffffff,
+          count: Math.round(amb.rate * 64),
+        }
+      : this.archetype.particle;
+    if (eff.kind === "none" || eff.count <= 0) return;
+    const cfg = PART_CFG[eff.kind];
     const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
     const w = this.scale.width || 800;
     const h = this.scale.height || 600;
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < eff.count; i++) {
       const img = this.add
         .image(Math.random() * w, Math.random() * h, this.fxTex[cfg.tex])
         .setScrollFactor(0)
         .setDepth(D_PARTICLE)
-        .setTint(color)
+        .setTint(eff.color)
         .setScale(rand(cfg.scale[0], cfg.scale[1]));
       if (cfg.add) img.setBlendMode(Phaser.BlendModes.ADD);
+      if (cfg.angle !== undefined) img.setAngle(cfg.angle);
       const baseAlpha = rand(cfg.alpha[0], cfg.alpha[1]);
       img.setAlpha(baseAlpha);
       this.particles.push({
@@ -495,6 +556,137 @@ class MainScene extends Phaser.Scene {
     }
   }
 
+  // --- WorldSpec sky events: rare screen-space happenings ----------------------
+
+  private resetSkyEvents(): void {
+    this.skyEventTimer?.remove();
+    this.skyEventTimer = null;
+    const se = this.spec?.ambience.skyEvents;
+    if (!se) return;
+    this.skyEventTimer = this.time.addEvent({
+      delay: se.everySec * 1000,
+      loop: true,
+      callback: () => this.spawnSkyEvent(se.kind),
+    });
+    // one early showing so the feature is visible without a long wait
+    this.time.delayedCall(6000, () => {
+      if (this.skyEventTimer && this.spec?.ambience.skyEvents?.kind === se.kind) {
+        this.spawnSkyEvent(se.kind);
+      }
+    });
+  }
+
+  private spawnSkyEvent(kind: "flare" | "drift" | "aurora" | "birds"): void {
+    const w = this.scale.width || 800;
+    const h = this.scale.height || 600;
+    const tint = hexColor(this.spec?.ambience.tint ?? "") ?? this.accent;
+    switch (kind) {
+      case "flare": {
+        // a bright streak arcing across the upper sky
+        const y0 = h * (0.06 + Math.random() * 0.2);
+        const img = this.add
+          .image(-40, y0, this.fxTex.streak)
+          .setScrollFactor(0)
+          .setDepth(D_PARTICLE)
+          .setBlendMode(Phaser.BlendModes.ADD)
+          .setTint(tint)
+          .setScale(2.6, 1.4)
+          .setAngle(12)
+          .setAlpha(0.95);
+        this.tweens.add({
+          targets: img,
+          x: w + 60,
+          y: y0 + h * 0.14,
+          alpha: 0,
+          duration: 1500,
+          ease: "Sine.easeIn",
+          onComplete: () => img.destroy(),
+        });
+        break;
+      }
+      case "drift": {
+        // a vast slow glow crossing behind the haze
+        const img = this.add
+          .image(-120, h * (0.08 + Math.random() * 0.22), this.fxTex.mist)
+          .setScrollFactor(0)
+          .setDepth(D_PARTICLE)
+          .setBlendMode(Phaser.BlendModes.ADD)
+          .setTint(tint)
+          .setScale(4.5)
+          .setAlpha(0);
+        this.tweens.add({ targets: img, x: w + 120, duration: 16000, ease: "Linear" });
+        this.tweens.add({
+          targets: img,
+          alpha: 0.16,
+          duration: 3500,
+          yoyo: true,
+          hold: 9000,
+          onComplete: () => img.destroy(),
+        });
+        break;
+      }
+      case "aurora": {
+        // shimmer bands pinned to the top of the viewport
+        const imgs: Phaser.GameObjects.Image[] = [];
+        for (let i = 0; i < 3; i++) {
+          imgs.push(
+            this.add
+              .image(w * (0.2 + Math.random() * 0.6), 30 + i * 34, this.fxTex.mist)
+              .setScrollFactor(0)
+              .setDepth(D_PARTICLE)
+              .setBlendMode(Phaser.BlendModes.ADD)
+              .setTint(tint)
+              .setScale(6 + Math.random() * 4, 0.9)
+              .setAlpha(0),
+          );
+        }
+        imgs.forEach((img, i) => {
+          this.tweens.add({
+            targets: img,
+            alpha: 0.14 + Math.random() * 0.08,
+            x: img.x + (Math.random() - 0.5) * 120,
+            duration: 2600 + i * 500,
+            yoyo: true,
+            hold: 2400,
+            ease: "Sine.easeInOut",
+            onComplete: () => img.destroy(),
+          });
+        });
+        break;
+      }
+      case "birds": {
+        // a small v-flock crossing the upper third
+        const goRight = Math.random() < 0.5;
+        const y0 = h * (0.08 + Math.random() * 0.22);
+        const dots: Phaser.GameObjects.Image[] = [];
+        const n = 5 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < n; i++) {
+          const k = i - Math.floor(n / 2);
+          dots.push(
+            this.add
+              .image(k * 11 * (goRight ? -1 : 1), Math.abs(k) * 5, this.fxTex.soft)
+              .setTint(0x14110c)
+              .setScale(0.16)
+              .setAlpha(0.85),
+          );
+        }
+        const flock = this.add
+          .container(goRight ? -60 : w + 60, y0, dots)
+          .setScrollFactor(0)
+          .setDepth(D_PARTICLE);
+        this.tweens.add({
+          targets: flock,
+          x: goRight ? w + 60 : -60,
+          y: y0 - h * 0.05,
+          duration: 11000,
+          ease: "Linear",
+          onComplete: () => flock.destroy(),
+        });
+        break;
+      }
+    }
+  }
+
   // --- world construction --------------------------------------------------------
 
   private buildWorld(event: Extract<GameEvent, { type: "match_started" }>): void {
@@ -504,24 +696,15 @@ class MainScene extends Phaser.Scene {
     const map = layoutMap(event.repoTree, event.mapSeed);
     this.map = map;
 
+    this.refreshWaterThreshold();
     for (let ty = 0; ty < map.side; ty++) {
       for (let tx = 0; tx < map.side; tx++) {
-        const groundKey = this.tex.ground[Math.floor(map.rng() * this.tex.ground.length)]!;
         this.groundTiles.push(
-          this.add.image(isoX(tx, ty), isoY(tx, ty), groundKey).setScale(TEX_SCALE).setDepth(D_GROUND),
+          this.add
+            .image(isoX(tx, ty), isoY(tx, ty), this.groundKeyFor(tx, ty, map.rng))
+            .setScale(TEX_SCALE)
+            .setDepth(D_GROUND),
         );
-
-        // archetype props (relic monoliths, masts, shards, …) on unused tiles
-        if (!map.used.has(`${tx},${ty}`) && map.rng() < this.archetype.propDensity) {
-          map.used.add(`${tx},${ty}`);
-          const variant = Math.floor(map.rng() * this.tex.props.length);
-          const img = this.add
-            .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, this.tex.props[variant]!)
-            .setOrigin(0.5, 1)
-            .setScale(TEX_SCALE);
-          img.setDepth(img.y);
-          this.props.push({ img, variant });
-        }
 
         const fog = this.add
           .image(isoX(tx, ty), isoY(tx, ty), this.tex.fog)
@@ -531,6 +714,9 @@ class MainScene extends Phaser.Scene {
         this.fogTiles.set(`${tx},${ty}`, fog);
       }
     }
+
+    // props (archetype relics or WorldSpec-composed silhouettes) on unused land
+    this.placeProps();
 
     // territory labels
     for (const region of map.regions) {
@@ -559,27 +745,146 @@ class MainScene extends Phaser.Scene {
     this.fitCamera();
   }
 
-  /** Rebuild every generated texture for the current archetype + theme. */
+  /** Rebuild every generated texture for the current archetype + theme + spec. */
   private retexture(): void {
     const oldGen = this.gen;
     this.gen++;
     this.archetype = resolveArchetype(this.theme?.biome.archetype, this.mapSeed);
+    this.spec = this.theme?.worldSpec ?? null;
     let tex = buildTextures(this, this.archetype, this.gen);
-    if (this.theme) tex = applyTheme(this, tex, this.theme, this.archetype, this.gen);
+    if (this.spec) tex = applyWorldSpec(this, tex, this.spec, this.gen);
+    if (this.theme) tex = applyTheme(this, tex, this.theme, this.archetype, this.gen, this.spec ?? undefined);
     this.tex = tex;
 
     const themeAccent = this.theme ? parseInt(this.theme.biome.accentColor.slice(1), 16) : NaN;
     this.accent = Number.isNaN(themeAccent) ? this.archetype.glow : themeAccent;
 
-    this.cameras.main.setBackgroundColor(this.archetype.skyColor);
+    this.cameras.main.setBackgroundColor(
+      this.spec ? shade(hexColor(this.spec.sky.top) ?? this.archetype.skyColor, 0.35) : this.archetype.skyColor,
+    );
     this.redrawSky();
     this.initParticles();
+    this.resetSkyEvents();
+    this.refreshWaterThreshold();
     this.hoverMarker.setTexture(this.tex.highlight);
     this.selectMarker.setTexture(this.tex.highlight);
     this.wonderImg?.setTexture(this.tex.wonder);
     // In-flight effects (fog fades, pings) may still show old-gen textures for
     // a moment; prune once they are certainly gone.
     this.time.delayedCall(5000, () => pruneGeneration(this, oldGen));
+  }
+
+  // --- WorldSpec terrain + props ------------------------------------------------
+
+  private refreshWaterThreshold(): void {
+    const cov = this.spec?.terrain.waterline?.coverage ?? 0;
+    this.waterT =
+      this.map && this.tex.water && cov > 0
+        ? waterThreshold(this.map.side, cov)
+        : Number.POSITIVE_INFINITY;
+  }
+
+  private isWaterTile(tx: number, ty: number): boolean {
+    return tx + ty >= this.waterT;
+  }
+
+  private groundKeyFor(tx: number, ty: number, rng: () => number): string {
+    if (this.tex.water && this.isWaterTile(tx, ty)) return this.tex.water;
+    return this.tex.ground[Math.floor(rng() * this.tex.ground.length)]!;
+  }
+
+  /** Re-texture every laid ground tile (including the waterline band). */
+  private applyGroundTextures(): void {
+    if (!this.map) return;
+    const side = this.map.side;
+    this.groundTiles.forEach((tile, i) => {
+      if (!tile.active) return;
+      tile.setTexture(this.groundKeyFor(i % side, Math.floor(i / side), Math.random));
+    });
+  }
+
+  private clearProps(): void {
+    for (const p of this.props) {
+      p.pulse?.destroy();
+      p.img.destroy();
+      this.map?.used.delete(`${p.tx},${p.ty}`);
+    }
+    this.props = [];
+  }
+
+  /**
+   * Scatter props over unused land tiles. WorldSpec props place by their own
+   * density + placement rule; otherwise archetype props scatter uniformly.
+   */
+  private placeProps(): void {
+    const map = this.map;
+    if (!map) return;
+    this.clearProps();
+    const rng = mulberry32((this.mapSeed ^ 0x51ed2701) >>> 0);
+    const specProps = this.tex.specProps;
+    const centers = map.regions.map((r) => ({
+      x: r.rect.x + r.rect.w / 2,
+      y: r.rect.y + r.rect.h / 2,
+    }));
+    let placed = 0;
+    for (let ty = 0; ty < map.side && placed < 240; ty++) {
+      for (let tx = 0; tx < map.side && placed < 240; tx++) {
+        const key = `${tx},${ty}`;
+        if (map.used.has(key) || this.isWaterTile(tx, ty)) continue;
+        if (specProps) {
+          for (let i = 0; i < specProps.length; i++) {
+            const sp = specProps[i]!;
+            if (!propTileEligible(sp.placement, tx, ty, map.side, centers)) continue;
+            // ridge/edge tile sets are far smaller than scatter, so weigh them up
+            const weight = sp.placement === "scatter" ? 0.1 : sp.placement === "districts" ? 0.16 : 0.3;
+            if (rng() < sp.density * weight) {
+              map.used.add(key);
+              this.spawnProp(tx, ty, sp.tex, i, sp.pulseSec);
+              placed++;
+              break;
+            }
+          }
+        } else if (rng() < this.archetype.propDensity) {
+          map.used.add(key);
+          const variant = Math.floor(rng() * this.tex.props.length);
+          this.spawnProp(tx, ty, this.tex.props[variant]!, variant, null);
+          placed++;
+        }
+      }
+    }
+  }
+
+  private spawnProp(tx: number, ty: number, texKey: string, variant: number, pulseSec: number | null): void {
+    const img = this.add
+      .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, texKey)
+      .setOrigin(0.5, 1)
+      .setScale(TEX_SCALE);
+    img.setDepth(img.y);
+    let pulse: Phaser.Tweens.Tween | null = null;
+    if (pulseSec !== null) {
+      pulse = this.tweens.add({
+        targets: img,
+        alpha: 0.62,
+        duration: (pulseSec * 1000) / 2,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+    }
+    this.props.push({ img, variant, tx, ty, pulse });
+  }
+
+  /** Apply WorldSpec unit tint + gait to a figure (clears both when absent). */
+  private styleUnit(unit: Unit, kind: "villager" | "hero" | "raider"): void {
+    const u = this.spec?.units;
+    if (!u) {
+      unit.applyTint(undefined);
+      unit.gaitScale = 1;
+      return;
+    }
+    const tint = kind === "villager" ? u.villagerTint : kind === "hero" ? u.heroTint : u.raiderTint;
+    unit.applyTint(hexColor(tint));
+    unit.gaitScale = 0.4 + u.gaitBounce * 1.4;
   }
 
   private reveal(tx: number, ty: number, radius: number, historical: boolean): void {
@@ -747,6 +1052,7 @@ class MainScene extends Phaser.Scene {
         );
         unit.root.setData("kind", "unit");
         unit.root.setData("id", e.agentId);
+        this.styleUnit(unit, e.role === "orchestrator" ? "hero" : "villager");
         this.agents.set(e.agentId, {
           unit,
           role: e.role,
@@ -868,7 +1174,9 @@ class MainScene extends Phaser.Scene {
 
   private makeRaider(x: number, y: number): Unit {
     const name = this.theme?.enemyName ? this.theme.enemyName.slice(0, 14) : "raider";
-    return new Unit(this, this.tex.raider, name, x, y, "#c0483c");
+    const unit = new Unit(this, this.tex.raider, name, x, y, "#c0483c");
+    this.styleUnit(unit, "raider");
+    return unit;
   }
 
   private reconcileRaiders(failures: { name: string; path?: string }[], historical: boolean): void {
@@ -910,23 +1218,25 @@ class MainScene extends Phaser.Scene {
     if (!this.map) return; // buildWorld will apply it
     this.retexture();
 
-    for (const tile of this.groundTiles) {
-      if (tile.active) tile.setTexture(this.tex.ground[Math.floor(Math.random() * this.tex.ground.length)]!);
-    }
+    this.applyGroundTextures();
     for (const [, fog] of this.fogTiles) {
       if (fog.active) fog.setTexture(this.tex.fog);
     }
-    for (const prop of this.props) {
-      if (prop.img.active) prop.img.setTexture(this.tex.props[prop.variant % this.tex.props.length]!);
-    }
+    // WorldSpec props have their own densities/placements, so re-place rather
+    // than retexture in place.
+    this.placeProps();
     for (const [, rec] of this.buildings) {
       const texSet = this.tex.buildings[rec.kind] ?? this.tex.buildings.house!;
       if (rec.img.active) rec.img.setTexture(rec.constructUntil > 0 ? texSet.scaffold : texSet.built);
     }
     for (const [, rec] of this.agents) {
       rec.unit.setTexture(rec.role === "orchestrator" ? this.tex.king : this.tex.villager);
+      this.styleUnit(rec.unit, rec.role === "orchestrator" ? "hero" : "villager");
     }
-    for (const [, rec] of this.raiders) rec.unit.setTexture(this.tex.raider);
+    for (const [, rec] of this.raiders) {
+      rec.unit.setTexture(this.tex.raider);
+      this.styleUnit(rec.unit, "raider");
+    }
     for (const label of this.regionLabels) label.setColor(hex(this.accent));
     this.refreshCard();
   }

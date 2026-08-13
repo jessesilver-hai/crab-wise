@@ -249,7 +249,12 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         return { cls: "herald-msg", html: `◈ <span class="who">${escapeHtml(speaker)}</span>: ${flavor}${escapeHtml(e.text)}` };
       }
       case "log":
-        return e.level === "error" ? { cls: "battle", html: `⚠ ${escapeHtml(e.text.slice(0, 300))}` } : null;
+        if (e.level === "error") return { cls: "battle", html: `⚠ ${escapeHtml(e.text.slice(0, 300))}` };
+        // chronicler narration (world-generation loading lines) reads "⟡ …"
+        if (e.level === "info" && e.text.startsWith("⟡")) {
+          return { cls: "system", html: escapeHtml(e.text.slice(0, 300)) };
+        }
+        return null;
       case "file_write": {
         const label = BUILDING_LABEL[e.buildingKind] ?? "a structure";
         const verb = e.created ? "raises" : "reinforces";
