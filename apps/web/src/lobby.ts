@@ -18,35 +18,37 @@ export function renderLobby(root: HTMLElement): void {
         <div class="rule"></div>
       </div>
       <div class="lobby-grid">
-        <div class="panel">
+        <div class="panel" id="found-panel">
           <h2>Found a Settlement</h2>
           <div class="form-row">
-            <label>Repository (public git URL)</label>
-            <input id="repo-url" type="text" placeholder="https://github.com/you/your-repo" />
+            <input id="repo-url" type="text" placeholder="paste a public repo URL and press Enter — the Crown funds the rest" />
           </div>
-          <div class="sample-label">— or wake one of the old worlds —</div>
-          <div id="sample-list"></div>
-          <div class="form-row">
-            <label>Anthropic API key (optional)</label>
-            <input id="api-key" type="password" placeholder="leave empty — the Crown funds Grok 4.6" value="${escapeHtml(savedKey)}" />
-            <div class="key-note">
-              <strong>No key needed:</strong> the Crown pays for inference (Grok 4.6 via OpenRouter).
-              Bring your own Anthropic key to use Claude instead — <strong>it never leaves your
-              browser</strong>; only tool calls travel to the sandbox.
-              <label style="display:inline"><input id="remember-key" type="checkbox" style="width:auto" ${savedKey ? "checked" : ""}/> remember key in this browser</label>
-            </div>
-          </div>
-          <div class="form-row">
-            <label>Model</label>
-            <select id="model">
-              <option value="">Grok 4.6 — Crown-funded, no key needed</option>
-              <option value="claude-sonnet-4-5">Claude Sonnet 4.5 (your key)</option>
-              <option value="claude-haiku-4-5">Claude Haiku 4.5 (your key, scrappier workers)</option>
-            </select>
-          </div>
-          <button id="start-btn">⟡ Light the Beacon</button>
-          <button id="demo-btn" style="margin-left:0.6rem">◉ Watch a Demo (no key)</button>
           <div class="error-note" id="start-error"></div>
+          <div class="sample-label">— or touch a world and it wakes —</div>
+          <div id="sample-list"></div>
+          <div class="sample-label">— common grounds —</div>
+          <div id="common-list"></div>
+          <details class="advanced">
+            <summary>Advanced — bring your own Anthropic key (Claude)</summary>
+            <div class="form-row">
+              <label>Anthropic API key</label>
+              <input id="api-key" type="password" placeholder="sk-ant-… (never leaves your browser)" value="${escapeHtml(savedKey)}" />
+              <div class="key-note">
+                By default the Crown pays for inference (Grok 4.6 via OpenRouter) — no key needed.
+                With your key, only tool calls travel to the sandbox.
+                <label style="display:inline"><input id="remember-key" type="checkbox" style="width:auto" ${savedKey ? "checked" : ""}/> remember key in this browser</label>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>Model</label>
+              <select id="model">
+                <option value="">Grok 4.6 — Crown-funded, no key needed</option>
+                <option value="claude-sonnet-4-5">Claude Sonnet 4.5 (your key)</option>
+                <option value="claude-haiku-4-5">Claude Haiku 4.5 (your key, scrappier workers)</option>
+              </select>
+            </div>
+          </details>
+          <button id="demo-btn" class="demo-link">◉ Watch a Demo (no key, no repo)</button>
         </div>
         <div class="panel">
           <h2>Living Settlements</h2>
@@ -63,76 +65,85 @@ export function renderLobby(root: HTMLElement): void {
       </p>
     </div>`;
 
-  // Sample world cards
-  const sampleList = root.querySelector<HTMLElement>("#sample-list")!;
-  let selectedSample: string | null = null;
-  const repoInput = root.querySelector<HTMLInputElement>("#repo-url")!;
-  function renderSamples() {
-    sampleList.innerHTML = TASKS.map(
-      (t) => `
-      <div class="task-card ${t.id === selectedSample ? "selected" : ""}" data-id="${t.id}">
-        <div class="t-title">${escapeHtml(t.title)}</div>
-        <div class="t-flavor">${escapeHtml(t.flavor)}</div>
-      </div>`,
-    ).join("");
-    for (const card of sampleList.querySelectorAll<HTMLElement>(".task-card")) {
-      card.onclick = () => {
-        selectedSample = card.dataset.id === selectedSample ? null : card.dataset.id!;
-        if (selectedSample) repoInput.value = "";
-        renderSamples();
-      };
-    }
-  }
-  renderSamples();
-  repoInput.addEventListener("input", () => {
-    if (repoInput.value.trim() && selectedSample) {
-      selectedSample = null;
-      renderSamples();
-    }
-  });
-
-  const startBtn = root.querySelector<HTMLButtonElement>("#start-btn")!;
+  // Paste-or-pick: any card is a launch button; Enter in the URL field goes.
   const errorNote = root.querySelector<HTMLElement>("#start-error")!;
-  startBtn.onclick = () => {
+  const repoInput = root.querySelector<HTMLInputElement>("#repo-url")!;
+  const foundPanel = root.querySelector<HTMLElement>("#found-panel")!;
+  let starting = false;
+
+  function begin(repoUrl: string, repoLabel: string, firstOrder?: string) {
+    if (starting) return;
     const key = root.querySelector<HTMLInputElement>("#api-key")!.value.trim();
     const model = root.querySelector<HTMLSelectElement>("#model")!.value;
     const remember = root.querySelector<HTMLInputElement>("#remember-key")!.checked;
-    const typedUrl = repoInput.value.trim();
-    const sample = TASKS.find((t) => t.id === selectedSample);
-
     if (key && !key.startsWith("sk-ant-")) {
       errorNote.textContent = "That does not look like an Anthropic API key (sk-ant-…).";
+      root.querySelector<HTMLDetailsElement>(".advanced")!.open = true;
       return;
     }
     if (model && !key) {
-      errorNote.textContent = "Claude models need your Anthropic key — or pick the Crown-funded option.";
-      return;
-    }
-    let repoUrl: string;
-    let repoLabel: string;
-    let firstOrder: string | undefined;
-    if (sample) {
-      repoUrl = `sample:${sample.id}`;
-      repoLabel = sample.title;
-      firstOrder = sample.description;
-    } else if (/^https:\/\/[\w.-]+\/[\w.~/-]+$/.test(typedUrl)) {
-      repoUrl = typedUrl.replace(/\.git$/, "");
-      repoLabel = repoUrl.split("/").slice(-2).join("/");
-    } else {
-      errorNote.textContent = "Enter a public https git URL, or choose an old world below.";
+      errorNote.textContent = "Claude models need your Anthropic key — or clear the model to ride Crown-funded Grok.";
+      root.querySelector<HTMLDetailsElement>(".advanced")!.open = true;
       return;
     }
     if (remember) localStorage.setItem(KEY_STORAGE, key);
     else localStorage.removeItem(KEY_STORAGE);
 
-    startBtn.disabled = true;
+    starting = true;
+    errorNote.textContent = "";
+    foundPanel.classList.add("starting");
     startSettlement(document.getElementById("app")!, { repoUrl, repoLabel, apiKey: key, model, firstOrder }).catch(
       (err) => {
         errorNote.textContent = String(err);
-        startBtn.disabled = false;
+        starting = false;
+        foundPanel.classList.remove("starting");
       },
     );
-  };
+  }
+
+  repoInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const typedUrl = repoInput.value.trim().replace(/\.git$/, "");
+    if (!/^https:\/\/[\w.-]+\/[\w.~/-]+$/.test(typedUrl)) {
+      errorNote.textContent = "Enter a public https git URL, or touch a world below.";
+      return;
+    }
+    begin(typedUrl, typedUrl.split("/").slice(-2).join("/"));
+  });
+
+  const sampleList = root.querySelector<HTMLElement>("#sample-list")!;
+  sampleList.innerHTML = TASKS.map(
+    (t) => `
+    <div class="task-card" data-id="${t.id}">
+      <div class="t-title">${escapeHtml(t.title)}</div>
+      <div class="t-flavor">${escapeHtml(t.flavor)}</div>
+      <div class="t-go">⟡ wake this world</div>
+    </div>`,
+  ).join("");
+  for (const card of sampleList.querySelectorAll<HTMLElement>(".task-card")) {
+    card.onclick = () => {
+      const t = TASKS.find((x) => x.id === card.dataset.id)!;
+      begin(`sample:${t.id}`, t.title, t.description);
+    };
+  }
+
+  const COMMON_REPOS: { label: string; url: string; note: string }[] = [
+    { label: "2048", url: "https://github.com/gabrielecirulli/2048", note: "tiny puzzle" },
+    { label: "hextris", url: "https://github.com/Hextris/hextris", note: "canvas game" },
+    { label: "eleventy-base-blog", url: "https://github.com/11ty/eleventy-base-blog", note: "static blog" },
+    { label: "chalk", url: "https://github.com/chalk/chalk", note: "node lib" },
+    { label: "flask", url: "https://github.com/pallets/flask", note: "python lib" },
+  ];
+  const commonList = root.querySelector<HTMLElement>("#common-list")!;
+  commonList.innerHTML = COMMON_REPOS.map(
+    (r, i) => `<button class="common-chip" data-i="${i}">${escapeHtml(r.label)}<span>${escapeHtml(r.note)}</span></button>`,
+  ).join("");
+  for (const chip of commonList.querySelectorAll<HTMLElement>(".common-chip")) {
+    chip.onclick = () => {
+      const r = COMMON_REPOS[Number(chip.dataset.i)]!;
+      begin(r.url, r.url.split("/").slice(-2).join("/"));
+    };
+  }
 
   root.querySelector<HTMLButtonElement>("#demo-btn")!.onclick = () => {
     startDemoMatch(document.getElementById("app")!).catch((err) => {
