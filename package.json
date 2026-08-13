@@ -1,0 +1,19 @@
+{
+  "name": "agent-empires",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace apps/web",
+    "dev:relay": "npm run dev --workspace apps/relay",
+    "build": "npm run build --workspace packages/protocol && npm run build --workspace packages/runtime && npm run build --workspace apps/web && npm run build --workspace apps/relay",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
