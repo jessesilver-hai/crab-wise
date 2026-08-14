@@ -198,6 +198,8 @@ export type FileNode = {
   name: string;
   path: string;
   kind: "file" | "dir";
+  /** Measured line count (text files only) — drives building size + treemap area. */
+  lines?: number;
   children?: FileNode[];
 };
 
@@ -206,6 +208,7 @@ export const FileNode: z.ZodType<FileNode> = z.lazy(() =>
     name: z.string(),
     path: z.string(),
     kind: z.enum(["file", "dir"]),
+    lines: z.number().int().nonnegative().optional(),
     children: z.array(FileNode).optional(),
   }),
 );

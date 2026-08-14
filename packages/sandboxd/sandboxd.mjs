@@ -24,7 +24,13 @@ const REPO_DIR = path.join(WORK_DIR, "repo");
 const MAX_READ_BYTES = 200_000;
 const MAX_EXEC_OUTPUT = 60_000;
 const MAX_SEARCH_HITS = 80;
-const MAX_TREE_FILES = 600;
+const MAX_TREE_FILES = 1200;
+const LINES_READ_CAP = 262_144; // sample the head of big files; buckets saturate anyway
+const BINARY_EXT = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "gz", "tgz", "tar", "7z",
+  "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "webm", "ogg", "wav",
+  "wasm", "jar", "class", "so", "dylib", "dll", "exe", "bin", "dat", "db", "sqlite", "pyc",
+]);
 const TREE_MAX_DEPTH = 4;
 const DEFAULT_EXEC_TIMEOUT = 180_000;
 const CLONE_TIMEOUT = 120_000;
@@ -128,13 +134,48 @@ async function buildTree(dir, rel, depth, budget) {
         continue;
       }
       budget.files -= 1;
-      node.children.push({ name: entry.name, path: childRel, kind: "file" });
+      const fileNode = { name: entry.name, path: childRel, kind: "file" };
+      const lines = await countLines(path.join(dir, entry.name), budget);
+      if (lines !== null) fileNode.lines = lines;
+      node.children.push(fileNode);
     }
   }
   if (hiddenFiles > 0) {
     node.children.push({ name: `+${hiddenFiles} more`, path: `${rel}/__more__`, kind: "file" });
   }
   return node;
+}
+
+// Measured line counts so the map's treemap areas stay proportional to real
+// code. Head-sample huge files and scale by size (proportion-preserving);
+// binaries and budget overruns return null → renderer falls back to weight 1.
+async function countLines(file, budget) {
+  try {
+    const ext = path.extname(file).slice(1).toLowerCase();
+    if (BINARY_EXT.has(ext)) return null;
+    if (budget.lineBytes !== undefined && budget.lineBytes <= 0) return null;
+    const st = await fs.stat(file);
+    if (st.size === 0) return 0;
+    const toRead = Math.min(st.size, LINES_READ_CAP);
+    const buf = Buffer.alloc(toRead);
+    const fh = await fs.open(file, "r");
+    let bytesRead = 0;
+    try {
+      ({ bytesRead } = await fh.read(buf, 0, toRead, 0));
+    } finally {
+      await fh.close();
+    }
+    if (budget.lineBytes !== undefined) budget.lineBytes -= bytesRead;
+    if (bytesRead === 0) return 0;
+    const view = buf.subarray(0, bytesRead);
+    if (view.subarray(0, Math.min(8192, bytesRead)).includes(0)) return null;
+    let n = 1;
+    for (let i = 0; i < view.length; i++) if (view[i] === 10) n++;
+    if (st.size > bytesRead) n = Math.round((n * st.size) / bytesRead);
+    return n;
+  } catch {
+    return null;
+  }
 }
 
 async function countFiles(dir) {
@@ -241,7 +282,7 @@ const server = createServer(async (req, res) => {
       case "/clone":
         return send(200, await handleClone(body));
       case "/tree":
-        return send(200, { tree: await buildTree(REPO_DIR, "", 0, { files: MAX_TREE_FILES }) });
+        return send(200, { tree: await buildTree(REPO_DIR, "", 0, { files: MAX_TREE_FILES, lineBytes: 64_000_000 }) });
       case "/read": {
         const abs = safePath(body.path);
         const content = await fs.readFile(abs, "utf-8");

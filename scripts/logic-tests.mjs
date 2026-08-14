@@ -260,6 +260,16 @@ console.log("Scrolls, dialogue, theme patches");
   check("agent_status carries detail", GameEvent.safeParse(status).success);
 }
 
+// --- FileNode lines ---------------------------------------------------------------
+console.log("FileNode lines");
+{
+  const { FileNode } = await import("../packages/protocol/src/index.ts");
+  check("file with lines parses", FileNode.safeParse({ name: "a.ts", path: "a.ts", kind: "file", lines: 120 }).success);
+  check("file without lines parses", FileNode.safeParse({ name: "b.png", path: "b.png", kind: "file" }).success);
+  check("negative lines rejected", !FileNode.safeParse({ name: "c.ts", path: "c.ts", kind: "file", lines: -1 }).success);
+  check("nested tree with lines parses", FileNode.safeParse({ name: ".", path: ".", kind: "dir", children: [{ name: "src", path: "src", kind: "dir", children: [{ name: "x.ts", path: "src/x.ts", kind: "file", lines: 42 }] }] }).success);
+}
+
 // --- District archetypes ---------------------------------------------------------
 console.log("District archetypes");
 {
