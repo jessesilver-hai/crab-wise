@@ -1384,10 +1384,12 @@ class MainScene extends Phaser.Scene {
     for (let ty = c.y - 2; ty < c.y + c.h + 2; ty++) {
       for (let tx = c.x - 2; tx < c.x + c.w + 2; tx++) {
         if (tx < 0 || ty < 0 || tx >= map.side || ty >= map.side) continue;
+        // A veil, not a void: the whole treemap city reads dimly from minute
+        // one and exploration brightens it, AoE-style.
         const fog = this.add
           .image(isoX(tx, ty), this.groundYAt(tx, ty), this.fogTexKey)
           .setScale(TEX_SCALE)
-          .setAlpha(0.92)
+          .setAlpha(0.55)
           .setDepth(D_FOG);
         this.fogTiles.set(`${tx},${ty}`, { img: fog, cleared: false });
       }
