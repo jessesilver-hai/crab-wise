@@ -1,0 +1,122 @@
+[
+  {
+    "pack_name": "Isometric 64x64 Outside Tileset",
+    "author": "Yar",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/isometric-64x64-outside-tileset",
+    "category": "terrain",
+    "kind": "tilesheet",
+    "files": ["terrain/yar-iso-64x64-outside.png"],
+    "notes": "64x64 cells, 2:1 dimetric diamond floor (64x32 footprint). Upper rows: grass/dirt tiles, slopes, cliff blocks, waterfalls. Middle rows: water tiles and shore/edge transitions, water rocks. Lower rows: grass tufts, bushes, fallen logs, pine/oak/dead trees (props). Transparent background. PRIMARY STYLE anchor."
+  },
+  {
+    "pack_name": "Isometric 64x64 Medieval Building Tileset",
+    "author": "Yar",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/isometric-64x64-medieval-building-tileset",
+    "category": "buildings",
+    "kind": "tilesheet (modular)",
+    "files": [
+      "buildings/yar-iso-64x64-building-a.png",
+      "buildings/yar-iso-64x64-building-b.png"
+    ],
+    "notes": "Modular 64x64 building parts: stone/timber walls, doors, windows, roof pieces, stairs, interior furniture (tables, chairs, barrels-adjacent props). Compose houses, barracks, mills, market stalls from parts. Same palette/style as Yar outside tileset."
+  },
+  {
+    "pack_name": "Isometric Medieval City Sim Assets (castle)",
+    "author": "SketchyLogic",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/isometric-medieval-city-sim-assets",
+    "category": "buildings",
+    "kind": "single large building sprite",
+    "files": ["buildings/sketchylogic-castle.png"],
+    "notes": "368x345 walled keep/castle with gate, tower, banners. Derivative: pure-white background keyed to transparent from original castle_3.png (RGB). Palette matches Yar sets well."
+  },
+  {
+    "pack_name": "Castle Walls - Isometric 64 x 128",
+    "author": "extradave",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/castle-walls-isometric-64-x-128",
+    "category": "buildings",
+    "kind": "tilesheet",
+    "files": ["buildings/extradave-castle-walls-64x128.png"],
+    "notes": "64x128 castle wall segments, towers, and rubble/damaged variants — useful for AoE-style walls, gates, and destruction states. Palette is browner than the Yar/SketchyLogic green-stone look; tint at runtime if needed."
+  },
+  {
+    "pack_name": "Isometric Medieval City Sim Assets (citizens)",
+    "author": "SketchyLogic",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/isometric-medieval-city-sim-assets",
+    "category": "units",
+    "kind": "character walk-cycle sheet",
+    "files": ["units/sketchylogic-citizens.png"],
+    "notes": "24x~32 villagers in several outfits (peasant, robed, noble) plus caped soldiers and a grey mage; rows are 4-direction walk cycles. Derivative: pure-white background keyed to transparent from original CitizenSheet.png (RGB). Best villager/worker unit set."
+  },
+  {
+    "pack_name": "Isometric People",
+    "author": "FLAG",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/isometric-people",
+    "category": "units",
+    "kind": "character walk-cycle sheet",
+    "files": ["units/flag-isometric-people.png"],
+    "notes": "1376x1200 sheet of small isometric pixel people with 8-direction walk frames. Secondary/civilian variety."
+  },
+  {
+    "pack_name": "Isometric Hero and Creatures (heroes)",
+    "author": "Clint Bellanger",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/isometric-hero-and-creatures",
+    "category": "units",
+    "kind": "animated character sheets, 8 directions (2048x2048, 256px cells; rows=directions, cols=frames: stance/walk/swing/cast/die)",
+    "files": [
+      "units/hero/male_base.png",
+      "units/hero/male_unarmored.png",
+      "units/hero/male_light.png",
+      "units/hero/male_heavy.png",
+      "units/hero/magician.png",
+      "units/hero/male_longsword.png",
+      "units/hero/male_longbow.png",
+      "units/hero/male_shield.png",
+      "units/hero/male_staff.png"
+    ],
+    "notes": "male_* light/heavy/unarmored are full-body soldier variants; male_longsword/longbow/shield/staff are weapon OVERLAYS to composite on male_base. magician is a robed caster. Fully animated — the rare animated-iso-unit coverage."
+  },
+  {
+    "pack_name": "Isometric Hero and Creatures (creatures)",
+    "author": "Clint Bellanger",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/isometric-hero-and-creatures",
+    "category": "monsters",
+    "kind": "animated creature sheets, 8 directions (same grid layout as heroes)",
+    "files": [
+      "monsters/skeleton.png",
+      "monsters/zombie.png",
+      "monsters/goblin.png",
+      "monsters/ogre.png",
+      "monsters/werewolf.png",
+      "monsters/elemental.png"
+    ],
+    "notes": "Skeleton/zombie read as undead raiders; elemental works as a specter/wraith; ogre as a brute. Same style and scale as the hero sheets."
+  },
+  {
+    "pack_name": "9 Frame Fire Animation 16x 32x 64x",
+    "author": "FoshyTakashi",
+    "license": "CC-BY 3.0",
+    "source_url": "https://opengameart.org/content/9-frame-fire-animation-16x-32x-64x",
+    "category": "effects",
+    "kind": "animation strips (3x3 grid, 9 frames)",
+    "files": ["effects/fire-32.png", "effects/fire-64.png"],
+    "notes": "Pixel fire loop at 32px (96x96 sheet) and 64px (192x192 sheet). Author note on page: 'As long as you are not selling these directly do whatever.'"
+  },
+  {
+    "pack_name": "Chimney Smoke Animation",
+    "author": "AntumDeluge",
+    "license": "CC0",
+    "source_url": "https://opengameart.org/content/chimney-smoke-animation",
+    "category": "effects",
+    "kind": "animation strip (128x320)",
+    "files": ["effects/chimney-smoke.png"],
+    "notes": "Looping smoke puff column for burning/producing buildings."
+  }
+]

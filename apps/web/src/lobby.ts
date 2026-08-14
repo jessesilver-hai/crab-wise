@@ -61,7 +61,8 @@ export function renderLobby(root: HTMLElement): void {
       </div>
       <p class="footer-note">
         Real software-engineering agents, rendered as an ancient-future strategy chronicle.<br/>
-        Sessions run in isolated sandboxes · themes are divined per repository · your key stays client-side.
+        Sessions run in isolated sandboxes · themes are divined per repository · your key stays client-side ·
+        <a href="/assets/iso/LICENSES.md" target="_blank" rel="noopener">pixel art credits</a>
       </p>
     </div>`;
 
