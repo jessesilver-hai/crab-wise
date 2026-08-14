@@ -29,6 +29,8 @@ function css(color: number, alpha = 1): string {
 }
 
 /** "#rrggbb" → numeric color; undefined when malformed. */
+import { visibleFloor } from "./palette";
+
 export function hexColor(s: string): number | undefined {
   if (!/^#[0-9a-fA-F]{6}$/.test(s)) return undefined;
   return parseInt(s.slice(1), 16);
@@ -276,8 +278,8 @@ export function silhouetteTexture(
 
 /** Vertical sky gradient from a WorldSpec: top → horizon → haze. */
 export function specSkyTexture(scene: Phaser.Scene, sky: WorldSpec["sky"], gen: number): string {
-  const top = hexColor(sky.top) ?? 0x2a2118;
-  const horizon = hexColor(sky.horizon) ?? 0x2a2118;
+  const top = visibleFloor(hexColor(sky.top) ?? 0x2a2118, 0x22);
+  const horizon = visibleFloor(hexColor(sky.horizon) ?? 0x2a2118, 0x22);
   return canvasTexture(scene, `g${gen}-sky`, 16, 160, (ctx) => {
     const grad = ctx.createLinearGradient(0, 0, 0, 160);
     grad.addColorStop(0, css(top, 0.95));

@@ -260,6 +260,17 @@ console.log("Scrolls, dialogue, theme patches");
   check("agent_status carries detail", GameEvent.safeParse(status).success);
 }
 
+// --- Palette visibility floor -----------------------------------------------------
+console.log("Palette visibility floor");
+{
+  const { visibleFloor } = await import("../apps/web/src/game/palette.ts");
+  check("pure black becomes visible", visibleFloor(0x000000) > 0x101010);
+  check("near-black floors up", ((visibleFloor(0x050505) >> 16) & 0xff) >= 0x2a);
+  check("dark red keeps hue dominance", (() => { const v = visibleFloor(0x180000); return ((v >> 16) & 0xff) > ((v >> 8) & 0xff) && ((v >> 16) & 0xff) >= 0x2a; })());
+  check("normal color untouched", visibleFloor(0x4488cc) === 0x4488cc);
+  check("custom floor respected", ((visibleFloor(0x000000, 0x14) >> 16) & 0xff) === 0x14);
+}
+
 // --- FileNode lines ---------------------------------------------------------------
 console.log("FileNode lines");
 {

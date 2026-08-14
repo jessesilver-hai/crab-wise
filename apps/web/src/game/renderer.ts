@@ -103,6 +103,8 @@ function hashStr(s: string): number {
 }
 
 /** Mix a color toward white so it works as a subtle multiply tint. */
+import { visibleFloor } from "./palette";
+
 function soften(color: number, keep = 0.35): number {
   const ch = (c: number) => Math.round(255 - (255 - c) * keep);
   return (ch((color >> 16) & 0xff) << 16) | (ch((color >> 8) & 0xff) << 8) | ch(color & 0xff);
@@ -2235,11 +2237,11 @@ class MainScene extends Phaser.Scene {
     this.archetype = resolveArchetype(theme.biome.archetype, this.mapSeed);
     this.spec = theme.worldSpec ?? null;
     const themeAccent = hexColor(theme.biome.accentColor);
-    this.accent = themeAccent ?? this.archetype.glow;
+    this.accent = visibleFloor(themeAccent ?? this.archetype.glow, 0x40);
 
     this.cameras.main.setBackgroundColor(
       this.spec
-        ? shade(hexColor(this.spec.sky.top) ?? this.archetype.skyColor, 0.35)
+        ? visibleFloor(shade(hexColor(this.spec.sky.top) ?? this.archetype.skyColor, 0.35), 0x14)
         : this.archetype.skyColor,
     );
     this.redrawSky();
@@ -2270,8 +2272,8 @@ class MainScene extends Phaser.Scene {
       else img.setTint(soften(groundTint, 0.6));
     }
 
-    // fog color follows the theme
-    const fogColor = hexColor(theme.biome.fogColor) ?? this.archetype.fogColor;
+    // fog color follows the theme (floored: unexplored land must stay readable)
+    const fogColor = visibleFloor(hexColor(theme.biome.fogColor) ?? this.archetype.fogColor, 0x26);
     this.fogTexKey = fogTexture(this, fogColor, this.gen);
     for (const [, rec] of this.fogTiles) {
       if (rec.img.active) rec.img.setTexture(this.fogTexKey);
