@@ -31,7 +31,6 @@ export type SpecProp = {
 };
 
 export type TextureSet = {
-  ground: string[];
   fog: string;
   /** Archetype prop variants (monoliths, masts, shards, …). */
   props: string[];
@@ -41,8 +40,6 @@ export type TextureSet = {
   king: string;
   raider: string;
   highlight: string;
-  /** WorldSpec waterline tile; band of tiles at the map's low corner. */
-  water?: string;
   /** WorldSpec props (replace archetype props when present). */
   specProps?: SpecProp[];
 };
@@ -156,116 +153,26 @@ function ring(ctx: Ctx, x: number, y: number, rx: number, ry: number, stroke: st
 }
 
 // ---------------------------------------------------------------------------
-// Terrain
+// Terrain: per-tile ground stamping now lives in ground.ts (painterly canvas);
+// only the fog-of-war blob remains here. Fog blobs are soft ellipses that are
+// placed per tile but overlap heavily, so the unexplored area reads as one
+// organic cloud rather than a diamond grid.
 // ---------------------------------------------------------------------------
 
-function drawTilePattern(ctx: Ctx, arch: Archetype, base: number): void {
-  const dark = css(shade(base, 0.78));
-  const light = css(shade(base, 1.22));
-  const r = Math.random;
-  switch (arch.pattern) {
-    case "cinder": {
-      for (let i = 0; i < 5; i++) {
-        circle(ctx, (r() - 0.5) * TILE_W * 0.6, (r() - 0.5) * TILE_H * 0.6, 0.8 + r(), dark);
-      }
-      if (r() < 0.25) circle(ctx, (r() - 0.5) * 20, (r() - 0.5) * 10, 0.9, css(arch.glow, 0.35));
-      break;
-    }
-    case "wave": {
-      ctx.strokeStyle = dark;
-      ctx.lineWidth = 1;
-      for (let i = 0; i < 2; i++) {
-        const y = (r() - 0.5) * TILE_H * 0.5;
-        ctx.beginPath();
-        ctx.moveTo(-14 + r() * 6, y);
-        ctx.quadraticCurveTo(0, y - 2 - r() * 2, 14 - r() * 6, y);
-        ctx.stroke();
-      }
-      break;
-    }
-    case "crack": {
-      ctx.strokeStyle = css(shade(base, 0.6));
-      ctx.lineWidth = 1;
-      const x0 = (r() - 0.5) * 20;
-      const y0 = (r() - 0.5) * 8;
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x0 + 5 + r() * 5, y0 + (r() - 0.5) * 6);
-      ctx.lineTo(x0 + 12 + r() * 6, y0 + (r() - 0.5) * 8);
-      ctx.stroke();
-      if (r() < 0.3) circle(ctx, x0 + 6, y0, 1, css(arch.glow, 0.45));
-      break;
-    }
-    case "shard": {
-      ctx.strokeStyle = light;
-      ctx.lineWidth = 0.8;
-      for (let i = 0; i < 3; i++) {
-        const x = (r() - 0.5) * TILE_W * 0.5;
-        const y = (r() - 0.5) * TILE_H * 0.5;
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.lineTo(x + (r() - 0.5) * 12, y + (r() - 0.5) * 6);
-        ctx.stroke();
-      }
-      break;
-    }
-    case "moss": {
-      for (let i = 0; i < 3; i++) {
-        circle(ctx, (r() - 0.5) * TILE_W * 0.55, (r() - 0.5) * TILE_H * 0.55, 1.6 + r() * 2, css(shade(base, 0.82), 0.8));
-      }
-      if (r() < 0.4) circle(ctx, (r() - 0.5) * 18, (r() - 0.5) * 8, 1, light);
-      break;
-    }
-    case "ripple": {
-      ctx.strokeStyle = dark;
-      ctx.lineWidth = 1;
-      for (let i = 0; i < 3; i++) {
-        const y = -TILE_H * 0.3 + i * (TILE_H * 0.3) + (r() - 0.5) * 3;
-        ctx.beginPath();
-        ctx.arc((r() - 0.5) * 10, y + 8, 10 + r() * 6, Math.PI * 1.15, Math.PI * 1.85);
-        ctx.stroke();
-      }
-      break;
-    }
-  }
-}
-
-export function groundTextures(
-  scene: Phaser.Scene,
-  arch: Archetype,
-  colors: number[],
-  gen: number,
-  tag: string,
-): string[] {
-  const w = TILE_W + 2;
-  const h = TILE_H + 2;
-  return colors.map((color, i) =>
-    canvasTexture(scene, `g${gen}-${tag}-${i}`, w, h, (ctx) => {
-      ctx.translate(w / 2, h / 2);
-      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-      ctx.fillStyle = css(color);
-      ctx.fill();
-      ctx.save();
-      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-      ctx.clip();
-      drawTilePattern(ctx, arch, color);
-      ctx.restore();
-      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-      ctx.strokeStyle = css(0x2e2a22, 0.5);
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }),
-  );
-}
-
 export function fogTexture(scene: Phaser.Scene, color: number, gen: number): string {
-  const w = TILE_W + 2;
-  const h = TILE_H + 2;
+  const w = TILE_W * 1.8;
+  const h = TILE_H * 1.8;
   return canvasTexture(scene, `g${gen}-fog`, w, h, (ctx) => {
     ctx.translate(w / 2, h / 2);
-    diamondPath(ctx, 0, 0, TILE_W + 2, TILE_H + 2);
-    ctx.fillStyle = css(color);
-    ctx.fill();
+    ctx.save();
+    ctx.scale(1, h / w);
+    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, w / 2);
+    grad.addColorStop(0, css(color, 1));
+    grad.addColorStop(0.55, css(color, 0.96));
+    grad.addColorStop(1, css(color, 0));
+    ctx.fillStyle = grad;
+    ctx.fillRect(-w / 2, -w / 2, w, w);
+    ctx.restore();
   });
 }
 
@@ -587,9 +494,16 @@ function drawPrimitive(ctx: Ctx, prim: Primitive): void {
   ctx.restore();
 }
 
-/** Compose a WorldSpec prop's primitives, side by side at the ground, into a texture. */
-function specPropTexture(scene: Phaser.Scene, key: string, prop: WorldProp): string {
-  const prims = prop.silhouette;
+/**
+ * Compose a silhouette's primitives, side by side at the ground, into a
+ * texture. Used for WorldSpec props and DistrictPatch landmarks alike.
+ */
+export function silhouetteTexture(
+  scene: Phaser.Scene,
+  key: string,
+  prims: Primitive[],
+  glow?: { color: string },
+): string {
   const spread = prims.length > 1 ? prims.reduce((s, p) => s + p.w, 0) * 0.62 : 0;
   const maxW = Math.max(...prims.map((p) => p.w));
   const maxH = Math.max(...prims.map((p) => p.h));
@@ -616,8 +530,8 @@ function specPropTexture(scene: Phaser.Scene, key: string, prop: WorldProp): str
       drawPrimitive(ctx, p);
       ctx.restore();
     });
-    if (prop.glow) {
-      const g = hexColor(prop.glow.color) ?? 0xe3b264;
+    if (glow) {
+      const g = hexColor(glow.color) ?? 0xe3b264;
       const gx = xs[tallest]!;
       const gy = -maxH - 3;
       circle(ctx, gx, gy, 2.2, css(g, 0.95));
@@ -638,8 +552,10 @@ function specBuildingTexture(scene: Phaser.Scene, key: string, spec: BuildingSpe
   return buildingTexture(scene, key, (ctx) => {
     const baseW = Math.max(18, maxW * s + 8);
     groundShadow(ctx, baseW * 0.62, baseW * 0.2);
-    isoBox(ctx, baseW, baseW * 0.6, 4, shade(wall, 1.1), wall, shade(wall, 0.78));
-    let y = -4;
+    // real two-face walls in the spec's palette: lit top, west face, shaded east
+    const wallH = Math.max(6, baseW * 0.28);
+    isoBox(ctx, baseW, baseW * 0.6, wallH, shade(wall, 1.14), wall, shade(wall, 0.72));
+    let y = -wallH;
     let topW = baseW;
     for (const p of prims) {
       ctx.save();
@@ -663,169 +579,6 @@ function specBuildingTexture(scene: Phaser.Scene, key: string, spec: BuildingSpe
   });
 }
 
-/** WorldSpec tile detailing; reliefIntensity scales contrast and clutter. */
-function drawSpecTilePattern(
-  ctx: Ctx,
-  pattern: WorldSpec["terrain"]["pattern"],
-  base: number,
-  relief: number,
-): void {
-  const dark = css(shade(base, 1 - 0.12 - 0.3 * relief));
-  const light = css(shade(base, 1 + 0.1 + 0.3 * relief));
-  const r = Math.random;
-  const n = 1 + Math.round(relief * 2);
-  switch (pattern) {
-    case "plates": {
-      ctx.strokeStyle = dark;
-      ctx.lineWidth = 1;
-      for (let i = 0; i < n; i++) {
-        const y0 = (r() - 0.5) * TILE_H * 0.6;
-        ctx.beginPath();
-        ctx.moveTo(-16 + r() * 8, y0);
-        ctx.lineTo(-2 + r() * 4, y0 + (r() - 0.5) * 5);
-        ctx.lineTo(14 - r() * 6, y0 + (r() - 0.5) * 8);
-        ctx.stroke();
-      }
-      if (r() < 0.3) {
-        poly(ctx, [[-4, -2], [4, -3], [6, 2], [-3, 3]], css(shade(base, 1.08), 0.7));
-      }
-      break;
-    }
-    case "dunes": {
-      ctx.strokeStyle = dark;
-      ctx.lineWidth = 1;
-      for (let i = 0; i < n + 1; i++) {
-        const y = -TILE_H * 0.3 + i * ((TILE_H * 0.6) / (n + 1)) + (r() - 0.5) * 3;
-        ctx.beginPath();
-        ctx.moveTo(-13 + r() * 5, y);
-        ctx.quadraticCurveTo(0, y - 2.5 - relief * 2, 13 - r() * 5, y);
-        ctx.stroke();
-      }
-      break;
-    }
-    case "floes": {
-      for (let i = 0; i < n; i++) {
-        const x = (r() - 0.5) * TILE_W * 0.45;
-        const y = (r() - 0.5) * TILE_H * 0.45;
-        poly(
-          ctx,
-          [[x - 6, y], [x - 1, y - 3.5], [x + 6, y - 1], [x + 4, y + 3], [x - 3, y + 3.4]],
-          light,
-        );
-        ctx.strokeStyle = dark;
-        ctx.lineWidth = 0.8;
-        ctx.strokeRect(x - 6, y - 3.5, 12, 7);
-      }
-      break;
-    }
-    case "moss": {
-      for (let i = 0; i < n + 1; i++) {
-        circle(
-          ctx,
-          (r() - 0.5) * TILE_W * 0.55,
-          (r() - 0.5) * TILE_H * 0.55,
-          1.4 + r() * (1.5 + relief * 1.6),
-          css(shade(base, 0.84), 0.85),
-        );
-      }
-      if (r() < 0.4) circle(ctx, (r() - 0.5) * 18, (r() - 0.5) * 8, 0.9, light);
-      break;
-    }
-    case "tessellae": {
-      // mosaic fragments on a loose diamond grid
-      for (let i = 0; i < n + 2; i++) {
-        const x = (r() - 0.5) * TILE_W * 0.55;
-        const y = (r() - 0.5) * TILE_H * 0.55;
-        const sz = 1.6 + r() * 2;
-        poly(
-          ctx,
-          [[x, y - sz / 2], [x + sz, y], [x, y + sz / 2], [x - sz, y]],
-          r() < 0.5 ? dark : light,
-        );
-      }
-      break;
-    }
-    case "shale": {
-      ctx.strokeStyle = dark;
-      ctx.lineWidth = 0.9;
-      for (let i = 0; i < n + 1; i++) {
-        const y = (r() - 0.5) * TILE_H * 0.7;
-        const x = (r() - 0.5) * 10;
-        ctx.beginPath();
-        ctx.moveTo(x - 9, y);
-        ctx.lineTo(x + 9, y - 1 - relief * 2);
-        ctx.stroke();
-      }
-      if (r() < 0.3) {
-        ctx.strokeStyle = light;
-        ctx.beginPath();
-        const y = (r() - 0.5) * 8;
-        ctx.moveTo(-6, y);
-        ctx.lineTo(7, y - 2);
-        ctx.stroke();
-      }
-      break;
-    }
-  }
-}
-
-function specGroundTextures(
-  scene: Phaser.Scene,
-  terrain: WorldSpec["terrain"],
-  gen: number,
-): string[] {
-  const w = TILE_W + 2;
-  const h = TILE_H + 2;
-  const colors = terrain.base
-    .map((c) => hexColor(c))
-    .filter((c): c is number => c !== undefined);
-  return colors.map((color, i) =>
-    canvasTexture(scene, `g${gen}-wground-${i}`, w, h, (ctx) => {
-      ctx.translate(w / 2, h / 2);
-      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-      ctx.fillStyle = css(color);
-      ctx.fill();
-      ctx.save();
-      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-      ctx.clip();
-      drawSpecTilePattern(ctx, terrain.pattern, color, terrain.reliefIntensity);
-      ctx.restore();
-      diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-      ctx.strokeStyle = css(0x2e2a22, 0.5);
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }),
-  );
-}
-
-function waterTexture(scene: Phaser.Scene, color: number, gen: number): string {
-  const w = TILE_W + 2;
-  const h = TILE_H + 2;
-  return canvasTexture(scene, `g${gen}-water`, w, h, (ctx) => {
-    ctx.translate(w / 2, h / 2);
-    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-    ctx.fillStyle = css(color);
-    ctx.fill();
-    ctx.save();
-    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-    ctx.clip();
-    ctx.strokeStyle = css(shade(color, 1.35), 0.8);
-    ctx.lineWidth = 1;
-    for (let i = 0; i < 2; i++) {
-      const y = (Math.random() - 0.5) * TILE_H * 0.5;
-      ctx.beginPath();
-      ctx.moveTo(-12 + Math.random() * 6, y);
-      ctx.quadraticCurveTo(0, y - 2, 12 - Math.random() * 6, y);
-      ctx.stroke();
-    }
-    ctx.restore();
-    diamondPath(ctx, 0, 0, TILE_W, TILE_H);
-    ctx.strokeStyle = css(shade(color, 0.7), 0.6);
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  });
-}
-
 /** Vertical sky gradient from a WorldSpec: top → horizon → haze. */
 export function specSkyTexture(scene: Phaser.Scene, sky: WorldSpec["sky"], gen: number): string {
   const top = hexColor(sky.top) ?? 0x2a2118;
@@ -841,9 +594,10 @@ export function specSkyTexture(scene: Phaser.Scene, sky: WorldSpec["sky"], gen: 
 }
 
 /**
- * Override archetype visuals with WorldSpec geometry: ground ramp + pattern,
- * waterline tile, composed props, and per-kind building silhouettes. Pixel
- * sprites (applyTheme) still layer over whatever the spec does not claim.
+ * Override archetype visuals with WorldSpec geometry: composed props and
+ * per-kind building silhouettes. Terrain palette/pattern/waterline are
+ * consumed by the painterly ground painter (ground.ts), not tile textures.
+ * Pixel sprites (applyTheme) still layer over whatever the spec does not claim.
  */
 export function applyWorldSpec(
   scene: Phaser.Scene,
@@ -853,16 +607,8 @@ export function applyWorldSpec(
 ): TextureSet {
   const out: TextureSet = { ...base, buildings: { ...base.buildings } };
 
-  const ground = specGroundTextures(scene, spec.terrain, gen);
-  if (ground.length >= 2) out.ground = ground;
-
-  if (spec.terrain.waterline) {
-    const c = hexColor(spec.terrain.waterline.color);
-    if (c !== undefined) out.water = waterTexture(scene, c, gen);
-  }
-
   out.specProps = spec.props.map((prop, i) => ({
-    tex: specPropTexture(scene, `g${gen}-wprop-${i}`, prop),
+    tex: silhouetteTexture(scene, `g${gen}-wprop-${i}`, prop.silhouette, prop.glow),
     density: prop.density,
     placement: prop.placement,
     pulseSec: prop.glow ? prop.glow.pulseSec : null,
@@ -907,7 +653,6 @@ export function buildTextures(scene: Phaser.Scene, arch: Archetype, gen: number)
   const glow = arch.glow;
   const g = (name: string) => `g${gen}-${name}`;
 
-  const ground = groundTextures(scene, arch, arch.groundColors, gen, "ground");
   const fog = fogTexture(scene, arch.fogColor, gen);
   const props = propTextures(scene, arch, gen);
 
@@ -1022,9 +767,9 @@ export function buildTextures(scene: Phaser.Scene, arch: Archetype, gen: number)
       draw(ctx);
     });
 
-  // robed worker
+  // robed worker (drop shadows live on the unit, not baked into the texture,
+  // so the body can bob while the shadow stays grounded)
   const villager = unitTexture("villager", (ctx) => {
-    groundShadow(ctx, 8, 3.5, 0.35);
     poly(ctx, [[-5, 0], [-4, -13], [4, -13], [5, 0]], css(0xa39a86));
     circle(ctx, 0, -15, 4, css(0x8d8577));
     poly(ctx, [[-4, -15], [0, -20], [4, -15]], css(0xa39a86)); // hood
@@ -1033,7 +778,6 @@ export function buildTextures(scene: Phaser.Scene, arch: Archetype, gen: number)
   });
   // hierophant: taller, halo ring
   const king = unitTexture("king", (ctx) => {
-    groundShadow(ctx, 9, 4, 0.35);
     poly(ctx, [[-6, 0], [-4, -17], [4, -17], [6, 0]], css(0x8a7a58));
     circle(ctx, 0, -19, 4, css(0x9a8f79));
     poly(ctx, [[-4, -19], [0, -25], [4, -19]], css(0x8a7a58));
@@ -1041,7 +785,6 @@ export function buildTextures(scene: Phaser.Scene, arch: Archetype, gen: number)
   });
   // specter: black wraith, pale eyes
   const raider = unitTexture("raider", (ctx) => {
-    groundShadow(ctx, 8, 3.5, 0.25);
     poly(ctx, [[-5, 0], [-4, -14], [0, -18], [4, -14], [5, 0]], css(0x16141a, 0.95));
     poly(ctx, [[-5, 0], [-2, -4], [1, 0]], css(0x16141a, 0.5));
     circle(ctx, -1.6, -13, 1, css(0xbfd4d8));
@@ -1061,7 +804,7 @@ export function buildTextures(scene: Phaser.Scene, arch: Archetype, gen: number)
     ctx.stroke();
   });
 
-  return { ground, fog, props, buildings, wonder, villager, king, raider, highlight };
+  return { fog, props, buildings, wonder, villager, king, raider, highlight };
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +816,7 @@ export function pixelSpriteTexture(
   key: string,
   sprite: PixelSprite,
   pixelSize: number,
+  withShadow = true,
 ): string {
   const width = Math.max(...sprite.rows.map((r) => r.length));
   const height = sprite.rows.length;
@@ -1080,8 +824,9 @@ export function pixelSpriteTexture(
   const h = height * pixelSize + 10;
   return canvasTexture(scene, key, w, h, (ctx) => {
     ctx.translate(w / 2, h - 4);
-    // soft ground shadow so themed sprites sit in the world
-    groundShadow(ctx, (width * pixelSize) / 3, 3.5);
+    // soft ground shadow so themed statics sit in the world (units get a
+    // live shadow instead so the body can bob independently)
+    if (withShadow) groundShadow(ctx, (width * pixelSize) / 3, 3.5);
     const ox = (-width * pixelSize) / 2;
     sprite.rows.forEach((row, y) => {
       for (let x = 0; x < row.length; x++) {
@@ -1118,27 +863,19 @@ export function applyTheme(
     spec ? Object.entries(spec.architecture).filter(([, b]) => b).map(([k]) => k) : [],
   );
 
-  const grassColors = theme.biome.grassColors
-    .map((c) => parseInt(c.slice(1), 16))
-    .filter((n) => !Number.isNaN(n));
-  if (!spec && grassColors.length >= 2) {
-    out.ground = groundTextures(scene, arch, grassColors, gen, "tground");
-  }
+  // grassColors feed the painterly ground painter (renderer builds the
+  // GroundStyle palette); no per-tile textures are generated here anymore.
 
   const fogColor = parseInt(theme.biome.fogColor.slice(1), 16);
   if (!Number.isNaN(fogColor)) {
-    out.fog = canvasTexture(scene, `g${gen}-tfog`, TILE_W + 2, TILE_H + 2, (ctx) => {
-      ctx.translate((TILE_W + 2) / 2, (TILE_H + 2) / 2);
-      diamondPath(ctx, 0, 0, TILE_W + 2, TILE_H + 2);
-      ctx.fillStyle = css(fogColor);
-      ctx.fill();
-    });
+    // regenerates the gen-keyed fog blob in the theme's color
+    out.fog = fogTexture(scene, fogColor, gen);
   }
 
   for (const sprite of theme.sprites) {
     const key = `g${gen}-t-${sprite.key}`;
     if (UNIT_KEYS.has(sprite.key)) {
-      const tex = pixelSpriteTexture(scene, key, sprite, 2);
+      const tex = pixelSpriteTexture(scene, key, sprite, 2, false);
       if (sprite.key === "villager") out.villager = tex;
       if (sprite.key === "hero") out.king = tex;
       if (sprite.key === "raider") out.raider = tex;
@@ -1197,6 +934,82 @@ export function particleTextures(scene: Phaser.Scene): { soft: string; mist: str
     ctx.fillRect(0, 1, 28, 4);
   });
   return { soft, mist, streak };
+}
+
+/** Elliptical drop shadow shared by all units (static key). */
+export function shadowTexture(scene: Phaser.Scene): string {
+  if (scene.textures.exists("fx-shadow")) return "fx-shadow";
+  return canvasTexture(scene, "fx-shadow", 36, 16, (ctx) => {
+    ctx.translate(18, 8);
+    ctx.save();
+    ctx.scale(1, 16 / 36);
+    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 18);
+    grad.addColorStop(0, "rgba(0,0,0,0.42)");
+    grad.addColorStop(0.7, "rgba(0,0,0,0.22)");
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(-18, -18, 36, 36);
+    ctx.restore();
+  });
+}
+
+/** Small rolled parchment for scroll-authored fanfare (static key). */
+export function parchmentTexture(scene: Phaser.Scene): string {
+  if (scene.textures.exists("fx-scroll")) return "fx-scroll";
+  return canvasTexture(scene, "fx-scroll", 26, 20, (ctx) => {
+    ctx.translate(13, 10);
+    ctx.fillStyle = css(0xe8d9b0);
+    ctx.fillRect(-9, -6, 18, 12);
+    ctx.strokeStyle = css(0x5a4527);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-9, -6, 18, 12);
+    // rolled ends
+    ctx.fillStyle = css(0xd4c294);
+    ctx.beginPath();
+    ctx.ellipse(-9, 0, 2.6, 6.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(9, 0, 2.6, 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = css(0x5a4527, 0.8);
+    ctx.stroke();
+    // faint script lines
+    ctx.strokeStyle = css(0x7a6a48, 0.8);
+    ctx.lineWidth = 0.8;
+    for (const y of [-3, -0.5, 2]) {
+      ctx.beginPath();
+      ctx.moveTo(-5.5, y);
+      ctx.lineTo(5.5, y);
+      ctx.stroke();
+    }
+  });
+}
+
+/** Half-buried obelisk marker for quest hooks, tinted per district accent. */
+export function hookMarkerTexture(scene: Phaser.Scene, key: string, accent: number): string {
+  return canvasTexture(scene, key, 40, 56, (ctx) => {
+    ctx.translate(20, 50);
+    groundShadow(ctx, 9, 3.4);
+    // rubble mound it juts from
+    ctx.beginPath();
+    ctx.ellipse(0, -1, 10, 4.2, 0, 0, Math.PI * 2);
+    ctx.fillStyle = css(0x4c463c);
+    ctx.fill();
+    ctx.save();
+    ctx.rotate(-0.14);
+    poly(ctx, [[-5, 2], [-3, -26], [0, -30], [3, -27], [5, 2]], css(0x6a6154));
+    poly(ctx, [[0, -30], [3, -27], [5, 2], [0, 2]], css(0x524b40));
+    // etched sigils
+    ctx.fillStyle = css(accent, 0.9);
+    ctx.fillRect(-0.8, -24, 1.6, 4);
+    ctx.fillRect(-0.8, -17, 1.6, 2.6);
+    circle(ctx, 0, -27.5, 1.8, css(accent, 0.95));
+    ctx.restore();
+    // soft glow halo around the tip
+    const grad = ctx.createRadialGradient(-2, -30, 0, -2, -30, 11);
+    grad.addColorStop(0, css(accent, 0.4));
+    grad.addColorStop(1, css(accent, 0));
+    ctx.fillStyle = grad;
+    ctx.fillRect(-13, -41, 22, 22);
+  });
 }
 
 /** Drop every canvas texture belonging to an older generation. */

@@ -1,22 +1,52 @@
 import Phaser from "phaser";
-import type { AgentStatus, GameEvent, ThemePack, WorldSpec } from "@agent-empires/protocol";
+import type {
+  AgentStatus,
+  DistrictPatch,
+  GameEvent,
+  ThemePack,
+  WorldSpec,
+} from "@agent-empires/protocol";
 import type { Renderer } from "../match-view.js";
-import { assignPlot, isoX, isoY, layoutMap, MapLayout, mulberry32, TILE_H, TILE_W } from "./map.js";
+import {
+  assignPlot,
+  isoX,
+  isoY,
+  layoutMap,
+  MapLayout,
+  mulberry32,
+  Rect,
+  STEP,
+  TILE_H,
+  TILE_W,
+} from "./map.js";
+import {
+  buildGroundField,
+  districtTintTexture,
+  fbm2,
+  GROUND_SCALE,
+  GroundField,
+  GroundStyle,
+  paintGround,
+  PatternMode,
+} from "./ground.js";
 import {
   applyTheme,
   applyWorldSpec,
   buildTextures,
   hexColor,
+  hookMarkerTexture,
+  parchmentTexture,
   particleTextures,
   pruneGeneration,
   shade,
+  silhouetteTexture,
   skyTexture,
   specSkyTexture,
   TextureSet,
   TEX_SCALE,
 } from "./textures.js";
-import { Unit } from "./units.js";
-import { Archetype, ParticleKind, resolveArchetype } from "./archetypes.js";
+import { shortName, Unit } from "./units.js";
+import { Archetype, ParticleKind, resolveArchetype, TilePattern } from "./archetypes.js";
 
 const FOG_REVEAL_RADIUS = 2;
 const CONSTRUCTION_MS = 1400;
@@ -24,10 +54,13 @@ const MAX_RAIDERS = 8;
 const CARD_W = 264;
 
 // Depth bands: everything lives directly on the scene, ordered by depth.
+// World objects (props / buildings / units / landmarks) use their screen y,
+// which stays within ±~5k, far inside the bands.
 const D_SKY = -200000;
 const D_GROUND = -100000;
+const D_TINT = D_GROUND + 2; // district-patch ground tints
+const D_FOAM = D_GROUND + 4; // animated coast foam
 const D_MARKER = -50000;
-// objects (props / buildings / units) use their screen y (≈ -3k..+4k)
 const D_FOG = 50000;
 const D_LABEL = 60000;
 const D_FX = 70000;
@@ -40,7 +73,27 @@ function hex(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, "0")}`;
 }
 
-export function attachGameRenderer(mount: HTMLElement): Renderer {
+function luminance(c: number): number {
+  return ((c >> 16) & 0xff) * 0.299 + ((c >> 8) & 0xff) * 0.587 + (c & 0xff) * 0.114;
+}
+
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/** The renderer handle: match-view's Renderer plus the in-world hooks. */
+export type GameRendererHandle = Renderer & {
+  setInspectHandler(cb: (path: string) => void): void;
+  /** Adds a "🗨 Speak" action on unit info cards; cb gets the agent id. */
+  setSpeakHandler(cb: (agentId: string) => void): void;
+};
+
+export function attachGameRenderer(mount: HTMLElement): GameRendererHandle {
   const scene = new MainScene();
   const game = new Phaser.Game({
     type: Phaser.AUTO,
@@ -65,6 +118,9 @@ export function attachGameRenderer(mount: HTMLElement): Renderer {
     },
     setInspectHandler(cb) {
       scene.onInspect = cb;
+    },
+    setSpeakHandler(cb) {
+      scene.onSpeak = cb;
     },
   };
 }
@@ -111,10 +167,19 @@ type RaiderRec = {
 
 type PropRec = {
   img: Phaser.GameObjects.Image;
-  variant: number;
   tx: number;
   ty: number;
   pulse: Phaser.Tweens.Tween | null;
+};
+
+type FoamRec = { img: Phaser.GameObjects.Image; base: number; phase: number };
+
+/** Everything a district patch added, so a re-patch can replace it wholesale. */
+type PatchRec = {
+  imgs: Phaser.GameObjects.GameObject[];
+  tweens: Phaser.Tweens.Tween[];
+  tiles: string[];
+  texKeys: string[];
 };
 
 type Particle = {
@@ -173,18 +238,6 @@ function propTileEligible(
   }
 }
 
-/** Tiles with tx+ty ≥ returned threshold are water, ≈ coverage of the map. */
-function waterThreshold(side: number, coverage: number): number {
-  if (coverage <= 0.01) return 2 * side; // unreachable: no water
-  const target = coverage * side * side;
-  let acc = 0;
-  for (let v = 2 * side - 2; v >= 0; v--) {
-    acc += side - Math.abs(v - (side - 1));
-    if (acc >= target) return v;
-  }
-  return 0;
-}
-
 const KIND_NAMES: Record<string, string> = {
   house: "Dwelling",
   barracks: "Bastion",
@@ -194,7 +247,49 @@ const KIND_NAMES: Record<string, string> = {
   towncenter: "The Citadel",
 };
 
-type Selection = { kind: "unit"; id: string } | { kind: "building"; path: string } | null;
+/** Flavor pools for unnamed scatter props (deterministic pick per tile). */
+const PROP_NAMES = [
+  "Standing Stones",
+  "Weathered Relics",
+  "Old Wardens",
+  "Forgotten Cairn",
+  "Wind-Carved Remnant",
+  "Silent Markers",
+];
+const PROP_LORE = [
+  "Older than the first commit; nobody remembers who raised it.",
+  "Locals swear it hums when the tests run green.",
+  "A remnant of the world before the great refactor.",
+  "Travelers leave offerings here before long migrations.",
+  "Warm to the touch at night. No one knows why.",
+  "Its inscriptions predate every README.",
+];
+
+/** Archetype/spec tile patterns → painterly modulation modes. */
+const ARCH_PATTERN_MODE: Record<TilePattern, PatternMode> = {
+  cinder: "blotch",
+  wave: "bands",
+  crack: "cracks",
+  shard: "specks",
+  moss: "blotch",
+  ripple: "bands",
+};
+const SPEC_PATTERN_MODE: Record<WorldSpec["terrain"]["pattern"], PatternMode> = {
+  plates: "cracks",
+  dunes: "bands",
+  floes: "specks",
+  moss: "blotch",
+  tessellae: "weave",
+  shale: "cracks",
+};
+
+type Selection =
+  | { kind: "unit"; id: string }
+  | { kind: "building"; path: string }
+  | { kind: "lore"; obj: Phaser.GameObjects.Image }
+  | null;
+
+type CardAction = { y: number; h: number; cb: () => void };
 
 // ---------------------------------------------------------------------------
 
@@ -210,17 +305,19 @@ class MainScene extends Phaser.Scene {
   private accent = 0xe3b264;
   private tex!: TextureSet;
   private fxTex!: { soft: string; mist: string; streak: string };
-  private waterT = Number.POSITIVE_INFINITY;
   private skyEventTimer: Phaser.Time.TimerEvent | null = null;
 
   private map: MapLayout | null = null;
+  private field: GroundField | null = null;
+  private groundImgs: Phaser.GameObjects.Image[] = [];
+  private foam: FoamRec[] = [];
   private citadel = { x: 0, y: 0, tx: 0, ty: 0 };
   private agents = new Map<string, AgentRec>();
   private buildings = new Map<string, BuildingRec>();
   private raiders = new Map<string, RaiderRec>();
   private fogTiles = new Map<string, Phaser.GameObjects.Image>();
-  private groundTiles: Phaser.GameObjects.Image[] = [];
   private props: PropRec[] = [];
+  private patchRecs = new Map<string, PatchRec>();
   private regionLabels: Phaser.GameObjects.Text[] = [];
   private particles: Particle[] = [];
   private skyImg: Phaser.GameObjects.Image | null = null;
@@ -231,15 +328,23 @@ class MainScene extends Phaser.Scene {
   private selected: Selection = null;
   /** Wired by the match view: "open the code inspector for this file". */
   onInspect: ((path: string) => void) | null = null;
+  /** Wired by the match view: "open the dialogue panel for this agent". */
+  onSpeak: ((agentId: string) => void) | null = null;
   private followId: string | null = null;
   private hovered: Phaser.GameObjects.GameObject | null = null;
   private hoverMarker!: Phaser.GameObjects.Image;
   private selectMarker!: Phaser.GameObjects.Image;
+  private nameplate!: Phaser.GameObjects.Container;
+  private nameplateBg!: Phaser.GameObjects.Graphics;
+  private nameplateText!: Phaser.GameObjects.Text;
   private card!: Phaser.GameObjects.Container;
   private cardBg!: Phaser.GameObjects.Graphics;
   private cardTitle!: Phaser.GameObjects.Text;
   private cardBody!: Phaser.GameObjects.Text;
+  private cardActionTexts: Phaser.GameObjects.Text[] = [];
+  private cardActions: CardAction[] = [];
   private cardH = 0;
+  private cursorNow = "default";
   private lastClickAt = 0;
   private lastClickX = 0;
   private lastClickY = 0;
@@ -256,6 +361,7 @@ class MainScene extends Phaser.Scene {
   create(): void {
     this.tex = buildTextures(this, this.archetype, this.gen);
     this.fxTex = particleTextures(this);
+    parchmentTexture(this);
     this.accent = this.archetype.glow;
 
     this.hoverMarker = this.add
@@ -270,6 +376,7 @@ class MainScene extends Phaser.Scene {
       .setDepth(D_MARKER + 1)
       .setVisible(false);
 
+    this.buildNameplate();
     this.buildCard();
     this.setupInput();
 
@@ -310,6 +417,20 @@ class MainScene extends Phaser.Scene {
 
     this.input.on("pointerup", (p: Phaser.Input.Pointer) => {
       if (p.getDistance() > 8) return; // that was a pan, not a click
+      // clicks landing on the info card go to its action rows, never the world
+      if (this.card.visible) {
+        const lx = p.x - this.card.x;
+        const ly = p.y - this.card.y;
+        if (lx >= 0 && lx <= CARD_W && ly >= 0 && ly <= this.cardH) {
+          for (const a of this.cardActions) {
+            if (ly >= a.y && ly <= a.y + a.h) {
+              a.cb();
+              return;
+            }
+          }
+          return;
+        }
+      }
       const now = performance.now();
       const isDouble =
         now - this.lastClickAt < 350 &&
@@ -328,17 +449,13 @@ class MainScene extends Phaser.Scene {
     this.input.on(
       "gameobjectover",
       (_p: Phaser.Input.Pointer, obj: Phaser.GameObjects.GameObject) => {
-        this.hovered = obj;
-        this.input.setDefaultCursor("pointer");
+        this.setHovered(obj);
       },
     );
     this.input.on(
       "gameobjectout",
       (_p: Phaser.Input.Pointer, obj: Phaser.GameObjects.GameObject) => {
-        if (this.hovered === obj) {
-          this.hovered = null;
-          this.input.setDefaultCursor("default");
-        }
+        if (this.hovered === obj) this.setHovered(null);
       },
     );
 
@@ -385,7 +502,7 @@ class MainScene extends Phaser.Scene {
     const side = this.map.side;
     const left = isoX(0, side - 1) - TILE_W / 2;
     const right = isoX(side - 1, 0) + TILE_W / 2;
-    const top = isoY(0, 0) - TILE_H / 2;
+    const top = isoY(0, 0) - TILE_H / 2 - 2 * STEP;
     const bottom = isoY(side - 1, side - 1) + TILE_H / 2;
     const vw = this.scale.width || 800;
     const vh = this.scale.height || 600;
@@ -397,6 +514,81 @@ class MainScene extends Phaser.Scene {
     const cam = this.cameras.main;
     cam.setZoom(zoom);
     cam.centerOn((left + right) / 2, (top + bottom) / 2);
+  }
+
+  private setCursor(want: string): void {
+    if (this.cursorNow !== want) {
+      this.cursorNow = want;
+      this.input.setDefaultCursor(want);
+    }
+  }
+
+  // --- hover: nameplates + brighten ------------------------------------------
+
+  private buildNameplate(): void {
+    this.nameplateBg = this.add.graphics();
+    this.nameplateText = this.add
+      .text(6, 3, "", {
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: "10px",
+        color: "#efe6cd",
+      })
+      .setResolution(DPR);
+    this.nameplate = this.add
+      .container(0, 0, [this.nameplateBg, this.nameplateText])
+      .setScrollFactor(0)
+      .setDepth(D_UI + 1)
+      .setVisible(false);
+  }
+
+  private setHovered(obj: Phaser.GameObjects.GameObject | null): void {
+    if (this.hovered === obj) return;
+    // restore the previous hover bump
+    if (this.hovered && this.hovered.active) {
+      const kind = this.hovered.getData("kind") as string | undefined;
+      if (kind === "unit") {
+        const rec = this.agents.get(this.hovered.getData("id") as string);
+        if (rec) rec.unit.hovered = false;
+      } else if (this.hovered instanceof Phaser.GameObjects.Image) {
+        this.hovered.setScale(TEX_SCALE);
+      }
+    }
+    this.hovered = obj;
+    if (!obj) {
+      this.nameplate.setVisible(false);
+      return;
+    }
+    const kind = obj.getData("kind") as string | undefined;
+    let label = "";
+    if (kind === "unit") {
+      const rec = this.agents.get(obj.getData("id") as string);
+      if (rec) {
+        label = `${rec.name} · ${rec.status}`;
+        rec.unit.hovered = true;
+      }
+    } else if (kind === "building") {
+      const rec = this.buildings.get(obj.getData("path") as string);
+      if (rec) {
+        label = rec.path === "__towncenter__" ? "The Citadel" : rec.path;
+        if (obj instanceof Phaser.GameObjects.Image) obj.setScale(TEX_SCALE * 1.06);
+      }
+    } else {
+      label = (obj.getData("name") as string | undefined) ?? (obj.getData("label") as string) ?? "";
+      if (obj instanceof Phaser.GameObjects.Image) obj.setScale(TEX_SCALE * 1.08);
+    }
+    if (label) {
+      this.nameplateText.setText(label.length > 52 ? "…" + label.slice(-50) : label);
+      const w = this.nameplateText.width + 12;
+      const h = this.nameplateText.height + 6;
+      this.nameplateBg.clear();
+      this.nameplateBg.fillStyle(0x120e08, 0.9);
+      this.nameplateBg.fillRoundedRect(0, 0, w, h, 4);
+      this.nameplateBg.lineStyle(1, this.accent, 0.7);
+      this.nameplateBg.strokeRoundedRect(0, 0, w, h, 4);
+      this.nameplate.setVisible(true);
+    } else {
+      this.nameplate.setVisible(false);
+    }
   }
 
   // --- selection + info card ---------------------------------------------------
@@ -426,7 +618,26 @@ class MainScene extends Phaser.Scene {
       }
       this.stopFollowing();
       this.selected = { kind: "building", path };
-      this.selectMarker.setPosition(isoX(rec.tx, rec.ty), isoY(rec.tx, rec.ty)).setVisible(true);
+      this.selectMarker
+        .setPosition(isoX(rec.tx, rec.ty), this.groundYAt(rec.tx, rec.ty))
+        .setVisible(true);
+    } else if (kind === "prop" || kind === "landmark" || kind === "hook") {
+      const img = obj as Phaser.GameObjects.Image;
+      // Second click on a selected quest hook opens its source.
+      if (
+        kind === "hook" &&
+        this.selected?.kind === "lore" &&
+        this.selected.obj === img &&
+        this.onInspect
+      ) {
+        this.onInspect(img.getData("path") as string);
+        return;
+      }
+      this.stopFollowing();
+      this.selected = { kind: "lore", obj: img };
+      this.selectMarker
+        .setPosition(img.getData("mx") as number, img.getData("my") as number)
+        .setVisible(true);
     } else {
       return;
     }
@@ -458,8 +669,19 @@ class MainScene extends Phaser.Scene {
         lineSpacing: 4,
       })
       .setResolution(DPR);
+    this.cardActionTexts = [0, 1].map(() =>
+      this.add
+        .text(12, 0, "", {
+          fontFamily: "IBM Plex Mono, monospace",
+          fontSize: "11px",
+          color: "#e8d9b0",
+          fontStyle: "bold",
+        })
+        .setResolution(DPR)
+        .setVisible(false),
+    );
     this.card = this.add
-      .container(0, 0, [this.cardBg, this.cardTitle, this.cardBody])
+      .container(0, 0, [this.cardBg, this.cardTitle, this.cardBody, ...this.cardActionTexts])
       .setScrollFactor(0)
       .setDepth(D_UI)
       .setVisible(false);
@@ -472,8 +694,10 @@ class MainScene extends Phaser.Scene {
     }
     let title = "";
     const lines: string[] = [];
+    const actions: { label: string; cb: () => void }[] = [];
     if (this.selected.kind === "unit") {
-      const rec = this.agents.get(this.selected.id);
+      const id = this.selected.id;
+      const rec = this.agents.get(id);
       if (!rec) return this.clearSelection();
       title = rec.name;
       lines.push(rec.role === "orchestrator" ? "sovereign · orchestrator" : "worker");
@@ -481,7 +705,10 @@ class MainScene extends Phaser.Scene {
       if (rec.sitePath) lines.push(`at: ${truncPath(rec.sitePath)}`);
       if (rec.charge) lines.push(`charge: ${rec.charge.length > 120 ? rec.charge.slice(0, 120) + "…" : rec.charge}`);
       if (rec.sitePath && this.onInspect) lines.push("⌕ click again to open its worksite");
-    } else {
+      if (this.onSpeak) {
+        actions.push({ label: `🗨 Speak with ${shortName(rec.name)}`, cb: () => this.onSpeak?.(id) });
+      }
+    } else if (this.selected.kind === "building") {
       const rec = this.buildings.get(this.selected.path);
       if (!rec) return this.clearSelection();
       const name = rec.path === "__towncenter__" ? "The Citadel" : rec.path.split("/").pop() ?? rec.path;
@@ -491,12 +718,44 @@ class MainScene extends Phaser.Scene {
       lines.push(`reinforced ×${rec.writes}`);
       lines.push(`+${rec.linesAdded} / −${rec.linesRemoved} lines`);
       if (rec.path !== "__towncenter__" && this.onInspect) lines.push("⌕ click again to inspect the code");
+    } else {
+      const obj = this.selected.obj;
+      if (!obj.active) return this.clearSelection();
+      const kind = obj.getData("kind") as string;
+      if (kind === "hook") {
+        const path = obj.getData("path") as string;
+        title = (obj.getData("label") as string) ?? "Quest Hook";
+        lines.push(`“${obj.getData("snippet") as string}”`);
+        lines.push(truncPath(path));
+        if (this.onInspect) {
+          actions.push({ label: "⌕ view the source", cb: () => this.onInspect?.(path) });
+        }
+      } else {
+        title = (obj.getData("name") as string) ?? "Curiosity";
+        lines.push(kind === "landmark" ? "landmark" : "curiosity");
+        lines.push((obj.getData("lore") as string) ?? "");
+      }
     }
     this.cardTitle.setText(title);
     this.cardTitle.setColor(hex(this.accent));
     this.cardBody.setText(lines.join("\n"));
     this.cardBody.setY(this.cardTitle.y + this.cardTitle.height + 6);
-    const h = this.cardBody.y + this.cardBody.height + 12;
+    let bottom = this.cardBody.y + this.cardBody.height;
+    this.cardActions = [];
+    this.cardActionTexts.forEach((t, i) => {
+      const a = actions[i];
+      if (!a) {
+        t.setVisible(false);
+        return;
+      }
+      t.setText(a.label);
+      t.setColor(hex(this.accent));
+      t.setY(bottom + 8);
+      t.setVisible(true);
+      this.cardActions.push({ y: t.y - 3, h: t.height + 6, cb: a.cb });
+      bottom = t.y + t.height;
+    });
+    const h = bottom + 12;
     this.cardH = h;
     this.cardBg.clear();
     this.cardBg.fillStyle(0x120e08, 0.92);
@@ -706,27 +965,24 @@ class MainScene extends Phaser.Scene {
 
   // --- world construction --------------------------------------------------------
 
+  /** Ground surface screen y at fractional tile coords (elevation-aware). */
+  private groundYAt(tx: number, ty: number): number {
+    return this.field ? this.field.groundY(tx, ty) : isoY(tx, ty);
+  }
+
   private buildWorld(event: Extract<GameEvent, { type: "match_started" }>): void {
     this.mapSeed = event.mapSeed;
-    this.retexture();
-
     const map = layoutMap(event.repoTree, event.mapSeed);
     this.map = map;
+    this.retexture();
 
-    this.refreshWaterThreshold();
+    // fog of war: overlapping soft blobs, one per tile
     for (let ty = 0; ty < map.side; ty++) {
       for (let tx = 0; tx < map.side; tx++) {
-        this.groundTiles.push(
-          this.add
-            .image(isoX(tx, ty), isoY(tx, ty), this.groundKeyFor(tx, ty, map.rng))
-            .setScale(TEX_SCALE)
-            .setDepth(D_GROUND),
-        );
-
         const fog = this.add
-          .image(isoX(tx, ty), isoY(tx, ty), this.tex.fog)
+          .image(isoX(tx, ty), this.groundYAt(tx, ty), this.tex.fog)
           .setScale(TEX_SCALE)
-          .setAlpha(0.88)
+          .setAlpha(0.9)
           .setDepth(D_FOG);
         this.fogTiles.set(`${tx},${ty}`, fog);
       }
@@ -741,7 +997,7 @@ class MainScene extends Phaser.Scene {
       const cx = region.rect.x + region.rect.w / 2;
       const cy = region.rect.y;
       const label = this.add
-        .text(isoX(cx, cy), isoY(cx, cy) - 10, region.label, {
+        .text(isoX(cx, cy), this.groundYAt(cx, cy) - 10, region.label, {
           fontFamily: "Cinzel, Georgia, serif",
           fontSize: "13px",
           color: hex(this.theme ? this.accent : 0xc98f4a),
@@ -756,10 +1012,76 @@ class MainScene extends Phaser.Scene {
 
     // The Citadel stands from the start
     const tc = map.townCenter;
-    this.citadel = { x: isoX(tc.tx, tc.ty), y: isoY(tc.tx, tc.ty), tx: tc.tx, ty: tc.ty };
+    this.citadel = { x: isoX(tc.tx, tc.ty), y: this.groundYAt(tc.tx, tc.ty), tx: tc.tx, ty: tc.ty };
     this.placeBuilding("__towncenter__", "towncenter", tc.tx, tc.ty, true);
     this.reveal(tc.tx, tc.ty, 3, true);
     this.fitCamera();
+  }
+
+  /** Biome color field + pattern mode for the painterly ground painter. */
+  private groundStyle(): GroundStyle {
+    const byLum = (colors: number[]) => [...colors].sort((a, b) => luminance(a) - luminance(b));
+    if (this.spec) {
+      const palette = this.spec.terrain.base
+        .map((c) => hexColor(c))
+        .filter((c): c is number => c !== undefined);
+      const water = this.spec.terrain.waterline
+        ? hexColor(this.spec.terrain.waterline.color)
+        : undefined;
+      return {
+        palette: palette.length >= 2 ? byLum(palette) : byLum(this.archetype.groundColors),
+        mode: SPEC_PATTERN_MODE[this.spec.terrain.pattern],
+        water: water !== undefined ? { color: water } : undefined,
+        relief: this.spec.terrain.reliefIntensity,
+      };
+    }
+    if (this.theme) {
+      const grass = this.theme.biome.grassColors
+        .map((c) => hexColor(c))
+        .filter((c): c is number => c !== undefined);
+      if (grass.length >= 2) {
+        return { palette: byLum(grass), mode: ARCH_PATTERN_MODE[this.archetype.pattern], relief: 0.5 };
+      }
+    }
+    return {
+      palette: byLum(this.archetype.groundColors),
+      mode: ARCH_PATTERN_MODE[this.archetype.pattern],
+      relief: 0.5,
+    };
+  }
+
+  /** Re-derive the heightfield and repaint the whole painterly ground. */
+  private rebuildGround(): void {
+    const map = this.map;
+    if (!map) return;
+    for (const img of this.groundImgs) img.destroy();
+    this.groundImgs = [];
+    for (const f of this.foam) f.img.destroy();
+    this.foam = [];
+
+    const coverage = this.spec?.terrain.waterline?.coverage ?? 0;
+    this.field = buildGroundField(map, this.mapSeed, coverage);
+    const painted = paintGround(this, this.field, this.groundStyle(), this.gen);
+    for (const chunk of painted.chunks) {
+      this.groundImgs.push(
+        this.add
+          .image(chunk.x, chunk.y, chunk.key)
+          .setOrigin(0, 0)
+          .setScale(GROUND_SCALE)
+          .setDepth(D_GROUND),
+      );
+    }
+    // animated foam flecks along the coast (alpha driven in update, no tweens)
+    for (const pt of painted.coast) {
+      const img = this.add
+        .image(pt.x, pt.y, this.fxTex.soft)
+        .setDepth(D_FOAM)
+        .setScale(0.5 + Math.random() * 0.5, 0.3)
+        .setTint(0xf2f6f4);
+      const base = 0.25 + Math.random() * 0.3;
+      img.setAlpha(base);
+      this.foam.push({ img, base, phase: Math.random() * Math.PI * 2 });
+    }
   }
 
   /** Rebuild every generated texture for the current archetype + theme + spec. */
@@ -782,7 +1104,7 @@ class MainScene extends Phaser.Scene {
     this.redrawSky();
     this.initParticles();
     this.resetSkyEvents();
-    this.refreshWaterThreshold();
+    this.rebuildGround();
     this.hoverMarker.setTexture(this.tex.highlight);
     this.selectMarker.setTexture(this.tex.highlight);
     this.wonderImg?.setTexture(this.tex.wonder);
@@ -791,33 +1113,10 @@ class MainScene extends Phaser.Scene {
     this.time.delayedCall(5000, () => pruneGeneration(this, oldGen));
   }
 
-  // --- WorldSpec terrain + props ------------------------------------------------
-
-  private refreshWaterThreshold(): void {
-    const cov = this.spec?.terrain.waterline?.coverage ?? 0;
-    this.waterT =
-      this.map && this.tex.water && cov > 0
-        ? waterThreshold(this.map.side, cov)
-        : Number.POSITIVE_INFINITY;
-  }
+  // --- props ---------------------------------------------------------------------
 
   private isWaterTile(tx: number, ty: number): boolean {
-    return tx + ty >= this.waterT;
-  }
-
-  private groundKeyFor(tx: number, ty: number, rng: () => number): string {
-    if (this.tex.water && this.isWaterTile(tx, ty)) return this.tex.water;
-    return this.tex.ground[Math.floor(rng() * this.tex.ground.length)]!;
-  }
-
-  /** Re-texture every laid ground tile (including the waterline band). */
-  private applyGroundTextures(): void {
-    if (!this.map) return;
-    const side = this.map.side;
-    this.groundTiles.forEach((tile, i) => {
-      if (!tile.active) return;
-      tile.setTexture(this.groundKeyFor(i % side, Math.floor(i / side), Math.random));
-    });
+    return this.field?.waterAt(tx, ty) ?? false;
   }
 
   private clearProps(): void {
@@ -832,6 +1131,8 @@ class MainScene extends Phaser.Scene {
   /**
    * Scatter props over unused land tiles. WorldSpec props place by their own
    * density + placement rule; otherwise archetype props scatter uniformly.
+   * A low-frequency noise mask clusters them organically instead of an even
+   * sprinkle, and each prop jitters off its tile center.
    */
   private placeProps(): void {
     const map = this.map;
@@ -848,35 +1149,60 @@ class MainScene extends Phaser.Scene {
       for (let tx = 0; tx < map.side && placed < 240; tx++) {
         const key = `${tx},${ty}`;
         if (map.used.has(key) || this.isWaterTile(tx, ty)) continue;
+        // organic clustering: thicker where the mask runs high
+        const mask = fbm2(tx * 0.24, ty * 0.24, this.mapSeed ^ 0x6b);
+        const cluster = mask > 0.55 ? 1.7 : mask > 0.4 ? 0.9 : 0.35;
         if (specProps) {
           for (let i = 0; i < specProps.length; i++) {
             const sp = specProps[i]!;
             if (!propTileEligible(sp.placement, tx, ty, map.side, centers)) continue;
             // ridge/edge tile sets are far smaller than scatter, so weigh them up
             const weight = sp.placement === "scatter" ? 0.1 : sp.placement === "districts" ? 0.16 : 0.3;
-            if (rng() < sp.density * weight) {
+            if (rng() < sp.density * weight * cluster) {
               map.used.add(key);
-              this.spawnProp(tx, ty, sp.tex, i, sp.pulseSec);
+              this.props.push(this.spawnProp(tx, ty, sp.tex, sp.pulseSec, rng));
               placed++;
               break;
             }
           }
-        } else if (rng() < this.archetype.propDensity) {
+        } else if (rng() < this.archetype.propDensity * cluster) {
           map.used.add(key);
           const variant = Math.floor(rng() * this.tex.props.length);
-          this.spawnProp(tx, ty, this.tex.props[variant]!, variant, null);
+          this.props.push(this.spawnProp(tx, ty, this.tex.props[variant]!, null, rng));
           placed++;
         }
       }
     }
   }
 
-  private spawnProp(tx: number, ty: number, texKey: string, variant: number, pulseSec: number | null): void {
+  private spawnProp(
+    tx: number,
+    ty: number,
+    texKey: string,
+    pulseSec: number | null,
+    rng: () => number,
+    name?: string,
+    lore?: string,
+  ): PropRec {
+    const jx = tx + (rng() - 0.5) * 0.55;
+    const jy = ty + (rng() - 0.5) * 0.55;
+    const gx = isoX(jx, jy);
+    const gy = this.groundYAt(jx, jy);
     const img = this.add
-      .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, texKey)
+      .image(gx, gy + TILE_H / 4, texKey)
       .setOrigin(0.5, 1)
       .setScale(TEX_SCALE);
     img.setDepth(img.y);
+    const pick = hashStr(`${tx}:${ty}`);
+    img.setInteractive(
+      new Phaser.Geom.Rectangle(-10, -10, img.width + 20, img.height + 20),
+      Phaser.Geom.Rectangle.Contains,
+    );
+    img.setData("kind", "prop");
+    img.setData("name", name ?? PROP_NAMES[pick % PROP_NAMES.length]!);
+    img.setData("lore", lore ?? PROP_LORE[(pick >>> 3) % PROP_LORE.length]!);
+    img.setData("mx", gx);
+    img.setData("my", gy);
     let pulse: Phaser.Tweens.Tween | null = null;
     if (pulseSec !== null) {
       pulse = this.tweens.add({
@@ -888,7 +1214,7 @@ class MainScene extends Phaser.Scene {
         ease: "Sine.easeInOut",
       });
     }
-    this.props.push({ img, variant, tx, ty, pulse });
+    return { img, tx, ty, pulse };
   }
 
   /** Apply WorldSpec unit tint + gait to a figure (clears both when absent). */
@@ -936,7 +1262,28 @@ class MainScene extends Phaser.Scene {
         cell = assignPlot(map, path);
       }
     }
-    return { x: isoX(cell.tx, cell.ty), y: isoY(cell.tx, cell.ty), tx: cell.tx, ty: cell.ty };
+    return { x: isoX(cell.tx, cell.ty), y: this.groundYAt(cell.tx, cell.ty), tx: cell.tx, ty: cell.ty };
+  }
+
+  /** Nearest free land tile to (tx,ty), claimed in map.used; null if crowded. */
+  private claimTileNear(tx: number, ty: number): { tx: number; ty: number } | null {
+    const map = this.map;
+    if (!map) return null;
+    for (let radius = 0; radius <= 6; radius++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+          const x = tx + dx;
+          const y = ty + dy;
+          if (x < 1 || y < 1 || x >= map.side - 1 || y >= map.side - 1) continue;
+          const key = `${x},${y}`;
+          if (map.used.has(key) || this.isWaterTile(x, y)) continue;
+          map.used.add(key);
+          return { tx: x, ty: y };
+        }
+      }
+    }
+    return null;
   }
 
   private placeBuilding(path: string, kind: string, tx: number, ty: number, instant: boolean): BuildingRec {
@@ -947,11 +1294,11 @@ class MainScene extends Phaser.Scene {
       return existing;
     }
     const img = this.add
-      .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, instant ? texSet.built : texSet.scaffold)
+      .image(isoX(tx, ty), this.groundYAt(tx, ty) + TILE_H / 4, instant ? texSet.built : texSet.scaffold)
       .setOrigin(0.5, 1)
       .setScale(TEX_SCALE);
     img.setDepth(img.y);
-    img.setInteractive(new Phaser.Geom.Rectangle(36, 52, 128, 144), Phaser.Geom.Rectangle.Contains);
+    img.setInteractive(new Phaser.Geom.Rectangle(24, 40, 152, 160), Phaser.Geom.Rectangle.Contains);
     img.setData("kind", "building");
     img.setData("path", path);
     const rec: BuildingRec = {
@@ -1064,7 +1411,7 @@ class MainScene extends Phaser.Scene {
           e.role === "orchestrator" ? "#f0c96a" : "#d8e4ec",
         );
         unit.root.setInteractive(
-          new Phaser.Geom.Rectangle(-14, -30, 28, 48),
+          new Phaser.Geom.Rectangle(-18, -36, 36, 58),
           Phaser.Geom.Rectangle.Contains,
         );
         unit.root.setData("kind", "unit");
@@ -1087,6 +1434,8 @@ class MainScene extends Phaser.Scene {
         const rec = this.agents.get(e.agentId);
         if (!rec) break;
         rec.status = e.status;
+        rec.unit.setStatusGlyph(e.status);
+        if (e.detail && !historical) rec.unit.showDetail(e.detail);
         if (IDLE_STATUSES.has(e.status)) rec.nextMoveAt = this.time.now + 600 + Math.random() * 1200;
         else if (rec.site) rec.unit.walkTo(rec.site.x + (Math.random() - 0.5) * 30, rec.site.y + 18, historical);
         if (this.selected?.kind === "unit" && this.selected.id === e.agentId) this.refreshCard();
@@ -1145,6 +1494,14 @@ class MainScene extends Phaser.Scene {
         if (!historical) this.agents.get(e.fromId)?.unit.say(e.text);
         break;
       }
+      case "scroll": {
+        if (!historical) this.scrollFanfare(e.authorId);
+        break;
+      }
+      case "theme_patch": {
+        this.applyDistrictPatch(e.patch, historical);
+        break;
+      }
       case "compaction": {
         const rec = this.agents.get(e.agentId);
         if (rec) {
@@ -1169,6 +1526,7 @@ class MainScene extends Phaser.Scene {
         const rec = this.agents.get(e.agentId);
         if (rec) {
           rec.status = "done";
+          rec.unit.setStatusGlyph("done");
           rec.site = null;
           rec.sitePath = null;
           rec.unit.walkTo(
@@ -1188,6 +1546,243 @@ class MainScene extends Phaser.Scene {
       }
     }
   }
+
+  // --- scroll fanfare: parchment pops off the author and arcs off-screen ------
+
+  private scrollFanfare(authorId: string): void {
+    const rec = this.agents.get(authorId);
+    const x0 = rec ? rec.unit.x : this.citadel.x;
+    const y0 = (rec ? rec.unit.y : this.citadel.y) - 26;
+    const img = this.add.image(x0, y0, "fx-scroll").setDepth(D_FX).setScale(0.2).setAlpha(0.95);
+    this.tweens.add({ targets: img, scale: TEX_SCALE * 1.8, duration: 240, ease: "Back.easeOut" });
+    // arc toward the viewport's top-right (where the satchel UI lives)
+    const cam = this.cameras.main;
+    const tx = cam.scrollX + cam.width / 2 + (cam.width * 0.42) / cam.zoom;
+    const ty = cam.scrollY + cam.height / 2 - (cam.height * 0.4) / cam.zoom;
+    const cx = (x0 + tx) / 2;
+    const cy = Math.min(y0, ty) - 120 / cam.zoom;
+    const fx = { t: 0 };
+    this.tweens.add({
+      targets: fx,
+      t: 1,
+      delay: 300,
+      duration: 1000,
+      ease: "Sine.easeIn",
+      onUpdate: () => {
+        const t = fx.t;
+        const mt = 1 - t;
+        img.setPosition(
+          mt * mt * x0 + 2 * mt * t * cx + t * t * tx,
+          mt * mt * y0 + 2 * mt * t * cy + t * t * ty,
+        );
+        img.setAngle(t * 50);
+        if (t > 0.7) img.setAlpha(0.95 * (1 - (t - 0.7) / 0.3));
+      },
+      onComplete: () => img.destroy(),
+    });
+  }
+
+  // --- district patches: the Worldsmith deepens revealed regions ---------------
+
+  private disposePatch(rec: PatchRec): void {
+    for (const t of rec.tweens) t.destroy();
+    for (const img of rec.imgs) {
+      if (this.selected?.kind === "lore" && this.selected.obj === img) this.clearSelection();
+      if (this.hovered === img) this.setHovered(null);
+      img.destroy();
+    }
+    for (const key of rec.tiles) this.map?.used.delete(key);
+    for (const key of rec.texKeys) {
+      if (this.textures.exists(key)) this.textures.remove(key);
+    }
+  }
+
+  /**
+   * Additive, idempotent district reskin: soft ground tint, a floated title,
+   * clickable landmarks, quest-hook obelisks, and district-local props. A
+   * second patch for the same district replaces everything the first added.
+   */
+  private applyDistrictPatch(patch: DistrictPatch, historical: boolean): void {
+    const map = this.map;
+    const field = this.field;
+    if (!map || !field) return;
+
+    const prev = this.patchRecs.get(patch.district);
+    if (prev) {
+      this.disposePatch(prev);
+      this.patchRecs.delete(patch.district);
+    }
+    const rec: PatchRec = { imgs: [], tweens: [], tiles: [], texKeys: [] };
+    const hkey = `dp${hashStr(patch.district).toString(36)}`;
+    const region = map.regions.find((r) => r.path === patch.district);
+    // unknown or root district ("" / ".") patches land on the whole island
+    const rect: Rect = region?.rect ?? { x: 1, y: 1, w: map.side - 2, h: map.side - 2 };
+    const accent = hexColor(patch.accent ?? "") ?? this.accent;
+    const rng = mulberry32(hashStr(patch.district) ^ this.mapSeed);
+
+    // soft-edged ground tint over the district
+    const tint = hexColor(patch.groundTint);
+    if (tint !== undefined) {
+      const t = districtTintTexture(this, `${hkey}-tint`, field, rect, tint);
+      rec.texKeys.push(t.key);
+      const img = this.add
+        .image(t.x, t.y, t.key)
+        .setOrigin(0, 0)
+        .setScale(GROUND_SCALE)
+        .setDepth(D_TINT);
+      if (historical) img.setAlpha(0.9);
+      else {
+        img.setAlpha(0);
+        rec.tweens.push(this.tweens.add({ targets: img, alpha: 0.9, duration: 1400 }));
+      }
+      rec.imgs.push(img);
+    }
+
+    const cxT = rect.x + rect.w / 2;
+    const cyT = rect.y + rect.h / 2;
+
+    // brief title reveal: "name — epithet"
+    if (!historical) {
+      const title = this.add
+        .text(isoX(cxT, cyT), this.groundYAt(cxT, cyT) - 26, `${patch.name} — ${patch.epithet}`, {
+          fontFamily: "Cinzel, Georgia, serif",
+          fontSize: "16px",
+          color: hex(accent),
+          stroke: "#120e08",
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5)
+        .setDepth(D_LABEL + 1)
+        .setAlpha(0)
+        .setResolution(DPR);
+      title.setLetterSpacing(2);
+      this.tweens.add({ targets: title, alpha: 0.95, y: title.y - 8, duration: 900, ease: "Sine.easeOut" });
+      this.tweens.add({
+        targets: title,
+        alpha: 0,
+        delay: 3600,
+        duration: 900,
+        onComplete: () => title.destroy(),
+      });
+    }
+
+    // landmarks: composed silhouettes near the district center, clickable lore
+    (patch.landmarks ?? []).forEach((lm, i) => {
+      const key = silhouetteTexture(this, `${hkey}-lm${i}`, lm.silhouette, lm.glow);
+      rec.texKeys.push(key);
+      const cell = this.claimTileNear(
+        Math.floor(cxT) + (i === 0 ? -1 : 2),
+        Math.floor(cyT) + (i === 0 ? 1 : -1),
+      );
+      if (!cell) return;
+      rec.tiles.push(`${cell.tx},${cell.ty}`);
+      const gx = isoX(cell.tx, cell.ty);
+      const gy = this.groundYAt(cell.tx, cell.ty);
+      const img = this.add.image(gx, gy + TILE_H / 4, key).setOrigin(0.5, 1).setScale(TEX_SCALE);
+      img.setDepth(img.y);
+      img.setInteractive(
+        new Phaser.Geom.Rectangle(-10, -10, img.width + 20, img.height + 20),
+        Phaser.Geom.Rectangle.Contains,
+      );
+      img.setData("kind", "landmark");
+      img.setData("name", lm.name);
+      img.setData("lore", lm.lore);
+      img.setData("mx", gx);
+      img.setData("my", gy);
+      if (lm.glow) {
+        rec.tweens.push(
+          this.tweens.add({
+            targets: img,
+            alpha: 0.7,
+            duration: (lm.glow.pulseSec * 1000) / 2,
+            yoyo: true,
+            repeat: -1,
+            ease: "Sine.easeInOut",
+          }),
+        );
+      }
+      if (!historical) {
+        img.setScale(TEX_SCALE * 0.2);
+        rec.tweens.push(
+          this.tweens.add({ targets: img, scale: TEX_SCALE, duration: 500, ease: "Back.easeOut" }),
+        );
+      }
+      rec.imgs.push(img);
+    });
+
+    // quest hooks: half-buried obelisks beside the files that spawned them
+    if (patch.questHooks && patch.questHooks.length > 0) {
+      const hookTex = hookMarkerTexture(this, `${hkey}-hook`, accent);
+      rec.texKeys.push(hookTex);
+      for (const hook of patch.questHooks) {
+        const pos = this.posForPath(hook.path);
+        const cell = this.claimTileNear(pos.tx, pos.ty) ?? { tx: pos.tx, ty: pos.ty };
+        rec.tiles.push(`${cell.tx},${cell.ty}`);
+        const gx = isoX(cell.tx, cell.ty);
+        const gy = this.groundYAt(cell.tx, cell.ty);
+        const img = this.add.image(gx, gy + TILE_H / 4, hookTex).setOrigin(0.5, 1).setScale(TEX_SCALE);
+        img.setDepth(img.y);
+        img.setInteractive(
+          new Phaser.Geom.Rectangle(-12, -12, img.width + 24, img.height + 24),
+          Phaser.Geom.Rectangle.Contains,
+        );
+        img.setData("kind", "hook");
+        img.setData("label", hook.label);
+        img.setData("snippet", hook.snippet);
+        img.setData("path", hook.path);
+        img.setData("mx", gx);
+        img.setData("my", gy);
+        rec.tweens.push(
+          this.tweens.add({
+            targets: img,
+            alpha: 0.72,
+            duration: 1600,
+            yoyo: true,
+            repeat: -1,
+            ease: "Sine.easeInOut",
+          }),
+        );
+        rec.imgs.push(img);
+        this.reveal(cell.tx, cell.ty, 1, historical);
+      }
+    }
+
+    // district-local extra props (bounded scatter, noise-clustered)
+    if (patch.props && patch.props.length > 0) {
+      let placed = 0;
+      patch.props.forEach((wp, i) => {
+        const key = silhouetteTexture(this, `${hkey}-p${i}`, wp.silhouette, wp.glow);
+        rec.texKeys.push(key);
+        for (let ty = rect.y; ty < rect.y + rect.h && placed < 12; ty++) {
+          for (let tx = rect.x; tx < rect.x + rect.w && placed < 12; tx++) {
+            const tileKey = `${tx},${ty}`;
+            if (map.used.has(tileKey) || this.isWaterTile(tx, ty)) continue;
+            const mask = fbm2(tx * 0.3 + i * 11, ty * 0.3, this.mapSeed ^ 0x3d);
+            if (rng() < wp.density * 0.22 * (mask > 0.45 ? 1.5 : 0.4)) {
+              map.used.add(tileKey);
+              rec.tiles.push(tileKey);
+              const prop = this.spawnProp(
+                tx,
+                ty,
+                key,
+                wp.glow ? wp.glow.pulseSec : null,
+                rng,
+                `${patch.name} Curiosity`,
+                `Placed by the Worldsmith when ${patch.name} resolved into itself.`,
+              );
+              if (prop.pulse) rec.tweens.push(prop.pulse);
+              rec.imgs.push(prop.img);
+              placed++;
+            }
+          }
+        }
+      });
+    }
+
+    this.patchRecs.set(patch.district, rec);
+  }
+
+  // --- raiders -----------------------------------------------------------------
 
   private makeRaider(x: number, y: number): Unit {
     const name = this.theme?.enemyName ? this.theme.enemyName.slice(0, 14) : "raider";
@@ -1235,17 +1830,26 @@ class MainScene extends Phaser.Scene {
     if (!this.map) return; // buildWorld will apply it
     this.retexture();
 
-    this.applyGroundTextures();
-    for (const [, fog] of this.fogTiles) {
-      if (fog.active) fog.setTexture(this.tex.fog);
+    // reposition + retexture everything sitting on the (possibly re-terraced) ground
+    for (const [key, fog] of this.fogTiles) {
+      if (!fog.active) continue;
+      const [txs, tys] = key.split(",");
+      const tx = Number(txs);
+      const ty = Number(tys);
+      fog.setTexture(this.tex.fog);
+      fog.setPosition(isoX(tx, ty), this.groundYAt(tx, ty));
     }
     // WorldSpec props have their own densities/placements, so re-place rather
     // than retexture in place.
     this.placeProps();
     for (const [, rec] of this.buildings) {
+      if (!rec.img.active) continue;
       const texSet = this.tex.buildings[rec.kind] ?? this.tex.buildings.house!;
-      if (rec.img.active) rec.img.setTexture(rec.constructUntil > 0 ? texSet.scaffold : texSet.built);
+      rec.img.setTexture(rec.constructUntil > 0 ? texSet.scaffold : texSet.built);
+      rec.img.setPosition(isoX(rec.tx, rec.ty), this.groundYAt(rec.tx, rec.ty) + TILE_H / 4);
+      rec.img.setDepth(rec.img.y);
     }
+    this.citadel.y = this.groundYAt(this.citadel.tx, this.citadel.ty);
     for (const [, rec] of this.agents) {
       rec.unit.setTexture(rec.role === "orchestrator" ? this.tex.king : this.tex.villager);
       this.styleUnit(rec.unit, rec.role === "orchestrator" ? "hero" : "villager");
@@ -1263,7 +1867,7 @@ class MainScene extends Phaser.Scene {
     const tx = this.citadel.tx + 3;
     const ty = this.citadel.ty + 3;
     const wonder = this.add
-      .image(isoX(tx, ty), isoY(tx, ty) + TILE_H / 4, this.tex.wonder)
+      .image(isoX(tx, ty), this.groundYAt(tx, ty) + TILE_H / 4, this.tex.wonder)
       .setOrigin(0.5, 1)
       .setScale(TEX_SCALE);
     wonder.setDepth(wonder.y);
@@ -1353,6 +1957,12 @@ class MainScene extends Phaser.Scene {
       if (rec.constructUntil > 0 && rec.constructUntil <= now) this.finishConstruction(rec);
     }
 
+    // coast foam shimmer (no allocations, capped sprite count)
+    const foamT = now / 700;
+    for (const f of this.foam) {
+      f.img.setAlpha(f.base * (0.45 + 0.55 * Math.sin(foamT + f.phase)));
+    }
+
     // ambient weather
     const w = this.scale.width;
     const h = this.scale.height;
@@ -1373,19 +1983,49 @@ class MainScene extends Phaser.Scene {
       const rec = this.agents.get(this.selected.id);
       if (rec) this.selectMarker.setPosition(rec.unit.x, rec.unit.y + 2).setVisible(true);
     }
-    if (this.hovered && (this.hovered as Phaser.GameObjects.GameObject).active) {
+    if (this.hovered && this.hovered.active) {
       const kind = this.hovered.getData("kind") as string | undefined;
       if (kind === "unit") {
         const obj = this.hovered as Phaser.GameObjects.Container;
         this.hoverMarker.setPosition(obj.x, obj.y + 2).setVisible(true);
       } else if (kind === "building") {
         const rec = this.buildings.get(this.hovered.getData("path") as string);
-        if (rec) this.hoverMarker.setPosition(isoX(rec.tx, rec.ty), isoY(rec.tx, rec.ty)).setVisible(true);
+        if (rec) {
+          this.hoverMarker
+            .setPosition(isoX(rec.tx, rec.ty), this.groundYAt(rec.tx, rec.ty))
+            .setVisible(true);
+        }
+      } else {
+        this.hoverMarker
+          .setPosition(this.hovered.getData("mx") as number, this.hovered.getData("my") as number)
+          .setVisible(true);
       }
     } else {
       this.hoverMarker.setVisible(false);
-      if (this.hovered) this.hovered = null;
+      if (this.hovered) this.setHovered(null);
     }
+
+    // nameplate follows the pointer; cursor reflects anything actionable
+    const pointer = this.input.activePointer;
+    if (this.nameplate.visible) {
+      const nx = Math.min(pointer.x + 14, w - this.nameplateText.width - 26);
+      const ny = Math.max(4, pointer.y - this.nameplateText.height - 16);
+      this.nameplate.setPosition(nx, ny);
+    }
+    let overAction = false;
+    if (this.card.visible) {
+      const lx = pointer.x - this.card.x;
+      const ly = pointer.y - this.card.y;
+      if (lx >= 0 && lx <= CARD_W && ly >= 0 && ly <= this.cardH) {
+        for (const a of this.cardActions) {
+          if (ly >= a.y && ly <= a.y + a.h) {
+            overAction = true;
+            break;
+          }
+        }
+      }
+    }
+    this.setCursor(this.hovered || overAction ? "pointer" : "default");
   }
 }
 

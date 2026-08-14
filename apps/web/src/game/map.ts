@@ -2,12 +2,14 @@ import type { FileNode } from "@agent-empires/protocol";
 
 export const TILE_W = 64;
 export const TILE_H = 32;
+/** Screen px one terrace level lifts the ground (classic 2:1 dimetric step). */
+export const STEP = 10;
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
 export type MapLayout = {
   side: number;
-  regions: { path: string; label: string; rect: Rect }[];
+  regions: { path: string; label: string; rect: Rect; depth: number }[];
   plots: Map<string, { tx: number; ty: number }>;
   /** Tiles occupied by buildings (so trees avoid them). */
   used: Set<string>;
@@ -36,6 +38,19 @@ export function isoX(tx: number, ty: number): number {
 }
 export function isoY(tx: number, ty: number): number {
   return ((tx + ty) * TILE_H) / 2;
+}
+
+/** Classic 2:1 dimetric projection; h is terrace levels (lifts the point). */
+export function worldToScreen(x: number, y: number, h: number): { sx: number; sy: number } {
+  return { sx: isoX(x, y), sy: isoY(x, y) - h * STEP };
+}
+
+/** Inverse projection at a given height level (h = 0 for flat picking). */
+export function screenToWorld(sx: number, sy: number, h = 0): { x: number; y: number } {
+  const syh = sy + h * STEP;
+  const u = sx / (TILE_W / 2); // x − y
+  const v = syh / (TILE_H / 2); // x + y
+  return { x: (u + v) / 2, y: (v - u) / 2 };
 }
 
 /**
@@ -103,7 +118,8 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
         : { x: rect.x, y: offset, w: rect.w, h: size };
       offset += size;
       if (part.node) {
-        regions.push({ path: part.node.path, label: part.node.name + "/", rect: sub });
+        const depth = part.node.path.length === 0 ? 0 : part.node.path.split("/").length;
+        regions.push({ path: part.node.path, label: part.node.name + "/", rect: sub, depth });
         layout(part.node, sub);
       } else {
         placeFiles(files, sub);
