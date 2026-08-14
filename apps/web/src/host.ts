@@ -34,6 +34,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     title: repoLabel,
     role: "host",
     onSpeak: (text, toName) => settlement?.speak(text, toName),
+    onSpeakTo: (agentId, text) => settlement?.speakTo(agentId, text),
     onReadFile: async (path) => {
       if (!fileReader) throw new Error("the vessel is not yet raised");
       return fileReader(path);

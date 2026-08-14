@@ -232,5 +232,50 @@ console.log("Classifiers + view helpers");
   check(`all ${events.length} captured tool events validate as GameEvents`, ok === events.length, `${ok}/${events.length}`);
 }
 
+// --- Scrolls, dialogue, district patches (isometric-era events) ---------------
+console.log("Scrolls, dialogue, theme patches");
+{
+  const scroll = { ...ts(), type: "scroll", scrollId: "s1", authorId: "w1", authorName: "Ashka", title: "The Ledger", format: "markdown", content: "# hi" };
+  check("scroll event validates", GameEvent.safeParse(scroll).success);
+  check("scroll content over 24K rejected", !GameEvent.safeParse({ ...scroll, content: "x".repeat(24_001) }).success);
+  check("scroll bad format rejected", !GameEvent.safeParse({ ...scroll, format: "html" }).success);
+  const dlg = { ...ts(), type: "dialogue", agentId: "w1", agentName: "Ashka", from: "crown", text: "report" };
+  check("dialogue event validates", GameEvent.safeParse(dlg).success);
+  check("dialogue bad from rejected", !GameEvent.safeParse({ ...dlg, from: "stranger" }).success);
+  const prim = { shape: "obelisk", w: 8, h: 30, color: "#aa8844", tilt: 0 };
+  const patch = {
+    version: 1,
+    district: "src",
+    name: "The Proving Grounds",
+    epithet: "where seals are tested in fire",
+    groundTint: "#4a5a3a",
+    props: [{ silhouette: [prim], density: 0.4, placement: "scatter" }],
+    landmarks: [{ name: "The First Obelisk", lore: "raised over parser.js", silhouette: [prim] }],
+    questHooks: [{ label: "a TODO from three winters past", path: "src/parser.js", line: 12, snippet: "// TODO: fix precedence" }],
+  };
+  check("theme_patch validates", GameEvent.safeParse({ ...ts(), type: "theme_patch", patch }).success);
+  check("theme_patch rejects bad tint", !GameEvent.safeParse({ ...ts(), type: "theme_patch", patch: { ...patch, groundTint: "green" } }).success);
+  check("theme_patch rejects 5 quest hooks", !GameEvent.safeParse({ ...ts(), type: "theme_patch", patch: { ...patch, questHooks: Array(5).fill(patch.questHooks[0]) } }).success);
+  const status = { ...ts(), type: "agent_status", agentId: "w1", status: "scouting", detail: "reads src/parser.js" };
+  check("agent_status carries detail", GameEvent.safeParse(status).success);
+}
+
+// --- Scroll rendering safety ---------------------------------------------------
+console.log("Scroll rendering safety");
+{
+  const { mdMini, svgThreatScan } = await import("../apps/web/src/match-view.ts");
+  const md = mdMini("# Title\n**bold** and `code`\n- one\n- two\n<script>alert(1)</script>");
+  check("mdMini renders heading/bold/code/list", md.includes("md-h1") && md.includes("<strong>bold</strong>") && md.includes("<code>code</code>") && md.includes("<li>one</li>"));
+  check("mdMini escapes raw html", !md.includes("<script>") && md.includes("&lt;script&gt;"));
+  const fence = mdMini("```\n<b>raw</b>\n```");
+  check("mdMini fences code and escapes it", fence.includes("md-code") && fence.includes("&lt;b&gt;"));
+  check("svgThreatScan accepts a clean chart", svgThreatScan('<svg viewBox="0 0 10 10"><rect width="5" height="5" fill="#aa8844"/><text x="1" y="9">ok</text></svg>'));
+  check("svgThreatScan burns script", !svgThreatScan('<svg><script>alert(1)</script></svg>'));
+  check("svgThreatScan burns handlers", !svgThreatScan('<svg onload="alert(1)"><rect/></svg>'));
+  check("svgThreatScan burns foreignObject", !svgThreatScan('<svg><foreignObject><body/></foreignObject></svg>'));
+  check("svgThreatScan burns javascript hrefs", !svgThreatScan('<svg><a href="javascript:alert(1)"><text>x</text></a></svg>'));
+  check("svgThreatScan rejects non-svg", !svgThreatScan("<div>not svg</div>"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

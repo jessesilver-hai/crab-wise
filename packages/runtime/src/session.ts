@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import {
+  DistrictPatch,
   ORCHESTRATOR_NAME,
   VILLAGER_NAMES,
   type GameEvent,
@@ -85,7 +86,13 @@ code, dispatch workers rather than only talking.
 
 Only use worker names from the roster you are given. Assignments should be
 independent and parallelizable. Stay in character, but keep assignments
-technically precise.`;
+technically precise.
+
+When The Crown asks to SEE something — a report, chart, graph, diagram, table,
+or summary — use the inscribe_scroll tool (markdown for prose and tables; svg
+for charts: one self-contained <svg viewBox="…"> of shapes and <text>, no
+scripts). A scroll lands in The Crown's satchel as a keepsake; prefer it over
+merely describing.`;
 
 const SCOUT_SYSTEM = (name: string, repoLabel: string) =>
   `You are ${name}, a scout dispatched into the repository "${repoLabel}" to answer ONE question.
@@ -110,7 +117,33 @@ Work methodically:
 4. When your assignment is complete and verified, stop calling tools and summarize
    what you did in one short paragraph.
 
+If The Crown (the human ruler) speaks to you directly, answer with send_message
+to "The Crown". If asked to present findings — a report, chart, or diagram —
+use inscribe_scroll (markdown, or a self-contained svg for charts).
+
 Prefer minimal, surgical changes. Install dependencies only when needed.`;
+
+const WORLDSMITH_SYSTEM = (faction: string, tagline: string, enemy: string) =>
+  `You are The Worldsmith of "${faction}" (${tagline}; the enemy is ${enemy}).
+A district of the realm has been revealed: a directory of a real code repository.
+From its real contents, deepen the world. Reply with ONLY one JSON object, no fences:
+
+{
+  "version": 1,
+  "district": "<echo the district path you were given>",
+  "name": "<evocative district name, ≤48 chars, grounded in what the code does>",
+  "epithet": "<one clause of lore, ≤160 chars>",
+  "groundTint": "#rrggbb",
+  "accent": "#rrggbb",
+  "props": [ { "silhouette": [ { "shape": "slab|obelisk|arch|mast|orb|shard|frond|coil|ring|beam", "w": 2-48, "h": 2-72, "color": "#rrggbb", "tilt": -30..30 } ], "density": 0..1, "placement": "ridges|edges|scatter|districts" } ],
+  "landmarks": [ { "name": "≤48 chars", "lore": "≤240 chars, must reference the real code", "silhouette": [ <same primitive objects, 1-6> ] } ],
+  "questHooks": [ { "label": "≤80 chars", "path": "<real file path from the inscriptions>", "line": <number>, "snippet": "<the real source line, ≤200 chars>" } ]
+}
+
+Rules: at most 4 props, 2 landmarks, 4 questHooks. questHooks ONLY from the real
+TODO/FIXME inscriptions provided (echo their true path/line/text); omit the array
+if none were provided. Tints should suit the world's mood and differ subtly from
+neighbors. Never invent file paths.`;
 
 export class Settlement {
   private emitter: Emitter;
@@ -130,13 +163,31 @@ export class Settlement {
   private workerCounter = 0;
   private scoutCounter = 0;
   private activeWorkers = new Map<string, string>(); // name -> agentId
-  private orderQueue: string[] = [];
+  private agentsById = new Map<string, string>(); // agentId -> name
+  private departed = new Map<string, { agentId: string; persona: string; charge: string; summary: string }>();
+  private spiritCalls = 0;
+  private orderQueue: { text: string; channel: "order" | "dialogue" }[] = [];
   private processing = false;
   private startedAt = Date.now();
   private usedPersonas = new Set<string>();
+  // Worldsmith: deepens districts as agents first walk them.
+  private seenDistricts = new Set<string>();
+  private wsQueue: string[] = [];
+  private wsTimer: ReturnType<typeof setTimeout> | null = null;
+  private wsChain: Promise<void> = Promise.resolve();
+  private wsCalls = 0;
+  private wsSpawned = false;
+  private todoHits: string[] | null = null;
 
   constructor(private opts: SettlementOptions) {
-    this.emitter = new Emitter(opts.onEvent);
+    this.emitter = new Emitter((event) => {
+      try {
+        this.observe(event);
+      } catch {
+        // world-building must never break the session
+      }
+      opts.onEvent(event);
+    });
     this.client = new Anthropic({
       apiKey: opts.apiKey || "crown-funded",
       dangerouslyAllowBrowser: true,
@@ -231,6 +282,7 @@ export class Settlement {
     });
     if (this.theme) this.emitter.emit("theme_ready", { theme: this.theme });
 
+    this.agentsById.set("king", this.kingName);
     const kingInbox = this.bus.register(this.kingName);
     this.emitter.emit("agent_spawned", {
       agentId: "king",
@@ -269,6 +321,13 @@ Do NOT emit ASSIGN lines yet.`,
     }
     this.emitter.emit("session_status", { phase: "idle" });
 
+    // The heartlands resolve first, even if the King's survey skipped the root.
+    if (!this.seenDistricts.has("")) {
+      this.seenDistricts.add("");
+      this.wsQueue.push("");
+      this.scheduleWorldsmith();
+    }
+
     const summarize = (node: typeof tree, depth: number): string[] => {
       if (depth > 2 || !node.children) return [];
       return node.children.flatMap((c) => [
@@ -306,8 +365,81 @@ Do NOT emit ASSIGN lines yet.`,
       }
       // Villager gone home: the King answers for them.
     }
-    this.orderQueue.push(text);
+    this.orderQueue.push({ text, channel: "order" });
     void this.processQueue();
+  }
+
+  /** The Crown addresses one agent face to face (clicked in the world). */
+  speakTo(agentId: string, text: string): void {
+    const name = agentId === "king" ? this.kingName : this.agentsById.get(agentId);
+    if (!name) return;
+    const clipped = text.slice(0, 2000);
+    this.emitter.emit("dialogue", { agentId, agentName: name, from: "crown", text: clipped });
+    if (agentId === "king") {
+      this.orderQueue.push({ text, channel: "dialogue" });
+      void this.processQueue();
+      return;
+    }
+    if (this.activeWorkers.has(name)) {
+      // Mid-labor: merges into their next turn; they answer on the dialogue channel.
+      this.bus.send(CROWN, name, `${text}\n(Answer The Crown with send_message to: "The Crown".)`);
+      return;
+    }
+    void this.spiritReply(agentId, name, text);
+  }
+
+  /** A departed villager answers from beyond the field — one-shot, in character. */
+  private async spiritReply(agentId: string, name: string, question: string): Promise<void> {
+    if (this.spiritCalls >= 8) {
+      this.emitter.emit("dialogue", {
+        agentId,
+        agentName: name,
+        from: "agent",
+        text: "(the veil is thin, but it no longer parts — the spirits have spoken enough this session)",
+      });
+      return;
+    }
+    this.spiritCalls++;
+    const gone = this.departed.get(name);
+    this.emitter.emit("agent_status", { agentId, status: "thinking", detail: "stirs beyond the veil" });
+    try {
+      const res = await this.client.messages.create({
+        model: this.opts.model,
+        max_tokens: 300,
+        system: `You are ${name}${gone?.persona ? ` — ${gone.persona}` : ""}, a software engineer of this settlement,
+speaking to The Crown after finishing your labor. Your assignment was: "${gone?.charge ?? "unknown"}".
+You reported: "${gone?.summary ?? "no record"}". Answer The Crown's question concretely and in character,
+under 120 words. If you do not know, say so and name who might.`,
+        messages: [{ role: "user", content: question.slice(0, 2000) }],
+      });
+      this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+      this.emitter.emit("tokens", {
+        agentId,
+        inputTokens: res.usage.input_tokens,
+        outputTokens: res.usage.output_tokens,
+        matchTotalTokens: this.matchTokens.total,
+      });
+      const reply = res.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("\n")
+        .trim();
+      this.emitter.emit("dialogue", {
+        agentId,
+        agentName: name,
+        from: "agent",
+        text: (reply || "…the spirit only nods.").slice(0, 2000),
+      });
+    } catch (err) {
+      this.emitter.emit("dialogue", {
+        agentId,
+        agentName: name,
+        from: "agent",
+        text: `(the spirit stirs but cannot speak — ${String(err).slice(0, 120)})`,
+      });
+    } finally {
+      this.emitter.emit("agent_status", { agentId, status: "done" });
+    }
   }
 
   private async processQueue(): Promise<void> {
@@ -316,8 +448,8 @@ Do NOT emit ASSIGN lines yet.`,
     try {
       while (this.orderQueue.length > 0) {
         if (this.opts.signal?.aborted) return;
-        const order = this.orderQueue.shift()!;
-        await this.processOrder(order);
+        const { text, channel } = this.orderQueue.shift()!;
+        await this.processOrder(text, channel);
       }
     } finally {
       this.processing = false;
@@ -325,14 +457,21 @@ Do NOT emit ASSIGN lines yet.`,
     }
   }
 
-  private async processOrder(order: string): Promise<void> {
+  private async processOrder(order: string, channel: "order" | "dialogue" = "order"): Promise<void> {
     const king = this.king!;
     this.emitter.emit("session_status", { phase: "working", detail: "the King deliberates" });
 
-    let brief = `The Crown says: "${order}"
+    let brief = `${
+      channel === "dialogue"
+        ? `The Crown addresses you directly, face to face: "${order}"
 
-Your available worker roster: ${this.personaPool().slice(0, 6).map((p) => p.name).join(", ") || "none (roster exhausted — reply without ASSIGN lines)"}.
-Answer directly, or end with ASSIGN lines to dispatch workers.`;
+Reply in character, under 120 words. If this is an order for engineering work, still end with ASSIGN lines.`
+        : `The Crown says: "${order}"
+
+Answer directly, or end with ASSIGN lines to dispatch workers.`
+    }
+
+Your available worker roster: ${this.personaPool().slice(0, 6).map((p) => p.name).join(", ") || "none (roster exhausted — reply without ASSIGN lines)"}.`;
 
     for (let round = 0; round < MAX_ROUNDS_PER_ORDER; round++) {
       if (this.opts.signal?.aborted) return;
@@ -344,7 +483,16 @@ Answer directly, or end with ASSIGN lines to dispatch workers.`;
         .join("\n")
         .trim();
       if (prose) {
-        this.emitter.emit("message", { fromId: "king", text: prose, herald: prose });
+        if (channel === "dialogue") {
+          this.emitter.emit("dialogue", {
+            agentId: "king",
+            agentName: this.kingName,
+            from: "agent",
+            text: prose.slice(0, 2000),
+          });
+        } else {
+          this.emitter.emit("message", { fromId: "king", text: prose, herald: prose });
+        }
       }
       if (assignments.size === 0) return; // conversational reply; order complete
 
@@ -386,6 +534,7 @@ If work remains or something failed, dispatch another round with ASSIGN lines. R
       const agentId = `worker-${this.workerCounter++}-${persona.name.split(" ")[0]!.toLowerCase()}`;
       const inbox = this.bus.register(persona.name);
       this.activeWorkers.set(persona.name, agentId);
+      this.agentsById.set(agentId, persona.name);
       this.emitter.emit("agent_spawned", {
         agentId,
         role: "worker",
@@ -414,17 +563,141 @@ If work remains or something failed, dispatch another round with ASSIGN lines. R
             const text = summary.slice(0, 400) || "work complete";
             this.emitter.emit("agent_done", { agentId, summary: text });
             this.activeWorkers.delete(persona.name);
+            this.departed.set(persona.name, { agentId, persona: persona.persona, charge, summary: text });
             return `${persona.name}: ${text}`;
           })
           .catch((err) => {
             this.emitter.emit("log", { agentId, level: "error", text: String(err) });
             this.emitter.emit("agent_done", { agentId, summary: "fell in the field (agent error)" });
             this.activeWorkers.delete(persona.name);
+            this.departed.set(persona.name, {
+              agentId,
+              persona: persona.persona,
+              charge,
+              summary: `fell in the field: ${String(err).slice(0, 160)}`,
+            });
             return `${persona.name}: FAILED with error: ${String(err).slice(0, 200)}`;
           }),
       );
     }
     return Promise.all(jobs);
+  }
+
+  // -------------------------------------------------------------------------
+  // The Worldsmith: as agents first walk a district, it resolves into itself.
+  // Strictly garnish — capped, low priority, and every failure is swallowed.
+  // -------------------------------------------------------------------------
+
+  private observe(event: GameEvent): void {
+    if (event.type !== "file_read" && event.type !== "file_write" && event.type !== "list_dir") return;
+    const district = districtOf(event.path, event.type === "list_dir");
+    if (district === null || this.seenDistricts.has(district)) return;
+    this.seenDistricts.add(district);
+    this.wsQueue.push(district);
+    this.scheduleWorldsmith();
+  }
+
+  private scheduleWorldsmith(): void {
+    if (this.wsTimer || this.wsCalls >= 8 || this.wsQueue.length === 0) return;
+    this.wsTimer = setTimeout(() => {
+      this.wsTimer = null;
+      this.wsChain = this.wsChain.then(() => this.runWorldsmith()).catch(() => {});
+    }, 12_000);
+  }
+
+  private async runWorldsmith(): Promise<void> {
+    const batch = this.wsQueue.splice(0, 2);
+    for (const district of batch) {
+      if (this.opts.signal?.aborted || this.wsCalls >= 8) return;
+      this.wsCalls++;
+      try {
+        await this.forgeDistrict(district);
+      } catch (err) {
+        this.emitter.emit("log", {
+          agentId: "worldsmith",
+          level: "info",
+          text: `the Worldsmith's vision clouded: ${String(err).slice(0, 120)}`,
+        });
+      }
+    }
+    this.scheduleWorldsmith();
+  }
+
+  private async forgeDistrict(district: string): Promise<void> {
+    const { executor } = this.opts;
+    if (!this.wsSpawned) {
+      this.wsSpawned = true;
+      this.emitter.emit("agent_spawned", {
+        agentId: "worldsmith",
+        role: "worker",
+        name: "The Worldsmith",
+        model: this.opts.model,
+        charge: "names the land as it is revealed",
+      });
+    }
+    this.emitter.emit("agent_status", {
+      agentId: "worldsmith",
+      status: "thinking",
+      detail: `divines ${district || "the heartlands"}`,
+    });
+
+    const entries = await executor.list(district || ".").catch(() => [] as string[]);
+    if (this.todoHits === null) {
+      const t1 = await executor.search("TODO").catch(() => [] as string[]);
+      const t2 = await executor.search("FIXME").catch(() => [] as string[]);
+      this.todoHits = [...t1, ...t2].slice(0, 400);
+    }
+    const inDistrict = (hit: string) => {
+      const p = hit.split(":")[0] ?? "";
+      return district === "" ? !p.includes("/") : p.startsWith(district + "/");
+    };
+    const todos = this.todoHits.filter(inDistrict).slice(0, 6).map((h) => h.slice(0, 200));
+
+    const faction = this.theme?.factionName ?? "the Realm";
+    const tagline = this.theme?.tagline ?? "a settlement upon uncharted code";
+    const enemy = this.theme?.enemyName ?? "the specters";
+    const res = await this.client.messages.create({
+      model: this.opts.model,
+      max_tokens: 900,
+      system: WORLDSMITH_SYSTEM(faction, tagline, enemy),
+      messages: [
+        {
+          role: "user",
+          content: `District: ${district || "(repo root — the heartlands)"}
+Contents: ${entries.slice(0, 40).join(", ") || "(empty)"}
+${todos.length ? `Real TODO/FIXME inscriptions (path:line: text):\n${todos.join("\n")}` : "No inscriptions found — omit questHooks."}`,
+        },
+      ],
+    });
+    this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+    this.emitter.emit("tokens", {
+      agentId: "worldsmith",
+      inputTokens: res.usage.input_tokens,
+      outputTokens: res.usage.output_tokens,
+      matchTotalTokens: this.matchTokens.total,
+    });
+
+    const raw = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+    const candidate = clampDistrictCandidate(extractJson(raw), district);
+    const parsed = DistrictPatch.safeParse(candidate);
+    this.emitter.emit("agent_status", { agentId: "worldsmith", status: "idle" });
+    if (!parsed.success) {
+      this.emitter.emit("log", {
+        agentId: "worldsmith",
+        level: "info",
+        text: `the Worldsmith's vision of ${district || "the heartlands"} would not hold`,
+      });
+      return;
+    }
+    this.emitter.emit("theme_patch", { patch: parsed.data });
+    this.emitter.emit("log", {
+      agentId: "worldsmith",
+      level: "info",
+      text: `⟡ The Worldsmith names ${parsed.data.name} — “${parsed.data.epithet}”`,
+    });
   }
 
   async requestPatch(): Promise<{ patch: string; stat: string }> {
@@ -433,6 +706,9 @@ If work remains or something failed, dispatch another round with ASSIGN lines. R
 
   /** Archive the settlement: emit the closing chronicle entry. */
   end(): void {
+    if (this.wsTimer) clearTimeout(this.wsTimer);
+    this.wsTimer = null;
+    this.wsCalls = 8; // the Worldsmith rests
     this.emitter.emit("match_ended", {
       result: this.stats.filesWritten.size > 0 && this.stats.lastTestGreen ? "victory" : "abandoned",
       stats: {
@@ -453,4 +729,98 @@ function hashString(s: string): number {
     h = Math.imul(h, 16777619);
   }
   return h >>> 0;
+}
+
+const MUNDANE_DISTRICTS = new Set(["node_modules", ".git", "dist", "build", "vendor", "coverage", ".venv", "__pycache__"]);
+
+/** Top-level directory a path belongs to; "" = repo root; null = not worth theming. */
+function districtOf(path: string, isDir: boolean): string | null {
+  const clean = path.replace(/^\.\/?/, "").replace(/\/+$/, "");
+  if (clean === "" || clean === ".") return "";
+  const parts = clean.split("/").filter(Boolean);
+  const head = parts[0]!;
+  if (MUNDANE_DISTRICTS.has(head)) return null;
+  if (parts.length === 1) return isDir ? head : "";
+  return head;
+}
+
+/** Best-effort JSON extraction: strips fences, grabs the outermost object. */
+function extractJson(text: string): unknown {
+  const cleaned = text.replace(/```(?:json)?/gi, "");
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start === -1 || end <= start) return {};
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return {};
+  }
+}
+
+const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+const clampNum = (v: unknown, lo: number, hi: number, fallback: number) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : fallback;
+};
+
+/** Coerce an LLM candidate toward the DistrictPatch bounds; zod has final say. */
+function clampDistrictCandidate(raw: unknown, district: string): unknown {
+  if (typeof raw !== "object" || raw === null) return raw;
+  const c = raw as Record<string, unknown>;
+  const str = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : v);
+  const prim = (p: unknown) => {
+    if (typeof p !== "object" || p === null) return null;
+    const q = p as Record<string, unknown>;
+    if (typeof q.color !== "string" || !HEX_RE.test(q.color)) return null;
+    return {
+      shape: q.shape,
+      w: clampNum(q.w, 2, 48, 8),
+      h: clampNum(q.h, 2, 72, 12),
+      color: q.color,
+      tilt: clampNum(q.tilt, -30, 30, 0),
+    };
+  };
+  const silhouette = (v: unknown) =>
+    Array.isArray(v) ? v.map(prim).filter((x): x is NonNullable<ReturnType<typeof prim>> => x !== null).slice(0, 6) : v;
+  return {
+    version: 1,
+    district,
+    name: str(c.name, 48),
+    epithet: str(c.epithet, 160),
+    groundTint: c.groundTint,
+    accent: typeof c.accent === "string" && HEX_RE.test(c.accent) ? c.accent : undefined,
+    props: Array.isArray(c.props)
+      ? c.props.slice(0, 4).map((p) => {
+          if (typeof p !== "object" || p === null) return p;
+          const q = p as Record<string, unknown>;
+          const d = Number(q.density);
+          return {
+            silhouette: silhouette(q.silhouette),
+            density: Number.isFinite(d) ? Math.min(1, Math.max(0, d)) : 0.3,
+            placement: q.placement,
+            glow: q.glow,
+          };
+        })
+      : undefined,
+    landmarks: Array.isArray(c.landmarks)
+      ? c.landmarks.slice(0, 2).map((l) => {
+          if (typeof l !== "object" || l === null) return l;
+          const q = l as Record<string, unknown>;
+          return { name: str(q.name, 48), lore: str(q.lore, 240), silhouette: silhouette(q.silhouette), glow: q.glow };
+        })
+      : undefined,
+    questHooks: Array.isArray(c.questHooks)
+      ? c.questHooks.slice(0, 4).map((h) => {
+          if (typeof h !== "object" || h === null) return h;
+          const q = h as Record<string, unknown>;
+          const line = Number(q.line);
+          return {
+            label: str(q.label, 80),
+            path: str(q.path, 200),
+            line: Number.isInteger(line) && line > 0 ? line : undefined,
+            snippet: str(q.snippet, 200),
+          };
+        })
+      : undefined,
+  };
 }

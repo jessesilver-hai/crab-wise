@@ -92,14 +92,28 @@ export const WORKER_TOOLS: Anthropic.Tool[] = [
   {
     name: "send_message",
     description:
-      "Send a short message to a fellow agent (by name) or to everyone (omit `to`). Use it to coordinate: announce what you're starting, share discoveries, warn about conflicts.",
+      "Send a short message to a fellow agent (by name), to The Crown (the human ruler — use to: \"The Crown\" when answering something the Crown asked you directly), or to everyone (omit `to`). Use it to coordinate: announce what you're starting, share discoveries, warn about conflicts.",
     input_schema: {
       type: "object",
       properties: {
-        to: { type: "string", description: "Recipient agent name; omit to broadcast" },
+        to: { type: "string", description: "Recipient agent name, or \"The Crown\"; omit to broadcast" },
         text: { type: "string" },
       },
       required: ["text"],
+    },
+  },
+  {
+    name: "inscribe_scroll",
+    description:
+      "Inscribe a presentable artifact — a report, summary, table, diagram, or chart — and deliver it to The Crown's satchel as a collectible scroll. Use format \"markdown\" for prose/tables/lists, or \"svg\" for charts and diagrams (one self-contained <svg viewBox=\"…\"> using only shapes and <text>; no scripts, no external refs). Use this whenever The Crown asks to SEE something rather than just hear about it.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short scroll title (max 80 chars)" },
+        format: { type: "string", enum: ["markdown", "svg"] },
+        content: { type: "string", description: "Markdown text, or a single self-contained <svg> element" },
+      },
+      required: ["title", "format", "content"],
     },
   },
 ];
@@ -173,7 +187,7 @@ export async function executeTool(
     case "read_file": {
       const path = String(input.path ?? "");
       emitter.emit("agent_moved", { agentId, path });
-      emitter.emit("agent_status", { agentId, status: "scouting" });
+      emitter.emit("agent_status", { agentId, status: "scouting", detail: `reads ${path}`.slice(0, 160) });
       const { content, lines } = await exec.read(path);
       ctx.stats.filesRead.add(path);
       emitter.emit("file_read", { agentId, path, lines });
@@ -204,7 +218,7 @@ export async function executeTool(
         return `Tool error: old_text appears ${count} times in ${path}; include more surrounding lines to make it unique.`;
       }
       emitter.emit("agent_moved", { agentId, path });
-      emitter.emit("agent_status", { agentId, status: "building" });
+      emitter.emit("agent_status", { agentId, status: "building", detail: `reforges ${path}`.slice(0, 160) });
       // Function replacer: a literal string here would interpret $-patterns ($&, $1…).
       const { newLines } = await exec.write(path, content.replace(oldText, () => newText));
       const added = newText ? newText.split("\n").length : 0;
@@ -227,7 +241,7 @@ export async function executeTool(
       const path = String(input.path ?? "");
       const content = String(input.content ?? "");
       emitter.emit("agent_moved", { agentId, path });
-      emitter.emit("agent_status", { agentId, status: "building" });
+      emitter.emit("agent_status", { agentId, status: "building", detail: `raises ${path}`.slice(0, 160) });
       const { created, oldLines, newLines } = await exec.write(path, content);
       // Line-count approximation: the true diff lives in the sandbox's git.
       const added = created ? newLines : Math.max(newLines - oldLines, 1);
@@ -261,7 +275,7 @@ export async function executeTool(
 
     case "search": {
       const query = String(input.query ?? "");
-      emitter.emit("agent_status", { agentId, status: "scouting" });
+      emitter.emit("agent_status", { agentId, status: "scouting", detail: `hunts «${query.slice(0, 60)}»` });
       const hits = await exec.search(query);
       const paths = [...new Set(hits.map((h) => h.split(":")[0]!))].slice(0, 20);
       emitter.emit("search", { agentId, query, matchCount: hits.length, paths });
@@ -272,7 +286,11 @@ export async function executeTool(
     case "run_command": {
       const command = String(input.command ?? "").trim();
       const kind = commandKind(command);
-      emitter.emit("agent_status", { agentId, status: kind === "test" ? "fighting" : "building" });
+      emitter.emit("agent_status", {
+        agentId,
+        status: kind === "test" ? "fighting" : "building",
+        detail: `wields \`${command.slice(0, 80)}\``.slice(0, 160),
+      });
       emitter.emit("command_run", { agentId, command, kind });
 
       const startedAt = Date.now();
@@ -329,6 +347,15 @@ export async function executeTool(
     case "send_message": {
       const to = input.to ? String(input.to) : undefined;
       const text = String(input.text ?? "");
+      if (to && /\bcrown\b/i.test(to)) {
+        emitter.emit("dialogue", {
+          agentId,
+          agentName: ctx.agentName,
+          from: "agent",
+          text: text.slice(0, 2000),
+        });
+        return "Your words reach The Crown.";
+      }
       ctx.sendMessage(ctx.agentName, to, text);
       emitter.emit("message", {
         fromId: agentId,
@@ -337,6 +364,20 @@ export async function executeTool(
         herald: heraldMessage(ctx.agentName, to, text, ctx.lexicon()),
       });
       return to ? `Message delivered to ${to}.` : "Message broadcast to all agents.";
+    }
+
+    case "inscribe_scroll": {
+      const title = String(input.title ?? "").trim().slice(0, 80);
+      const format = input.format === "svg" ? ("svg" as const) : ("markdown" as const);
+      const content = String(input.content ?? "").slice(0, 24_000);
+      if (!title || !content) return "Tool error: title and content are required.";
+      if (format === "svg" && !/^\s*<svg[\s>]/i.test(content)) {
+        return "Tool error: svg scrolls must be a single self-contained <svg> element.";
+      }
+      const scrollId = `scroll-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e8).toString(36)}`;
+      emitter.emit("scroll", { scrollId, authorId: agentId, authorName: ctx.agentName.slice(0, 60), title, format, content });
+      emitter.emit("log", { agentId, level: "info", text: `${ctx.agentName} inscribes a scroll — “${title}”` });
+      return `Scroll "${title}" inscribed and delivered to The Crown's satchel.`;
     }
 
     default:

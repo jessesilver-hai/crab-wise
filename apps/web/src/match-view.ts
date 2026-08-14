@@ -5,6 +5,8 @@ export type Renderer = {
   destroy(): void;
   /** Optional: the view supplies a callback for "inspect this file" gestures in-world. */
   setInspectHandler?(cb: (path: string) => void): void;
+  /** Optional: the view supplies a callback for "speak to this agent" gestures in-world. */
+  setSpeakHandler?(cb: (agentId: string) => void): void;
 };
 
 export type MatchView = {
@@ -28,6 +30,8 @@ export type MatchViewOptions = {
   onViewPatch?: () => Promise<string>;
   /** Host only: read a file's current contents from the sandbox for the Inspect panel. */
   onReadFile?: (path: string) => Promise<string>;
+  /** Host only: the Crown addresses one agent face to face. */
+  onSpeakTo?: (agentId: string, text: string) => void;
 };
 
 const BUILDING_LABEL: Record<string, string> = {
@@ -80,9 +84,14 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
             <button id="tab-herald" class="active">◈ Herald</button>
             <button id="tab-works">⚒ Works <span id="works-badge" class="works-badge" style="display:none">0</span></button>
             <button id="tab-bounties">☨ Bounties <span id="bounty-badge" class="works-badge" style="display:none">0</span></button>
+            <button id="tab-satchel">❧ Satchel <span id="satchel-badge" class="works-badge" style="display:none">0</span></button>
             <button id="tab-scribe">⌘ Scribe</button>
           </div>
           <div class="feed" id="feed-herald"></div>
+          <div class="feed" id="feed-satchel" style="display:none">
+            <p class="empty-note" id="satchel-empty">The satchel is empty. Ask the realm to SHOW you something — a report, a chart, a chronicle — and the scroll lands here.</p>
+            <div id="satchel-list"></div>
+          </div>
           <div class="feed" id="feed-works" style="display:none">
             <p class="empty-note" id="works-empty">No stone has yet been laid. Changed files appear here.</p>
             <div id="works-list"></div>
@@ -93,6 +102,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
             <div id="bounty-list"></div>
           </div>
           <div class="feed" id="feed-scribe" style="display:none"></div>
+          <div id="status-strip"></div>
         </div>
       </div>
     </div>`;
@@ -106,18 +116,22 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
 
   const worksFeed = el("feed-works");
   const bountyFeed = el("feed-bounties");
+  const satchelFeed = el("feed-satchel");
   el("tab-herald").onclick = () => switchTab("herald");
   el("tab-works").onclick = () => switchTab("works");
   el("tab-bounties").onclick = () => switchTab("bounties");
+  el("tab-satchel").onclick = () => switchTab("satchel");
   el("tab-scribe").onclick = () => switchTab("scribe");
-  function switchTab(tab: "herald" | "works" | "bounties" | "scribe") {
+  function switchTab(tab: "herald" | "works" | "bounties" | "satchel" | "scribe") {
     heraldFeed.style.display = tab === "herald" ? "" : "none";
     worksFeed.style.display = tab === "works" ? "" : "none";
     bountyFeed.style.display = tab === "bounties" ? "" : "none";
+    satchelFeed.style.display = tab === "satchel" ? "" : "none";
     scribeFeed.style.display = tab === "scribe" ? "" : "none";
     el("tab-herald").classList.toggle("active", tab === "herald");
     el("tab-works").classList.toggle("active", tab === "works");
     el("tab-bounties").classList.toggle("active", tab === "bounties");
+    el("tab-satchel").classList.toggle("active", tab === "satchel");
     el("tab-scribe").classList.toggle("active", tab === "scribe");
   }
 
@@ -260,6 +274,135 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     };
   }
 
+  // --- Satchel: scrolls the realm inscribes for the Crown --------------------
+  type Scroll = Extract<GameEvent, { type: "scroll" }>;
+  const scrolls = new Map<string, Scroll>();
+  function recordScroll(e: Scroll) {
+    scrolls.set(e.scrollId, e);
+    el("satchel-empty").style.display = "none";
+    const badge = el("satchel-badge");
+    badge.style.display = "";
+    badge.textContent = String(scrolls.size);
+    el("satchel-list").innerHTML = [...scrolls.values()]
+      .map(
+        (s) => `<div class="scroll-row" data-scroll="${escapeHtml(s.scrollId)}" title="Unroll this scroll">
+          <span class="scroll-icon">${s.format === "svg" ? "◫" : "❧"}</span>
+          <span class="scroll-title">${escapeHtml(s.title)}</span>
+          <span class="scroll-by">${escapeHtml(s.authorName)}</span>
+        </div>`,
+      )
+      .join("");
+    el("satchel-list")
+      .querySelectorAll<HTMLElement>(".scroll-row")
+      .forEach((row) => (row.onclick = () => openScroll(row.dataset.scroll!)));
+  }
+  function openScroll(scrollId: string) {
+    const s = scrolls.get(scrollId);
+    if (!s) return;
+    const modal = document.createElement("div");
+    modal.className = "patch-modal";
+    const body =
+      s.format === "svg"
+        ? svgThreatScan(s.content)
+          ? `<div class="scroll-svg">${sanitizeSvgDom(s.content) ?? "<p>(the diagram would not resolve)</p>"}</div>`
+          : "<p>(this scroll carried forbidden sigils and was burned)</p>"
+        : `<div class="scroll-md">${mdMini(s.content)}</div>`;
+    modal.innerHTML = `<div class="patch-modal-inner scroll-inner">
+      <button class="patch-close">✕ seal</button>
+      <h3 class="scroll-heading">❧ ${escapeHtml(s.title)}</h3>
+      <p class="scroll-attrib">inscribed by ${escapeHtml(s.authorName)}</p>
+      ${body}
+      <button class="scroll-keep">⎘ keep (download)</button>
+    </div>`;
+    root.querySelector(".match-view")!.appendChild(modal);
+    modal.querySelector<HTMLButtonElement>(".patch-close")!.onclick = () => modal.remove();
+    modal.querySelector<HTMLButtonElement>(".scroll-keep")!.onclick = () => {
+      const blob = new Blob([s.content], { type: s.format === "svg" ? "image/svg+xml" : "text/markdown" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${s.title.replace(/[^\w-]+/g, "_").slice(0, 60)}.${s.format === "svg" ? "svg" : "md"}`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+  }
+
+  // --- Dialogue: the Crown face to face with one agent ------------------------
+  type DialogueEntry = { from: "crown" | "agent"; text: string };
+  const dialogues = new Map<string, { name: string; entries: DialogueEntry[] }>();
+  let dialogueOpenFor: string | null = null;
+  function appendDialogue(e: Extract<GameEvent, { type: "dialogue" }>) {
+    const d = dialogues.get(e.agentId) ?? { name: e.agentName, entries: [] };
+    d.name = e.agentName;
+    d.entries.push({ from: e.from, text: e.text });
+    if (d.entries.length > 60) d.entries.shift();
+    dialogues.set(e.agentId, d);
+    if (dialogueOpenFor === e.agentId) renderDialogueThread(e.agentId);
+  }
+  function renderDialogueThread(agentId: string) {
+    const thread = root.querySelector<HTMLElement>("#dlg-thread");
+    if (!thread) return;
+    const d = dialogues.get(agentId);
+    thread.innerHTML = (d?.entries ?? [])
+      .map((m) => `<div class="dlg-line ${m.from}">${m.from === "crown" ? "♛" : "◈"} ${escapeHtml(m.text)}</div>`)
+      .join("");
+    thread.scrollTop = thread.scrollHeight;
+  }
+  function openDialogue(agentId: string) {
+    root.querySelector("#dialogue-panel")?.remove();
+    dialogueOpenFor = agentId;
+    const d = dialogues.get(agentId);
+    const agentName = d?.name ?? agentNames.get(agentId) ?? agentId;
+    const panel = document.createElement("div");
+    panel.id = "dialogue-panel";
+    panel.innerHTML = `
+      <div class="dlg-head"><span>🗨 ${escapeHtml(agentName)}</span><button class="dlg-close">✕</button></div>
+      <div id="dlg-thread"></div>
+      ${
+        isHost && opts.onSpeakTo
+          ? '<div class="dlg-input"><input id="dlg-text" maxlength="2000" placeholder="Speak to them directly…"/><button id="dlg-send">Speak</button></div>'
+          : '<p class="dlg-note">Only the Crown may speak; you are hearing the exchange.</p>'
+      }`;
+    root.querySelector(".game-area")!.appendChild(panel);
+    panel.querySelector<HTMLButtonElement>(".dlg-close")!.onclick = () => {
+      dialogueOpenFor = null;
+      panel.remove();
+    };
+    const input = panel.querySelector<HTMLInputElement>("#dlg-text");
+    if (input && opts.onSpeakTo) {
+      const submit = () => {
+        const text = input.value.trim();
+        if (!text) return;
+        opts.onSpeakTo!(agentId, text);
+        input.value = "";
+      };
+      panel.querySelector<HTMLButtonElement>("#dlg-send")!.onclick = submit;
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") submit();
+      });
+      input.focus();
+    }
+    renderDialogueThread(agentId);
+  }
+
+  // --- Status strip: what every laboring agent is doing right now -------------
+  const liveStatus = new Map<string, { name: string; text: string }>();
+  function updateStatusStrip(e: Extract<GameEvent, { type: "agent_status" }>, historical: boolean) {
+    if (historical) return;
+    const busy = e.status === "thinking" || e.status === "scouting" || e.status === "building" || e.status === "fighting";
+    if (!busy) liveStatus.delete(e.agentId);
+    else {
+      const label = e.detail ?? (e.status === "thinking" ? "ponders" : e.status);
+      liveStatus.set(e.agentId, { name: name(e.agentId), text: label });
+    }
+    updateStatusStripRender();
+  }
+  function updateStatusStripRender() {
+    el("status-strip").innerHTML = [...liveStatus.values()]
+      .slice(-4)
+      .map((s) => `<div class="status-line"><span class="pulse">✦</span> <span class="who">${escapeHtml(s.name)}</span> ${escapeHtml(s.text)}</div>`)
+      .join("");
+  }
+
   // Command bar wiring (host only)
   if (isHost && opts.onSpeak) {
     const input = root.querySelector<HTMLInputElement>("#cmd-input")!;
@@ -310,6 +453,9 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     div.innerHTML = html;
     div.querySelectorAll<HTMLElement>("[data-inspect]").forEach((n) => {
       n.onclick = () => void openInspect(n.dataset.inspect!);
+    });
+    div.querySelectorAll<HTMLElement>("[data-scroll]").forEach((n) => {
+      n.onclick = () => openScroll(n.dataset.scroll!);
     });
     feed.appendChild(div);
     while (feed.children.length > 400) feed.removeChild(feed.firstChild!);
@@ -403,6 +549,28 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
           html: e.result === "victory" ? "☀ THE BEACON IS LIT — the chronicle closes in victory." : "⚱ The chronicle closes. The settlement sleeps.",
         };
       }
+      case "scroll":
+        return {
+          cls: "triumph",
+          html: `❧ ${escapeHtml(e.authorName)} inscribes a scroll — <strong class="scroll-open" data-scroll="${escapeHtml(e.scrollId)}">“${escapeHtml(e.title)}”</strong> <span class="dim">(kept in the ❧ Satchel)</span>`,
+        };
+      case "dialogue":
+        return {
+          cls: "decree",
+          html:
+            e.from === "crown"
+              ? `🗨 The Crown, to ${escapeHtml(e.agentName)}: “${escapeHtml(e.text)}”`
+              : `🗨 ${escapeHtml(e.agentName)}, to The Crown: “${escapeHtml(e.text)}”`,
+        };
+      case "theme_patch": {
+        const hooks = e.patch.questHooks?.length
+          ? ` <span class="dim">· ${e.patch.questHooks.length} old inscription${e.patch.questHooks.length === 1 ? "" : "s"} unearthed</span>`
+          : "";
+        return {
+          cls: "system",
+          html: `⟡ The land deepens: <strong>${escapeHtml(e.patch.name)}</strong> — <em>${escapeHtml(e.patch.epithet)}</em>${hooks}`,
+        };
+      }
       case "tokens":
         el("res-gold").textContent = e.matchTotalTokens.toLocaleString();
         return null;
@@ -421,6 +589,13 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       if (entry) addEntry(heraldFeed, entry.cls, entry.html);
       applyBounties(e);
       if (e.type === "file_write") recordWork(e);
+      if (e.type === "scroll") recordScroll(e);
+      if (e.type === "dialogue") appendDialogue(e);
+      if (e.type === "agent_status") updateStatusStrip(e, historical);
+      if (e.type === "agent_done") {
+        liveStatus.delete(e.agentId);
+        el("status-strip").querySelectorAll(".status-line").length && updateStatusStripRender();
+      }
       if (e.type === "log") {
         addEntry(scribeFeed, `raw ${e.level === "error" ? "error" : ""}`, `${e.agentId ? `[${escapeHtml(name(e.agentId))}] ` : ""}${escapeHtml(e.text)}`);
       } else if (e.type !== "tokens" && e.type !== "context" && e.type !== "theme_ready") {
@@ -478,6 +653,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     attachRenderer(r) {
       renderer = r;
       r.setInspectHandler?.((path) => void openInspect(path));
+      r.setSpeakHandler?.((agentId) => openDialogue(agentId));
     },
   };
   return view;
@@ -515,4 +691,91 @@ export function fileDiffFrom(patch: string, path: string): string {
   const parts = patch.split(/^diff --git /m).filter((p) => p.trim());
   const hit = parts.find((p) => p.startsWith(`a/${path} `) || p.includes(` b/${path}\n`));
   return hit ? "diff --git " + hit : "";
+}
+
+/**
+ * Pure-string threat scan for agent-authored SVG scrolls; runs before the
+ * DOM pass so it is testable in node. Reject = burn the scroll.
+ */
+export function svgThreatScan(src: string): boolean {
+  if (!/^\s*<svg[\s>]/i.test(src)) return false;
+  const lower = src.toLowerCase();
+  const forbidden = ["<script", "<foreignobject", "<iframe", "<embed", "<object", "javascript:", "data:text/html", "<!entity", "<!doctype"];
+  if (forbidden.some((f) => lower.includes(f))) return false;
+  if (/\son[a-z]+\s*=/i.test(src)) return false;
+  return true;
+}
+
+/** DOM-level sanitize: parse as SVG, strip event handlers and external refs. */
+function sanitizeSvgDom(src: string): string | null {
+  const doc = new DOMParser().parseFromString(src, "image/svg+xml");
+  const svg = doc.documentElement;
+  if (svg.tagName.toLowerCase() !== "svg" || doc.querySelector("parsererror")) return null;
+  for (const node of [...svg.querySelectorAll("script,foreignObject,iframe,embed,object")]) node.remove();
+  const walk = (el: Element) => {
+    for (const attr of [...el.attributes]) {
+      const n = attr.name.toLowerCase();
+      const v = attr.value.trim().toLowerCase();
+      if (n.startsWith("on")) el.removeAttribute(attr.name);
+      else if ((n === "href" || n === "xlink:href") && v && !v.startsWith("#")) el.removeAttribute(attr.name);
+    }
+    for (const child of [...el.children]) walk(child);
+  };
+  walk(svg);
+  svg.removeAttribute("width");
+  svg.removeAttribute("height");
+  svg.setAttribute("style", "max-width:100%;height:auto");
+  return svg.outerHTML;
+}
+
+/** Tiny markdown renderer for scrolls: escape-first, then a safe subset. */
+export function mdMini(md: string): string {
+  const lines = md.split("\n");
+  const out: string[] = [];
+  let inCode = false;
+  let codeBuf: string[] = [];
+  let listBuf: string[] = [];
+  const flushList = () => {
+    if (listBuf.length) out.push(`<ul>${listBuf.map((li) => `<li>${li}</li>`).join("")}</ul>`);
+    listBuf = [];
+  };
+  const inline = (s: string) =>
+    escapeHtml(s)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  for (const line of lines) {
+    if (line.trimStart().startsWith("```")) {
+      if (inCode) {
+        out.push(`<pre class="md-code">${escapeHtml(codeBuf.join("\n"))}</pre>`);
+        codeBuf = [];
+      } else flushList();
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) {
+      codeBuf.push(line);
+      continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      flushList();
+      out.push(`<p class="md-h${h[1]!.length}">${inline(h[2]!)}</p>`);
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      listBuf.push(inline(line.replace(/^\s*[-*]\s+/, "")));
+      continue;
+    }
+    flushList();
+    if (line.includes("|") && line.trim().length > 1) {
+      out.push(`<div class="md-row mono">${inline(line)}</div>`);
+      continue;
+    }
+    if (line.trim() === "") out.push("");
+    else out.push(`<p>${inline(line)}</p>`);
+  }
+  if (inCode && codeBuf.length) out.push(`<pre class="md-code">${escapeHtml(codeBuf.join("\n"))}</pre>`);
+  flushList();
+  return out.join("\n");
 }
