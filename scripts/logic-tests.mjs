@@ -260,6 +260,22 @@ console.log("Scrolls, dialogue, theme patches");
   check("agent_status carries detail", GameEvent.safeParse(status).success);
 }
 
+// --- District archetypes ---------------------------------------------------------
+console.log("District archetypes");
+{
+  const { districtArchetype } = await import("../packages/protocol/src/index.ts");
+  check("tests dir → proving grounds", districtArchetype("tests") === "proving" && districtArchetype("__tests__") === "proving");
+  check("docs dir → scriptorium", districtArchetype("docs") === "scriptorium");
+  check(".github → watchtower", districtArchetype(".github") === "watchtower");
+  check("scripts → forge", districtArchetype("scripts") === "forge");
+  check("assets → bazaar", districtArchetype("assets") === "bazaar");
+  check("config → granary", districtArchetype("config") === "granary");
+  check("src defaults to quarter", districtArchetype("src", ["a.ts", "b.ts"]) === "quarter");
+  check("file-majority tests win over name", districtArchetype("suite", ["a.test.js", "b.test.js", "c.js"]) === "proving");
+  check("md-majority → scriptorium", districtArchetype("stuff", ["a.md", "b.md", "c.md", "x.js"]) === "scriptorium");
+  check("image-majority → bazaar", districtArchetype("things", ["a.png", "b.svg", "c.jpg"]) === "bazaar");
+}
+
 // --- Scroll rendering safety ---------------------------------------------------
 console.log("Scroll rendering safety");
 {

@@ -598,6 +598,39 @@ export function buildingKindFor(path: string): z.infer<typeof BuildingKind> {
   return "house";
 }
 
+/**
+ * What a district LOOKS like: each top-level directory renders as a distinct
+ * quarter of the settlement, judged by its name and a sample of its files.
+ */
+export const DistrictArchetype = z.enum([
+  "quarter", // source code — artisan houses, workshops
+  "proving", // tests — training grounds: targets, dummies, banners
+  "scriptorium", // docs — library, lecterns, scroll racks
+  "granary", // config/data — stores, silos, market stalls
+  "watchtower", // CI/workflows — walls and towers
+  "forge", // build/tooling/scripts — furnaces, anvils
+  "bazaar", // assets/static/media — stalls, banners, crates
+]);
+export type DistrictArchetype = z.infer<typeof DistrictArchetype>;
+
+export function districtArchetype(dirName: string, fileNames: string[] = []): DistrictArchetype {
+  const d = dirName.toLowerCase().replace(/\/$/, "");
+  if (/^(tests?|__tests__|spec|specs|e2e|cypress)$/.test(d)) return "proving";
+  if (/^(docs?|documentation|wiki|examples?|guides?)$/.test(d)) return "scriptorium";
+  if (/^(\.github|\.gitlab|\.circleci|ci|workflows)$/.test(d)) return "watchtower";
+  if (/^(scripts?|tools?|build|bin|make|gradle|maven)$/.test(d)) return "forge";
+  if (/^(assets?|static|public|images?|img|media|fonts?|sounds?|textures?)$/.test(d)) return "bazaar";
+  if (/^(config|configs?|data|fixtures|locales?|i18n|migrations)$/.test(d)) return "granary";
+  const files = fileNames.map((f) => f.toLowerCase());
+  const of = (re: RegExp) => files.filter((f) => re.test(f)).length;
+  const n = Math.max(1, files.length);
+  if (of(/\.(test|spec)\.[cm]?[jt]sx?$|_test\.(py|go|rb)$|test_.*\.py$/) / n > 0.4) return "proving";
+  if (of(/\.(md|rst|txt|adoc)$/) / n > 0.5) return "scriptorium";
+  if (of(/\.(json|ya?ml|toml|ini|cfg|csv)$/) / n > 0.5) return "granary";
+  if (of(/\.(png|jpe?g|gif|svg|webp|ico|mp[34]|woff2?|ttf)$/) / n > 0.4) return "bazaar";
+  return "quarter";
+}
+
 // ---------------------------------------------------------------------------
 // Bounties + renown (shared by web live view, relay Hall of Legends, replays)
 // ---------------------------------------------------------------------------

@@ -7,6 +7,8 @@ export type Renderer = {
   setInspectHandler?(cb: (path: string) => void): void;
   /** Optional: the view supplies a callback for "speak to this agent" gestures in-world. */
   setSpeakHandler?(cb: (agentId: string) => void): void;
+  /** Optional: real command verbs — right-click a building (attend file) or raider (hunt test). */
+  setOrderHandler?(cb: (kind: "attend" | "hunt", target: string, agentId?: string) => void): void;
 };
 
 export type MatchView = {
@@ -32,6 +34,8 @@ export type MatchViewOptions = {
   onReadFile?: (path: string) => Promise<string>;
   /** Host only: the Crown addresses one agent face to face. */
   onSpeakTo?: (agentId: string, text: string) => void;
+  /** Host only: real command verbs from the map (attend a file / hunt a test). */
+  onOrder?: (kind: "attend" | "hunt", target: string, agentId?: string) => void;
 };
 
 const BUILDING_LABEL: Record<string, string> = {
@@ -654,6 +658,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       renderer = r;
       r.setInspectHandler?.((path) => void openInspect(path));
       r.setSpeakHandler?.((agentId) => openDialogue(agentId));
+      if (opts.onOrder) r.setOrderHandler?.((kind, target, agentId) => opts.onOrder!(kind, target, agentId));
     },
   };
   return view;

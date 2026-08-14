@@ -369,6 +369,27 @@ Do NOT emit ASSIGN lines yet.`,
     void this.processQueue();
   }
 
+  /**
+   * A real command verb from the map: right-click a building = attend a file,
+   * right-click a raider = hunt a failing test. Routes to the clicked agent's
+   * inbox when they still labor, otherwise becomes a Crown order to the King.
+   */
+  order(kind: "attend" | "hunt", target: string, agentId?: string): void {
+    const text =
+      kind === "attend"
+        ? `Attend to ${target}: read it and report its state and any concerns in one short message to The Crown.`
+        : `Hunt the failing test "${target}": find the cause and fix it.`;
+    if (agentId && agentId !== "king") {
+      const name = this.agentsById.get(agentId);
+      if (name && this.activeWorkers.has(name)) {
+        this.emitter.emit("decree", { text, toId: name });
+        this.bus.send(CROWN, name, `${text}\n(Report back with send_message to: "The Crown".)`);
+        return;
+      }
+    }
+    this.speak(text);
+  }
+
   /** The Crown addresses one agent face to face (clicked in the world). */
   speakTo(agentId: string, text: string): void {
     const name = agentId === "king" ? this.kingName : this.agentsById.get(agentId);
