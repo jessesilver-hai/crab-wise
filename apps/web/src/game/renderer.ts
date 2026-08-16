@@ -1610,7 +1610,7 @@ class MainScene extends Phaser.Scene {
     const eff: { kind: ParticleKind | "rain" | "none"; color: number; count: number } = amb
       ? {
           kind: amb.particles,
-          color: hexColor(amb.tint) ?? 0xffffff,
+          color: visibleFloor(hexColor(amb.tint) ?? 0xffffff, 0x40),
           count: Math.round(amb.rate * 64),
         }
       : this.archetype.particle;
@@ -1663,7 +1663,7 @@ class MainScene extends Phaser.Scene {
   private spawnSkyEvent(kind: "flare" | "drift" | "aurora" | "birds"): void {
     const w = this.scale.width || 800;
     const h = this.scale.height || 600;
-    const tint = hexColor(this.spec?.ambience.tint ?? "") ?? this.accent;
+    const tint = visibleFloor(hexColor(this.spec?.ambience.tint ?? "") ?? this.accent, 0x40);
     switch (kind) {
       case "flare": {
         const y0 = h * (0.06 + Math.random() * 0.2);
@@ -2030,7 +2030,10 @@ class MainScene extends Phaser.Scene {
       | Record<string, { roofColor?: string } | undefined>
       | undefined;
     const specRoof = arch?.[kind]?.roofColor;
-    if (specRoof) roofColor = hexColor(specRoof);
+    if (specRoof) {
+      const rc = hexColor(specRoof);
+      if (rc !== undefined) roofColor = visibleFloor(rc, 0x38);
+    }
     else if (this.theme) roofColor = soften(this.accent, 0.3);
     for (const part of composed.parts) {
       if (part.role !== "roof") continue;
@@ -2159,7 +2162,8 @@ class MainScene extends Phaser.Scene {
       return;
     }
     const tint = kind === "villager" ? u.villagerTint : kind === "hero" ? u.heroTint : u.raiderTint;
-    unit.applyTint(hexColor(tint));
+    const tc = hexColor(tint);
+    unit.applyTint(tc === undefined ? undefined : visibleFloor(tc, 0x55));
     unit.gaitScale = 0.4 + u.gaitBounce * 1.4;
   }
 
@@ -2436,10 +2440,11 @@ class MainScene extends Phaser.Scene {
     const hkey = `dp${hashStr(patch.district).toString(36)}`;
     const quarter = map.quarters.find((q) => q.path === patch.district);
     const rect: Rect = quarter?.rect ?? map.cityRect;
-    const accent = hexColor(patch.accent ?? "") ?? this.accent;
+    const accent = visibleFloor(hexColor(patch.accent ?? "") ?? this.accent, 0x50);
     const rng = mulberry32(hashStr(patch.district) ^ this.mapSeed);
 
-    const tint = hexColor(patch.groundTint);
+    const rawTint = hexColor(patch.groundTint);
+    const tint = rawTint === undefined ? undefined : visibleFloor(rawTint, 0x50);
     if (tint !== undefined) {
       const t = tintSplatTexture(this, `${hkey}-tint`, terrain, rect, tint, 0.3);
       rec.texKeys.push(t.key);
@@ -2703,11 +2708,11 @@ class MainScene extends Phaser.Scene {
     this.archetype = resolveArchetype(theme.biome.archetype, this.mapSeed);
     this.spec = theme.worldSpec ?? null;
     const themeAccent = hexColor(theme.biome.accentColor);
-    this.accent = visibleFloor(themeAccent ?? this.archetype.glow, 0x40);
+    this.accent = visibleFloor(themeAccent ?? this.archetype.glow, 0x50);
 
     this.cameras.main.setBackgroundColor(
       this.spec
-        ? visibleFloor(shade(hexColor(this.spec.sky.top) ?? this.archetype.skyColor, 0.35), 0x14)
+        ? visibleFloor(shade(hexColor(this.spec.sky.top) ?? this.archetype.skyColor, 0.35), 0x30)
         : this.archetype.skyColor,
     );
     this.redrawSky();
@@ -2721,13 +2726,13 @@ class MainScene extends Phaser.Scene {
         .map((c) => hexColor(c))
         .filter((c): c is number => c !== undefined);
       const mid = base[Math.floor(base.length / 2)];
-      if (mid !== undefined) groundTint = soften(mid, 0.45);
+      if (mid !== undefined) groundTint = soften(visibleFloor(mid, 0x60), 0.45);
     } else {
       const grass = theme.biome.grassColors
         .map((c) => hexColor(c))
         .filter((c): c is number => c !== undefined);
       const mid = grass[Math.floor(grass.length / 2)];
-      if (mid !== undefined) groundTint = soften(mid, 0.35);
+      if (mid !== undefined) groundTint = soften(visibleFloor(mid, 0x60), 0.35);
     }
     for (const img of this.groundImgs) {
       if (groundTint === undefined) img.clearTint();
@@ -2739,7 +2744,7 @@ class MainScene extends Phaser.Scene {
     }
 
     // fog color follows the theme (floored: unexplored land must stay readable)
-    const fogColor = visibleFloor(hexColor(theme.biome.fogColor) ?? this.archetype.fogColor, 0x26);
+    const fogColor = visibleFloor(hexColor(theme.biome.fogColor) ?? this.archetype.fogColor, 0x34);
     this.fogTexKey = fogTexture(this, fogColor, this.gen);
     for (const [, rec] of this.fogTiles) {
       if (rec.img.active) rec.img.setTexture(this.fogTexKey);

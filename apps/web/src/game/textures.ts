@@ -278,8 +278,8 @@ export function silhouetteTexture(
 
 /** Vertical sky gradient from a WorldSpec: top → horizon → haze. */
 export function specSkyTexture(scene: Phaser.Scene, sky: WorldSpec["sky"], gen: number): string {
-  const top = visibleFloor(hexColor(sky.top) ?? 0x2a2118, 0x22);
-  const horizon = visibleFloor(hexColor(sky.horizon) ?? 0x2a2118, 0x22);
+  const top = visibleFloor(hexColor(sky.top) ?? 0x2a2118, 0x38);
+  const horizon = visibleFloor(hexColor(sky.horizon) ?? 0x2a2118, 0x38);
   return canvasTexture(scene, `g${gen}-sky`, 16, 160, (ctx) => {
     const grad = ctx.createLinearGradient(0, 0, 0, 160);
     grad.addColorStop(0, css(top, 0.95));
