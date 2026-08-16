@@ -242,7 +242,20 @@ const webDist = path.resolve(
   "../../web/dist",
 );
 if (existsSync(webDist)) {
-  app.register(fastifyStatic, { root: webDist, wildcard: false });
+  app.register(fastifyStatic, {
+    root: webDist,
+    wildcard: false,
+    setHeaders(res, filePath) {
+      // Game art and hashed bundles are immutable; index.html must revalidate.
+      if (/\/assets\/(iso|3d)\//.test(filePath) || /assets\/.+-[A-Za-z0-9_-]{8,}\.\w+$/.test(filePath)) {
+        res.setHeader("cache-control", "public, max-age=31536000, immutable");
+      } else if (filePath.endsWith("index.html")) {
+        res.setHeader("cache-control", "no-cache");
+      } else {
+        res.setHeader("cache-control", "public, max-age=3600");
+      }
+    },
+  });
   // SPA fallback for /match/:id style routes.
   app.setNotFoundHandler((req, reply) => {
     if (req.raw.url?.startsWith("/api") || req.raw.url?.startsWith("/ws")) {
