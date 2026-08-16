@@ -3,7 +3,7 @@ import { heraldMessage, heraldCharge } from "@agent-empires/runtime";
 import type { FileNode, GameEvent } from "@agent-empires/protocol";
 import { hostMatch } from "./relay.js";
 import { createMatchView } from "./match-view.js";
-import { attachGameRenderer } from "./game/renderer.js";
+import { selectRenderer } from "./renderer-select.js";
 
 /**
  * A scripted skirmish for visitors without an API key: same event pipeline,
@@ -44,7 +44,7 @@ export async function startDemoMatch(root: HTMLElement): Promise<void> {
 
   root.innerHTML = "";
   const view = createMatchView(root, { matchId, title: "Demo Skirmish: The Broken Parser", role: "host" });
-  view.attachRenderer(attachGameRenderer(view.gameMount));
+  view.attachRenderer(await selectRenderer(view.gameMount));
 
   let aborted = false;
   window.addEventListener("hashchange", () => (aborted = true), { once: true });

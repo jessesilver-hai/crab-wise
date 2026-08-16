@@ -1,10 +1,10 @@
 import { spectateMatch } from "./relay.js";
 import { createMatchView } from "./match-view.js";
-import { attachGameRenderer } from "./game/renderer.js";
+import { selectRenderer } from "./renderer-select.js";
 
 export function renderSpectate(root: HTMLElement, matchId: string): void {
   const view = createMatchView(root, { matchId, title: "…", role: "spectator" });
-  view.attachRenderer(attachGameRenderer(view.gameMount));
+  void selectRenderer(view.gameMount).then((r) => view.attachRenderer(r));
   view.showOverlay("loading", "Fetching the chronicle…");
 
   let gotAny = false;

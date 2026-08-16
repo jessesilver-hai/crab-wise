@@ -484,6 +484,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
   const contextPct = new Map<string, number>();
   let population = 0;
   let renderer: Renderer | null = null;
+  const preAttach: Array<[GameEvent, boolean]> = [];
   let matchStats: Record<string, number> | null = null;
   let kingName = "";
 
@@ -660,7 +661,9 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       } else if (e.type !== "tokens" && e.type !== "context" && e.type !== "theme_ready") {
         addEntry(scribeFeed, "raw", escapeHtml(compactRaw(e)));
       }
-      renderer?.handleEvent(e, historical);
+      // Engine chunks load async; buffer world events until attach, then replay.
+      if (renderer) renderer.handleEvent(e, historical);
+      else preAttach.push([e, historical]);
       if (e.type === "match_ended") {
         view.showOverlay(e.result === "victory" ? "victory" : e.result === "defeat" ? "defeat" : "abandoned");
       }
@@ -728,6 +731,8 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         return undefined;
       });
       r.setExamineHandler?.((text) => addEntry(heraldFeed, "dim", `✦ ${escapeHtml(text)}`));
+      for (const [e, h] of preAttach) r.handleEvent(e, h);
+      preAttach.length = 0;
     },
   };
   return view;

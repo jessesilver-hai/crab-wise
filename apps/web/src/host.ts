@@ -2,7 +2,7 @@ import { Settlement, SandboxExecutor } from "@agent-empires/runtime";
 import type { ThemePack } from "@agent-empires/protocol";
 import { hostMatch } from "./relay.js";
 import { createMatchView } from "./match-view.js";
-import { attachGameRenderer } from "./game/renderer.js";
+import { selectRenderer } from "./renderer-select.js";
 import { getCachedTheme, generateTheme, repoKey } from "./themer.js";
 
 export type SettlementStart = {
@@ -66,7 +66,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     },
   });
   view.showOverlay("loading", "Raising the vessel — a sandbox wakes for this repository…");
-  view.attachRenderer(attachGameRenderer(view.gameMount));
+  void selectRenderer(view.gameMount).then((r) => view.attachRenderer(r));
 
   const abort = new AbortController();
   const warnUnload = (e: BeforeUnloadEvent) => e.preventDefault();
