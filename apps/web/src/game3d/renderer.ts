@@ -195,10 +195,20 @@ class Game3D {
     this.mount = mount;
     this.city = new City(this.assets);
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // Software rasterizers (SwiftShader/llvmpipe) burn CPU and RAM per pixel;
+    // degrade before allocating shadow maps rather than waiting for the FPS dip.
+    const gl = this.renderer.getContext();
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    const glName = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "";
+    const softwareGL = /swiftshader|llvmpipe|software/i.test(glName);
+    this.renderer.setPixelRatio(softwareGL ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setSize(mount.clientWidth || 800, mount.clientHeight || 600);
-    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.enabled = !softwareGL;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    if (softwareGL) {
+      this.degraded = true;
+      console.info(`[perf3d] software GL detected (${glName}); starting degraded`);
+    }
     this.renderer.domElement.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;";
     if (getComputedStyle(mount).position === "static") mount.style.position = "relative";
     mount.appendChild(this.renderer.domElement);
