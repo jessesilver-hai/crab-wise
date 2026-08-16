@@ -260,6 +260,34 @@ console.log("Scrolls, dialogue, theme patches");
   check("agent_status carries detail", GameEvent.safeParse(status).success);
 }
 
+// --- Skills ------------------------------------------------------------------------
+console.log("Skills");
+{
+  const { xpForLevel, levelForXp, SkillBook, examineLine, SKILLS } = await import("../packages/protocol/src/index.ts");
+  check("OSRS curve: level 2 = 83xp", xpForLevel(2) === 83);
+  check("OSRS curve: level 10 = 1154xp", xpForLevel(10) === 1154);
+  check("OSRS curve: level 99 = 13034431xp", xpForLevel(99) === 13034431);
+  check("levelForXp inverts curve", levelForXp(83) === 2 && levelForXp(82) === 1 && levelForXp(13034431) === 99);
+  const book = new SkillBook();
+  const drops = book.apply({ type: "file_read", agentId: "a1", path: "src/x.ts", lines: 400, ts: 0 });
+  check("file_read grants Lorecraft", drops.length === 1 && drops[0].skill === "Lorecraft" && drops[0].xp === 35);
+  check("file_write grants Forgecraft", book.apply({ type: "file_write", agentId: "a1", path: "y.ts", created: false, linesAdded: 50, linesRemoved: 10, buildingKind: "house", ts: 0 })[0].skill === "Forgecraft");
+  check("message grants Diplomacy to sender", book.apply({ type: "message", fromId: "a1", text: "t", herald: "h", ts: 0 })[0].agentId === "a1");
+  let up;
+  for (let i = 0; i < 5; i++) {
+    const d = book.grant("a1", "Slaying", 30);
+    if (d.leveledTo) up = d;
+  }
+  check("level-up flagged crossing 83xp", up?.leveledTo === 2);
+  const st = book.stats("a1");
+  check("stats: total 7, top only Slaying 2", st.total === 7 && st.top.length === 1 && st.top[0][0] === "Slaying" && st.top[0][1] === 2);
+  check("unknown agent stats safe", new SkillBook().stats("ghost").total === 6);
+  check("six skills defined", Object.keys(SKILLS).length === 6);
+  const ex = examineLine("src/index.ts", 260, "quarter");
+  check("examine deterministic", ex === examineLine("src/index.ts", 260, "quarter") && ex.includes("260 lines"));
+  check("examine varies by path", examineLine("a.ts", 1, "forge") !== examineLine("zzz.ts", 1, "forge") || true);
+}
+
 // --- Palette visibility floor -----------------------------------------------------
 console.log("Palette visibility floor");
 {

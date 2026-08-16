@@ -1,4 +1,15 @@
-import { BountyLedger, type GameEvent } from "@agent-empires/protocol";
+import {
+  BountyLedger,
+  SkillBook,
+  SKILLS,
+  examineLine,
+  districtArchetype,
+  type DistrictArchetype,
+  type FileNode,
+  type GameEvent,
+  type SkillName,
+  type SkillStats,
+} from "@agent-empires/protocol";
 
 export type Renderer = {
   handleEvent(e: GameEvent, historical: boolean): void;
@@ -9,6 +20,12 @@ export type Renderer = {
   setSpeakHandler?(cb: (agentId: string) => void): void;
   /** Optional: real command verbs — right-click a building (attend file) or raider (hunt test). */
   setOrderHandler?(cb: (kind: "attend" | "hunt", target: string, agentId?: string) => void): void;
+  /** Optional OSRS feel layer. */
+  showXpDrop?(agentId: string, skill: string, xp: number, color?: number): void;
+  showLevelUp?(agentId: string, skill: string, level: number): void;
+  setSkillStats?(agentId: string, stats: SkillStats): void;
+  setExamineProvider?(fn: (kind: "building" | "unit" | "raider" | "hook", id: string) => string | undefined): void;
+  setExamineHandler?(cb: (text: string) => void): void;
 };
 
 export type MatchView = {
@@ -176,6 +193,38 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
 
   // --- Bounty board: failing tests carry a price in renown -------------------
   const ledger = new BountyLedger();
+
+  // --- Skills: agents earn XP from real deeds --------------------------------
+  const skills = new SkillBook();
+  const pathLines = new Map<string, number>();
+  const dirArch = new Map<string, DistrictArchetype>();
+  function indexTree(root: FileNode): void {
+    for (const top of root.children ?? []) {
+      if (top.kind === "dir") {
+        dirArch.set(top.name, districtArchetype(top.name, (top.children ?? []).filter((c) => c.kind === "file").map((c) => c.name)));
+      }
+    }
+    (function walk(n: FileNode) {
+      if (n.kind === "file" && n.lines !== undefined) pathLines.set(n.path, n.lines);
+      (n.children ?? []).forEach(walk);
+    })(root);
+  }
+  function grantVisuals(drops: { agentId: string; skill: SkillName; xp: number; leveledTo?: number }[], historical: boolean) {
+    for (const d of drops) {
+      renderer?.setSkillStats?.(d.agentId, skills.stats(d.agentId));
+      if (historical) continue;
+      renderer?.showXpDrop?.(d.agentId, d.skill, d.xp, SKILLS[d.skill]);
+      if (d.leveledTo) {
+        renderer?.showLevelUp?.(d.agentId, d.skill, d.leveledTo);
+        addEntry(heraldFeed, "triumph", `⚔ ${escapeHtml(name(d.agentId))} has advanced <strong>${d.skill}</strong> to level <strong>${d.leveledTo}</strong>!`);
+      }
+    }
+  }
+  function agentIdByName(agentName: string): string | undefined {
+    for (const [id, n] of agentNames) if (n === agentName) return id;
+    return undefined;
+  }
+
   function renderBounties() {
     const bounties = ledger.bounties;
     if (bounties.length === 0) return;
@@ -184,8 +233,10 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     const badge = el("bounty-badge");
     badge.style.display = "";
     badge.textContent = String(open);
-    el("bounty-list").innerHTML = bounties
-      .map(
+    el("bounty-list").innerHTML =
+      `<div class="quest-points">✦ Quest Points: ${bounties.filter((b) => b.status === "cleared").length}</div>` +
+      bounties
+        .map(
         (b) => `<div class="bounty-row ${b.status}">
           <span class="bounty-name mono">${escapeHtml(b.name)}</span>
           <span class="bounty-meta">${
@@ -194,11 +245,11 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
               : `☨ ${b.value} renown`
           }</span>
         </div>`,
-      )
-      .join("");
+        )
+        .join("");
     el("res-renown").textContent = String(ledger.summary().renown);
   }
-  function applyBounties(e: GameEvent): void {
+  function applyBounties(e: GameEvent, historical: boolean): void {
     const { postedNow, clearedNow } = ledger.apply(e);
     if (postedNow.length > 0) {
       const total = postedNow.reduce((s, b) => s + b.value, 0);
@@ -214,6 +265,8 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         "triumph",
         `☨ Bounty claimed — <span class="mono">${escapeHtml(b.name)}</span> falls to ${escapeHtml(b.clearedBy ?? "unknown hands")} <strong>(+${b.value} renown)</strong>`,
       );
+      const slayer = b.clearedBy && agentIdByName(b.clearedBy);
+      if (slayer) grantVisuals([skills.grant(slayer, "Slaying", 150)], historical);
     }
     if (postedNow.length > 0 || clearedNow.length > 0 || e.type === "tokens") renderBounties();
   }
@@ -591,7 +644,9 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     onEvent(e, historical) {
       const entry = heraldFor(e);
       if (entry) addEntry(heraldFeed, entry.cls, entry.html);
-      applyBounties(e);
+      applyBounties(e, historical);
+      if (e.type === "match_started") indexTree(e.repoTree);
+      grantVisuals(skills.apply(e), historical);
       if (e.type === "file_write") recordWork(e);
       if (e.type === "scroll") recordScroll(e);
       if (e.type === "dialogue") appendDialogue(e);
@@ -659,6 +714,19 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       r.setInspectHandler?.((path) => void openInspect(path));
       r.setSpeakHandler?.((agentId) => openDialogue(agentId));
       if (opts.onOrder) r.setOrderHandler?.((kind, target, agentId) => opts.onOrder!(kind, target, agentId));
+      r.setExamineProvider?.((kind, id) => {
+        if (kind === "building" || kind === "hook") {
+          return examineLine(id, pathLines.get(id), dirArch.get(id.split("/")[0]!) ?? "quarter");
+        }
+        if (kind === "unit") {
+          const st = skills.stats(id);
+          const tops = st.top.map(([s, l]) => `${s} ${l}`).join(", ");
+          return `${name(id)} — a loyal hand of the realm. Total level ${st.total}.${tops ? ` (${tops})` : ""}`;
+        }
+        if (kind === "raider") return `${id} — a specter risen from failing trials. Slaying it pays renown.`;
+        return undefined;
+      });
+      r.setExamineHandler?.((text) => addEntry(heraldFeed, "dim", `✦ ${escapeHtml(text)}`));
     },
   };
   return view;

@@ -542,3 +542,17 @@ pre.diff .dl-hunk { color: var(--dim); display: inline; }
   margin-top: 3rem; line-height: 1.6;
 }
 .footer-note a { color: var(--gold); }
+
+/* --- OSRS quest-log feel for the bounty board --- */
+.quest-points {
+  font-family: "IM Fell English", serif;
+  color: #e8c86a;
+  border-bottom: 1px solid #6a5325;
+  padding: 2px 4px 6px;
+  margin-bottom: 6px;
+  letter-spacing: 0.06em;
+}
+.bounty-row.posted .bounty-name { color: #d64545; }
+.bounty-row.cleared .bounty-name { color: #3cb44b; text-decoration: none; }
+.bounty-row .bounty-name::before { content: "✦ "; opacity: 0.6; }
+.entry.dim { opacity: 0.65; font-style: italic; }

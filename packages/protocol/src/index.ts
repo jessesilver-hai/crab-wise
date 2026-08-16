@@ -635,6 +635,120 @@ export function districtArchetype(dirName: string, fileNames: string[] = []): Di
 }
 
 // ---------------------------------------------------------------------------
+// Skills — agents earn XP from real deeds (shared by live view and replays).
+// Levels follow the classic RuneScape curve, capped at 99.
+// ---------------------------------------------------------------------------
+
+export const SKILLS = {
+  Lorecraft: 0x3fa7d6, // reading files
+  Forgecraft: 0xe8873c, // writing files
+  Wayfaring: 0x7bc96f, // exploring dirs, searching
+  Trialcraft: 0xc84b4b, // running commands
+  Slaying: 0x9d5bd2, // clearing bounties (granted by the ledger keeper)
+  Diplomacy: 0xd8c25a, // messages and dialogue
+} as const;
+export type SkillName = keyof typeof SKILLS;
+
+// XP_TABLE[l-1] = cumulative XP required to hold level l.
+const XP_TABLE: number[] = (() => {
+  const t = [0];
+  let points = 0;
+  for (let lvl = 1; lvl < 99; lvl++) {
+    points += Math.floor(lvl + 300 * Math.pow(2, lvl / 7));
+    t.push(Math.floor(points / 4));
+  }
+  return t;
+})();
+
+export function xpForLevel(level: number): number {
+  return XP_TABLE[Math.max(1, Math.min(99, Math.floor(level))) - 1]!;
+}
+
+export function levelForXp(xp: number): number {
+  let lvl = 1;
+  while (lvl < 99 && XP_TABLE[lvl]! <= xp) lvl++;
+  return lvl;
+}
+
+export type XpDrop = {
+  agentId: string;
+  skill: SkillName;
+  xp: number;
+  /** Set when this grant crossed a level boundary. */
+  leveledTo?: number;
+};
+
+export type SkillStats = { total: number; top: [SkillName, number][] };
+
+export class SkillBook {
+  private xp = new Map<string, Map<SkillName, number>>();
+
+  grant(agentId: string, skill: SkillName, amount: number): XpDrop {
+    const book = this.xp.get(agentId) ?? new Map<SkillName, number>();
+    this.xp.set(agentId, book);
+    const before = book.get(skill) ?? 0;
+    const after = before + Math.max(0, Math.round(amount));
+    book.set(skill, after);
+    const drop: XpDrop = { agentId, skill, xp: after - before };
+    const lvl = levelForXp(after);
+    if (lvl > levelForXp(before)) drop.leveledTo = lvl;
+    return drop;
+  }
+
+  /** Deterministic XP for a game event; Slaying is granted separately on bounty clears. */
+  apply(e: GameEvent): XpDrop[] {
+    switch (e.type) {
+      case "file_read":
+        return [this.grant(e.agentId, "Lorecraft", 25 + Math.min(25, Math.floor((e.lines ?? 0) / 40)))];
+      case "file_write":
+        return [this.grant(e.agentId, "Forgecraft", 40 + Math.min(40, Math.floor((e.linesAdded + e.linesRemoved) / 10)))];
+      case "list_dir":
+        return [this.grant(e.agentId, "Wayfaring", 15)];
+      case "search":
+        return [this.grant(e.agentId, "Wayfaring", 10 + Math.min(15, e.matchCount))];
+      case "command_run":
+        return [this.grant(e.agentId, "Trialcraft", 30)];
+      case "message":
+        return [this.grant(e.fromId, "Diplomacy", 20)];
+      default:
+        return [];
+    }
+  }
+
+  stats(agentId: string): SkillStats {
+    const book = this.xp.get(agentId);
+    const levels: [SkillName, number][] = (Object.keys(SKILLS) as SkillName[]).map((s) => [
+      s,
+      levelForXp(book?.get(s) ?? 0),
+    ]);
+    const total = levels.reduce((a, [, l]) => a + l, 0);
+    const top = levels
+      .filter(([, l]) => l > 1)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+    return { total, top };
+  }
+}
+
+/** OSRS-style examine text: terse, dry, deterministic per path. */
+export function examineLine(path: string, lines: number | undefined, archetype: DistrictArchetype): string {
+  const flavors: Record<DistrictArchetype, string[]> = {
+    quarter: ["A hall of the artisan quarter.", "Somebody works hard in here.", "The lamps burn late here."],
+    proving: ["The proving grounds test all comers.", "Straw dummies bear old wounds.", "Banners of trials past."],
+    scriptorium: ["Ink, vellum, and patience.", "The scribes guard their commas.", "Knowledge, shelved and dusted."],
+    granary: ["Stores for the lean seasons.", "Counted twice, sealed once.", "The quartermaster's pride."],
+    watchtower: ["Eyes on every road.", "The watch never sleeps.", "Signal fires stand ready."],
+    forge: ["The anvils never cool.", "Soot and sparks and purpose.", "Hammer-song at all hours."],
+    bazaar: ["Wares from distant lands.", "Everything has a price.", "Bright cloth over old stone."],
+  };
+  let h = 0;
+  for (let i = 0; i < path.length; i++) h = (h * 31 + path.charCodeAt(i)) >>> 0;
+  const flavor = flavors[archetype][h % flavors[archetype].length]!;
+  const size = lines !== undefined ? ` ${lines} lines strong.` : "";
+  return `${path} — ${flavor}${size}`;
+}
+
+// ---------------------------------------------------------------------------
 // Bounties + renown (shared by web live view, relay Hall of Legends, replays)
 // ---------------------------------------------------------------------------
 
