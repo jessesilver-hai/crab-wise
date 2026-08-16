@@ -211,7 +211,7 @@ function placeWorld(
   ty: number,
   tex: string,
   frame: string | undefined,
-  opts: { tint?: number; oy?: number; claim?: boolean } = {},
+  opts: { tint?: number; oy?: number; claim?: boolean; scale?: number } = {},
 ): Phaser.GameObjects.Image | null {
   if (tx < 1 || ty < 1 || tx >= p.map.side - 1 || ty >= p.map.side - 1) return null;
   if (p.t.isWater(tx, ty) || p.t.isRoad(tx, ty)) return null;
@@ -225,6 +225,7 @@ function placeWorld(
     .image(g.x, g.y, tex, frame)
     .setOrigin(0.5, opts.oy ?? 1)
     .setDepth(g.y);
+  if (opts.scale !== undefined) img.setScale(opts.scale);
   if (opts.tint !== undefined) img.setTint(opts.tint);
   p.out.objs.push(img);
   return img;
@@ -256,13 +257,22 @@ function buildWalls(p: Placer, q: Quarter): void {
     const nearGate = Math.abs(b.tx - gate.tx) + Math.abs(b.ty - gate.ty) <= 1;
     if (nearGate) continue;
     if (!b.corner && (b.tx + b.ty) % step !== 0) continue;
+    // low walls: full posts only at corners; run posts thin out to every
+    // fourth tile and shrink to 60% so the ring reads as a boundary line,
+    // not a row of pillars
+    const runLow = !tall && !b.corner;
+    if (runLow && (b.tx + b.ty) % 4 !== 0) continue;
     const frame = b.corner
       ? tall
         ? WALL_TOWERS[(b.tx * 7 + b.ty) % WALL_TOWERS.length]!
         : W.towerB
       : segs[(b.tx * 5 + b.ty * 3) % segs.length]!;
     // wall blocks: base sits ~18px above the frame bottom (skirt overlaps ground)
-    placeWorld(p, b.tx, b.ty, SHEET.walls, frame, { tint: WALL_TINT, oy: 0.86 });
+    placeWorld(p, b.tx, b.ty, SHEET.walls, frame, {
+      tint: WALL_TINT,
+      oy: 0.86,
+      scale: runLow ? 0.6 : 1,
+    });
   }
   // the gate arch stands on the gate tile itself (road passes beneath)
   const g = groundPoint(p, gate.tx, gate.ty);

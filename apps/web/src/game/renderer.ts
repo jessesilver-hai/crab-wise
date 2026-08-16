@@ -115,6 +115,15 @@ export type GameRendererHandle = Renderer & {
   setInspectHandler(cb: (path: string) => void): void;
   setSpeakHandler(cb: (agentId: string) => void): void;
   setOrderHandler(cb: (kind: "attend" | "hunt", target: string, agentId?: string) => void): void;
+  /** Receives every Examine one-liner shown in-world (herald echo). */
+  setExamineHandler(cb: (text: string) => void): void;
+  /** Supplies Examine text; return undefined to fall back to built-in lines. */
+  setExamineProvider(
+    fn: (kind: "building" | "unit" | "raider" | "hook", id: string) => string | undefined,
+  ): void;
+  showXpDrop(agentId: string, skill: string, xp: number, color?: number): void;
+  showLevelUp(agentId: string, skill: string, level: number): void;
+  setSkillStats(agentId: string, stats: { total: number; top: [string, number][] }): void;
 };
 
 export function attachGameRenderer(mount: HTMLElement): GameRendererHandle {
@@ -148,6 +157,21 @@ export function attachGameRenderer(mount: HTMLElement): GameRendererHandle {
     },
     setOrderHandler(cb) {
       scene.onOrder = cb;
+    },
+    setExamineHandler(cb) {
+      scene.onExamine = cb;
+    },
+    setExamineProvider(fn) {
+      scene.examineProvider = fn;
+    },
+    showXpDrop(agentId, skill, xp, color) {
+      scene.showXpDrop(agentId, skill, xp, color);
+    },
+    showLevelUp(agentId, skill, level) {
+      scene.showLevelUp(agentId, skill, level);
+    },
+    setSkillStats(agentId, stats) {
+      scene.setSkillStats(agentId, stats);
     },
   };
 }
@@ -276,6 +300,23 @@ type Selection =
 
 type CardAction = { y: number; h: number; cb: () => void };
 
+/** One row of the right-click context menu; cb === null means Cancel. */
+type MenuEntry = { label: string; cb: (() => void) | null };
+
+type CtxMenu = {
+  root: Phaser.GameObjects.Container;
+  hi: Phaser.GameObjects.Graphics;
+  texts: Phaser.GameObjects.Text[];
+  entries: MenuEntry[];
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rowTop: number;
+  rowH: number;
+  hiIdx: number;
+};
+
 // ---------------------------------------------------------------------------
 
 class MainScene extends Phaser.Scene {
@@ -322,6 +363,10 @@ class MainScene extends Phaser.Scene {
   onInspect: ((path: string) => void) | null = null;
   onSpeak: ((agentId: string) => void) | null = null;
   onOrder: ((kind: "attend" | "hunt", target: string, agentId?: string) => void) | null = null;
+  onExamine: ((text: string) => void) | null = null;
+  examineProvider:
+    | ((kind: "building" | "unit" | "raider" | "hook", id: string) => string | undefined)
+    | null = null;
   private hovered: Phaser.GameObjects.GameObject | null = null;
   private hoverMarker!: Phaser.GameObjects.Image;
   private selectMarker!: Phaser.GameObjects.Image;
@@ -349,6 +394,16 @@ class MainScene extends Phaser.Scene {
   private boxing = false;
   private mmDragging = false;
   private bandG!: Phaser.GameObjects.Graphics;
+
+  // OSRS feel layer: hover action text, context menu, examine, xp drops
+  private actionMain!: Phaser.GameObjects.Text;
+  private actionSub!: Phaser.GameObjects.Text;
+  private actionNow = "";
+  private menu: CtxMenu | null = null;
+  private suppressLeftUp = false;
+  private examineToast: Phaser.GameObjects.Container | null = null;
+  private xpNextAt = new Map<string, number>();
+  private skillStats = new Map<string, { total: number; top: [string, number][] }>();
 
   constructor() {
     super("main");
@@ -386,6 +441,7 @@ class MainScene extends Phaser.Scene {
 
     this.buildNameplate();
     this.buildCard();
+    this.buildActionText();
     this.setupInput();
 
     this.scale.on("resize", () => {
@@ -436,6 +492,22 @@ class MainScene extends Phaser.Scene {
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
       panLastX = p.x;
       panLastY = p.y;
+      if (this.menu) {
+        const m = this.menu;
+        if (p.leftButtonDown()) {
+          // clicks while the menu is open never reach the world beneath it
+          this.suppressLeftUp = true;
+          const inside = p.x >= m.x && p.x <= m.x + m.w && p.y >= m.y && p.y <= m.y + m.h;
+          let entry: MenuEntry | undefined;
+          if (inside && p.y - m.y >= m.rowTop) {
+            entry = m.entries[Math.floor((p.y - m.y - m.rowTop) / m.rowH)];
+          }
+          this.closeMenu();
+          entry?.cb?.();
+          return;
+        }
+        this.closeMenu();
+      }
       if (p.rightButtonDown()) {
         this.rightDown = { x: p.x, y: p.y };
         this.panning = false;
@@ -497,10 +569,17 @@ class MainScene extends Phaser.Scene {
         const wasPan = this.panning;
         this.rightDown = null;
         this.panning = false;
-        if (!wasPan) this.issueOrder(p);
+        if (!wasPan) this.openMenu(p);
         return;
       }
       if (!p.leftButtonReleased()) return;
+      if (this.suppressLeftUp) {
+        this.suppressLeftUp = false;
+        this.leftDown = null;
+        this.boxing = false;
+        this.bandG.clear();
+        return;
+      }
       const down = this.leftDown;
       this.leftDown = null;
       if (this.boxing) {
@@ -646,58 +725,438 @@ class MainScene extends Phaser.Scene {
       .filter((r): r is AgentRec => r !== undefined);
   }
 
-  /** Right-click: hunt a raider / attend a building / cosmetic move order. */
-  private issueOrder(p: Phaser.Input.Pointer): void {
-    if (this.minimap?.hit(p.x, p.y)) return;
-    const hits = this.input.hitTestPointer(p).filter((o) => o.active);
-    const byKind = (k: string) => hits.find((o) => o.getData("kind") === k);
-    const agentId = this.firstSelectedAgent();
-    const raider = byKind("raider");
-    if (raider) {
-      const name = raider.getData("name") as string;
-      this.onOrder?.("hunt", name, agentId);
-      const key = raider.getData("key") as string;
-      const rrec = this.raiders.get(key);
-      if (rrec) {
-        this.convergeSelected(rrec.unit.x, rrec.unit.y + 14);
-        this.waypointFlag(rrec.unit.x, rrec.unit.y + 8, 0xd05a48);
-        this.float(`⚔ hunt: ${name.slice(0, 24)}`, rrec.unit.x, rrec.unit.y - 20, 0xd05a48);
-      }
-      console.info(`HUNT:${name}`);
-      return;
+  /** Post a hunt on a raider (context-menu "Slay"). */
+  private orderHunt(key: string, agentId?: string): void {
+    const rrec = this.raiders.get(key);
+    const name = rrec?.name ?? key;
+    this.onOrder?.("hunt", name, agentId);
+    if (rrec) {
+      this.convergeSelected(rrec.unit.x, rrec.unit.y + 14);
+      this.waypointFlag(rrec.unit.x, rrec.unit.y + 8, 0xd05a48);
+      this.float(`⚔ hunt: ${name.slice(0, 24)}`, rrec.unit.x, rrec.unit.y - 20, 0xd05a48);
     }
-    const building = byKind("building");
-    if (building) {
-      const path = building.getData("path") as string;
-      if (path !== "__towncenter__") {
-        this.onOrder?.("attend", path, agentId);
-        const rec = this.buildings.get(path);
-        if (rec) {
-          const gx = isoX(rec.tx, rec.ty);
-          const gy = this.groundYAt(rec.tx, rec.ty);
-          this.convergeSelected(gx, gy + 18);
-          this.waypointFlag(gx, gy + TILE_H / 4, this.accent);
-          this.float("⚑ attend", gx, gy - 24, this.accent);
-        }
-        console.info(`ATTEND:${path}`);
-        return;
-      }
+    console.info(`HUNT:${name}`);
+  }
+
+  /** Send a worker to a building (context-menu "Attend"). */
+  private orderAttend(path: string, agentId?: string): void {
+    if (path === "__towncenter__") return;
+    this.onOrder?.("attend", path, agentId);
+    const rec = this.buildings.get(path);
+    if (rec) {
+      const gx = isoX(rec.tx, rec.ty);
+      const gy = this.groundYAt(rec.tx, rec.ty);
+      this.convergeSelected(gx, gy + 18);
+      this.waypointFlag(gx, gy + TILE_H / 4, this.accent);
+      this.float("⚑ attend", gx, gy - 24, this.accent);
     }
-    // ground: cosmetic move order for the current selection
+    console.info(`ATTEND:${path}`);
+  }
+
+  /** Cosmetic move order for the current selection, world coords. */
+  private walkHere(wx: number, wy: number): void {
+    this.waypointFlag(wx, wy, this.accent);
     const recs = this.selectedAgentRecs();
-    const w = this.cameras.main.getWorldPoint(p.x, p.y);
-    this.waypointFlag(w.x, w.y, this.accent);
     if (recs.length === 0) return;
     recs.forEach((rec, i) => {
       const ang = (i / recs.length) * Math.PI * 2;
       const rad = recs.length > 1 ? 14 + 6 * Math.sqrt(i) : 0;
-      const tx = w.x + Math.cos(ang) * rad;
-      const ty = w.y + Math.sin(ang) * rad * 0.5;
+      const tx = wx + Math.cos(ang) * rad;
+      const ty = wy + Math.sin(ang) * rad * 0.5;
       const dist = Math.hypot(tx - rec.unit.x, ty - rec.unit.y);
       rec.unit.walkTo(tx, ty);
       rec.holdUntil = this.time.now + (dist / rec.unit.walkSpeed) * 1000 + 3200;
       rec.nextMoveAt = rec.holdUntil;
     });
+  }
+
+  // --- OSRS feel: action text + context menu + examine -----------------------
+
+  /** Highest-priority interactive object under the pointer (issue-order order). */
+  private pickTarget(p: Phaser.Input.Pointer): Phaser.GameObjects.GameObject | null {
+    const hits = this.input.hitTestPointer(p).filter((o) => o.active);
+    for (const k of ["unit", "raider", "building", "hamlet", "hook", "landmark", "prop"]) {
+      const hit = hits.find((o) => o.getData("kind") === k);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /**
+   * Context-menu rows for a target. Row 0 is the default action (also shown
+   * as the hover action text); the last row is always Cancel. (sx, sy) is the
+   * screen point examine toasts anchor to; (wx, wy) the world point for walks.
+   */
+  private menuEntriesFor(
+    target: Phaser.GameObjects.GameObject | null,
+    wx: number,
+    wy: number,
+    sx: number,
+    sy: number,
+  ): MenuEntry[] {
+    const entries: MenuEntry[] = [];
+    const agentId = this.firstSelectedAgent();
+    const kind = target?.getData("kind") as string | undefined;
+    if (kind === "unit" && target) {
+      const id = target.getData("id") as string;
+      const rec = this.agents.get(id);
+      const who = rec ? shortName(rec.name) : "the worker";
+      const fallback = rec
+        ? `${rec.name}. ${rec.role === "orchestrator" ? "Sovereign of the realm; gives the orders." : "A diligent worker of the realm."}`
+        : "A worker of the realm.";
+      entries.push({ label: `Talk-to ${who}`, cb: () => this.onSpeak?.(id) });
+      entries.push({ label: "Examine", cb: () => this.examine("unit", id, fallback, sx, sy) });
+    } else if (kind === "raider" && target) {
+      const key = target.getData("key") as string;
+      const name = ((target.getData("name") as string) ?? "the specter").slice(0, 26);
+      entries.push({ label: `Slay ${name}`, cb: () => this.orderHunt(key, agentId) });
+      entries.push({
+        label: "Examine",
+        cb: () =>
+          this.examine("raider", name, "A failing test given form. Best slain quickly.", sx, sy),
+      });
+    } else if (kind === "building" && target) {
+      const path = target.getData("path") as string;
+      const rec = this.buildings.get(path);
+      const citadel = path === "__towncenter__";
+      if (!citadel) {
+        const leaf = path.split("/").pop() ?? path;
+        entries.push({
+          label: `Attend house of ${leaf}`,
+          cb: () => this.orderAttend(path, agentId),
+        });
+      }
+      const lines = this.map?.weights.get(path) ?? Math.max(1, rec?.linesAdded ?? 1);
+      const fallback = citadel
+        ? "The Citadel. Seat of the sovereign and heart of the realm."
+        : `A sturdy hall of the quarter. ${lines} lines strong.`;
+      entries.push({
+        label: citadel ? "Examine The Citadel" : "Examine",
+        cb: () => this.examine("building", path, fallback, sx, sy),
+      });
+      if (rec) {
+        const gx = isoX(rec.tx, rec.ty);
+        const gy = this.groundYAt(rec.tx, rec.ty);
+        entries.push({ label: "Walk here", cb: () => this.walkHere(gx, gy + 18) });
+      }
+    } else if (kind === "hook" && target) {
+      const path = target.getData("path") as string;
+      const label = ((target.getData("label") as string) ?? "the obelisk").slice(0, 30);
+      const snippet = target.getData("snippet") as string | undefined;
+      const fallback = snippet
+        ? `An old obelisk etched: “${snippet}”`
+        : "An old obelisk that poses a question.";
+      entries.push({ label: `Read ${label}`, cb: () => this.onInspect?.(path) });
+      entries.push({ label: "Examine", cb: () => this.examine("hook", path, fallback, sx, sy) });
+    } else if (kind === "hamlet" && target) {
+      const dir = (target.getData("dir") as string) || ".";
+      const count = (target.getData("count") as number) ?? 0;
+      const fallback = `${count} smaller works stand here, aggregated for scale.`;
+      entries.push({
+        label: `Examine ${dir}/ hamlet`,
+        cb: () => this.examine(null, dir, fallback, sx, sy),
+      });
+      entries.push({ label: "Walk here", cb: () => this.walkHere(wx, wy) });
+    } else if ((kind === "landmark" || kind === "prop") && target) {
+      const name = ((target.getData("name") as string) ?? "Curiosity").slice(0, 30);
+      const fallback = (target.getData("lore") as string) ?? "A curiosity of the realm.";
+      entries.push({
+        label: `Examine ${name}`,
+        cb: () => this.examine(null, name, fallback, sx, sy),
+      });
+    } else {
+      entries.push({ label: "Walk here", cb: () => this.walkHere(wx, wy) });
+    }
+    entries.push({ label: "Cancel", cb: null });
+    return entries;
+  }
+
+  /** Right-click release (no pan): the OSRS "Choose Option" menu. */
+  private openMenu(p: Phaser.Input.Pointer): void {
+    this.closeMenu();
+    if (!this.map || this.minimap?.hit(p.x, p.y)) return;
+    const target = this.pickTarget(p);
+    const w0 = this.cameras.main.getWorldPoint(p.x, p.y);
+    const entries = this.menuEntriesFor(target, w0.x, w0.y, p.x, p.y);
+    const rowH = 16;
+    const headH = 18;
+    const pad = 6;
+    const root = this.add.container(0, 0).setScrollFactor(0).setDepth(D_UI + 6);
+    const bg = this.add.graphics();
+    const hi = this.add.graphics();
+    root.add([bg, hi]);
+    const head = this.add
+      .text(pad + 2, 3, "Choose Option", {
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: "11px",
+        color: "#c8a86b",
+        fontStyle: "bold",
+      })
+      .setResolution(DPR);
+    root.add(head);
+    const rowTop = headH + pad / 2;
+    const texts: Phaser.GameObjects.Text[] = [];
+    let wMax = head.width;
+    entries.forEach((e, i) => {
+      const t = this.add
+        .text(pad + 2, rowTop + i * rowH + 2, e.label, {
+          fontFamily: "IBM Plex Mono, monospace",
+          fontSize: "11px",
+          color: i === 0 && e.cb ? "#ffe9a8" : "#e4dcc4",
+        })
+        .setResolution(DPR);
+      root.add(t);
+      texts.push(t);
+      wMax = Math.max(wMax, t.width);
+    });
+    const w = Math.max(120, Math.ceil(wMax) + pad * 2 + 6);
+    const h = rowTop + entries.length * rowH + pad;
+    const sw = this.scale.width || 800;
+    const sh = this.scale.height || 600;
+    const x = Phaser.Math.Clamp(Math.round(p.x - w / 2), 4, Math.max(4, sw - w - 4));
+    const y = Phaser.Math.Clamp(Math.round(p.y - 6), 4, Math.max(4, sh - h - 4));
+    root.setPosition(x, y);
+    bg.fillStyle(0x171208, 0.96);
+    bg.fillRect(0, 0, w, h);
+    bg.fillStyle(0x2a1f0f, 1);
+    bg.fillRect(1, 1, w - 2, headH - 2);
+    bg.lineStyle(1, 0xc8a84b, 0.9);
+    bg.strokeRect(0.5, 0.5, w - 1, h - 1);
+    this.menu = { root, hi, texts, entries, x, y, w, h, rowTop, rowH, hiIdx: -1 };
+  }
+
+  private closeMenu(): void {
+    this.menu?.root.destroy();
+    this.menu = null;
+  }
+
+  /** Examine: parchment toast + optional herald echo via onExamine. */
+  private examine(
+    kind: "building" | "unit" | "raider" | "hook" | null,
+    id: string,
+    fallback: string,
+    sx: number,
+    sy: number,
+  ): void {
+    const text = (kind ? this.examineProvider?.(kind, id) : undefined) ?? fallback;
+    this.showExamineToast(text, sx, sy);
+    this.onExamine?.(text);
+    console.info(`EXAMINE:${text}`);
+  }
+
+  private showExamineToast(text: string, sx: number, sy: number): void {
+    this.examineToast?.destroy();
+    const t = this.add
+      .text(10, 8, text, {
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: "11px",
+        color: "#3b2d17",
+        wordWrap: { width: 220 },
+        lineSpacing: 3,
+      })
+      .setResolution(DPR);
+    const w = t.width + 20;
+    const h = t.height + 16;
+    const bg = this.add.graphics();
+    bg.fillStyle(0xe8d9b0, 0.96);
+    bg.fillRoundedRect(0, 0, w, h, 5);
+    bg.lineStyle(1, 0x5a4527, 0.9);
+    bg.strokeRoundedRect(0, 0, w, h, 5);
+    const x = Phaser.Math.Clamp(sx + 10, 4, Math.max(4, (this.scale.width || 800) - w - 4));
+    const y = Phaser.Math.Clamp(sy + 12, 4, Math.max(4, (this.scale.height || 600) - h - 4));
+    const c = this.add.container(x, y, [bg, t]).setScrollFactor(0).setDepth(D_UI + 7).setAlpha(0);
+    this.examineToast = c;
+    this.tweens.add({ targets: c, alpha: 1, duration: 140 });
+    this.tweens.add({
+      targets: c,
+      alpha: 0,
+      delay: 2600,
+      duration: 400,
+      onComplete: () => {
+        if (this.examineToast === c) this.examineToast = null;
+        c.destroy();
+      },
+    });
+  }
+
+  /** OSRS-style yellow action text pinned to the canvas top-left. */
+  private buildActionText(): void {
+    this.actionMain = this.add
+      .text(10, 8, "", {
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: "12px",
+        color: "#ffe93b",
+        fontStyle: "bold",
+      })
+      .setResolution(DPR)
+      .setScrollFactor(0)
+      .setDepth(D_UI + 3)
+      .setShadow(1, 1, "#000000", 2, true, true)
+      .setVisible(false);
+    this.actionSub = this.add
+      .text(10, 8, "", {
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: "12px",
+        color: "#a89f8c",
+      })
+      .setResolution(DPR)
+      .setScrollFactor(0)
+      .setDepth(D_UI + 3)
+      .setShadow(1, 1, "#000000", 2, true, true)
+      .setVisible(false);
+  }
+
+  private updateActionText(pointer: Phaser.Input.Pointer): void {
+    let main = "";
+    let sub = "";
+    const overCard =
+      this.card.visible &&
+      pointer.x >= this.card.x &&
+      pointer.x <= this.card.x + CARD_W &&
+      pointer.y >= this.card.y &&
+      pointer.y <= this.card.y + this.cardH;
+    const overMini = !!this.minimap?.hit(pointer.x, pointer.y);
+    if (this.map && !this.menu && !overCard && !overMini) {
+      const target = this.hovered && this.hovered.active ? this.hovered : null;
+      const entries = this.menuEntriesFor(target, 0, 0, pointer.x, pointer.y);
+      const first = entries[0];
+      if (first?.cb) {
+        main = first.label;
+        const more = entries.length - 2; // minus the default row and Cancel
+        if (more > 0) sub = ` / ${more} more option${more === 1 ? "" : "s"}`;
+      }
+    }
+    const key = `${main}|${sub}`;
+    if (key === this.actionNow) return;
+    this.actionNow = key;
+    if (!main) {
+      this.actionMain.setVisible(false);
+      this.actionSub.setVisible(false);
+      return;
+    }
+    this.actionMain.setText(main).setVisible(true);
+    this.actionSub.setText(sub).setVisible(sub.length > 0);
+    this.actionSub.setX(10 + this.actionMain.width + 2);
+  }
+
+  // --- OSRS feel: xp drops, level-ups, skill stats ---------------------------
+
+  private xpDiamondTex(): string {
+    const key = "ui-xpdiamond";
+    if (this.textures.exists(key)) return key;
+    const c = document.createElement("canvas");
+    c.width = 12;
+    c.height = 12;
+    const ctx = c.getContext("2d")!;
+    ctx.beginPath();
+    ctx.moveTo(6, 0.8);
+    ctx.lineTo(11.2, 6);
+    ctx.lineTo(6, 11.2);
+    ctx.lineTo(0.8, 6);
+    ctx.closePath();
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.85)";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    this.textures.addCanvas(key, c);
+    return key;
+  }
+
+  /** Floating "+40 Forgecraft" drop; multiple drops per agent queue up. */
+  showXpDrop(agentId: string, skill: string, xp: number, color = 0x62c9e8): void {
+    if (!this.ready || !this.agents.has(agentId)) return;
+    const now = this.time.now;
+    const start = Math.max(now, this.xpNextAt.get(agentId) ?? 0);
+    this.xpNextAt.set(agentId, start + 300);
+    const spawn = () => {
+      const rec = this.agents.get(agentId);
+      if (!rec) return;
+      const icon = this.add.image(0, 0, this.xpDiamondTex()).setTint(color);
+      const label = this.add
+        .text(0, 0, `+${xp} ${skill}`, {
+          fontFamily: "IBM Plex Mono, monospace",
+          fontSize: "12px",
+          color: "#f8f4e6",
+          fontStyle: "bold",
+        })
+        .setOrigin(0, 0.5)
+        .setResolution(DPR)
+        .setShadow(1, 1, "#000000", 2, true, true);
+      const total = 15 + label.width;
+      icon.setX(-total / 2 + 6);
+      label.setX(icon.x + 9);
+      const c = this.add.container(rec.unit.x, rec.unit.y - 36, [icon, label]).setDepth(D_FX + 4);
+      this.tweens.add({ targets: c, y: c.y - 40, duration: 1200, ease: "Sine.easeOut" });
+      this.tweens.add({
+        targets: c,
+        alpha: 0,
+        delay: 550,
+        duration: 650,
+        onComplete: () => c.destroy(),
+      });
+    };
+    if (start <= now) spawn();
+    else this.time.delayedCall(start - now, spawn);
+  }
+
+  /** Firework burst + gold banner above the unit. */
+  showLevelUp(agentId: string, skill: string, level: number): void {
+    if (!this.ready) return;
+    const rec = this.agents.get(agentId);
+    if (!rec) return;
+    const x = rec.unit.x;
+    const y = rec.unit.y - 30;
+    const tints = [0xffd75e, 0xfff2c8, this.accent, 0xffb347];
+    for (let i = 0; i < 18; i++) {
+      const a = (i / 18) * Math.PI * 2 + Math.random() * 0.3;
+      const d = 26 + Math.random() * 30;
+      const img = this.add
+        .image(x, y, this.fxTex.soft)
+        .setTint(tints[i % tints.length]!)
+        .setBlendMode(Phaser.BlendModes.ADD)
+        .setDepth(D_FX + 5)
+        .setScale(0.4 + Math.random() * 0.5);
+      this.tweens.add({
+        targets: img,
+        x: x + Math.cos(a) * d,
+        y: y + Math.sin(a) * d * 0.7 + 8,
+        alpha: 0,
+        scale: 0.1,
+        duration: 650 + Math.random() * 450,
+        ease: "Cubic.easeOut",
+        onComplete: () => img.destroy(),
+      });
+    }
+    const banner = this.add
+      .text(x, y - 14, `⚔ ${skill} Level ${level}!`, {
+        fontFamily: "Cinzel, Georgia, serif",
+        fontSize: "14px",
+        color: "#ffd75e",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5, 1)
+      .setDepth(D_FX + 6)
+      .setResolution(DPR)
+      .setShadow(1, 1, "#000000", 3, true, true)
+      .setScale(0.2);
+    this.tweens.add({ targets: banner, scale: 1, duration: 260, ease: "Back.easeOut" });
+    this.tweens.add({ targets: banner, y: y - 26, duration: 2000, ease: "Sine.easeOut" });
+    this.tweens.add({
+      targets: banner,
+      alpha: 0,
+      delay: 1550,
+      duration: 450,
+      onComplete: () => banner.destroy(),
+    });
+  }
+
+  /** Store skill levels for the unit card's stat block. */
+  setSkillStats(agentId: string, stats: { total: number; top: [string, number][] }): void {
+    this.skillStats.set(agentId, stats);
+    if (this.ready && this.selected?.kind === "units" && this.selected.ids.includes(agentId)) {
+      this.refreshCard();
+    }
   }
 
   private convergeSelected(x: number, y: number): void {
@@ -829,7 +1288,7 @@ class MainScene extends Phaser.Scene {
     } else if (kind === "raider") {
       const rec = this.raiders.get(obj.getData("key") as string);
       if (rec) {
-        label = `${rec.name} · right-click to hunt`;
+        label = `${rec.name} · right-click for options`;
         rec.unit.hovered = true;
       }
     } else if (kind === "building") {
@@ -1015,8 +1474,13 @@ class MainScene extends Phaser.Scene {
         if (rec.sitePath) lines.push(`at: ${truncPath(rec.sitePath)}`);
         if (rec.charge)
           lines.push(`charge: ${rec.charge.length > 120 ? rec.charge.slice(0, 120) + "…" : rec.charge}`);
+        const st = this.skillStats.get(id);
+        if (st) {
+          lines.push(`⚜ Total level ${st.total}`);
+          for (const [sk, lv] of st.top.slice(0, 3)) lines.push(`   ${sk} · ${lv}`);
+        }
         if (rec.sitePath && this.onInspect) lines.push("⌕ click again to open its worksite");
-        lines.push("↷ right-click: move · building = attend · foe = hunt");
+        lines.push("↷ right-click for options");
         if (this.onSpeak) {
           actions.push({ label: `🗨 Speak with ${shortName(rec.name)}`, cb: () => this.onSpeak?.(id) });
         }
@@ -1079,7 +1543,7 @@ class MainScene extends Phaser.Scene {
       } else if (kind === "raider") {
         title = (obj.getData("name") as string) ?? "Specter";
         lines.push("a failing test given form");
-        lines.push("↷ right-click to post the hunt");
+        lines.push("↷ right-click · Slay to post the hunt");
       } else {
         title = (obj.getData("name") as string) ?? "Curiosity";
         lines.push(kind === "landmark" ? "landmark" : "curiosity");
@@ -2522,6 +2986,29 @@ class MainScene extends Phaser.Scene {
       const ny = Math.max(4, pointer.y - this.nameplateText.height - 16);
       this.nameplate.setPosition(nx, ny);
     }
+
+    // context menu: row hover highlight
+    if (this.menu) {
+      const m = this.menu;
+      const lx = pointer.x - m.x;
+      const ly = pointer.y - m.y;
+      let idx = -1;
+      if (lx >= 0 && lx <= m.w && ly >= m.rowTop && ly <= m.h) {
+        idx = Math.floor((ly - m.rowTop) / m.rowH);
+        if (idx >= m.entries.length) idx = -1;
+      }
+      if (idx !== m.hiIdx) {
+        m.hiIdx = idx;
+        m.hi.clear();
+        if (idx >= 0) {
+          m.hi.fillStyle(0xc8a84b, 0.22);
+          m.hi.fillRect(2, m.rowTop + idx * m.rowH, m.w - 4, m.rowH);
+        }
+      }
+    }
+
+    // OSRS hover action text
+    this.updateActionText(pointer);
     let overAction = false;
     if (this.card.visible) {
       const lx = pointer.x - this.card.x;

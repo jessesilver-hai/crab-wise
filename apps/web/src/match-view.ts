@@ -715,6 +715,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       r.setSpeakHandler?.((agentId) => openDialogue(agentId));
       if (opts.onOrder) r.setOrderHandler?.((kind, target, agentId) => opts.onOrder!(kind, target, agentId));
       r.setExamineProvider?.((kind, id) => {
+        if (id === "__towncenter__") return "The Citadel — seat of the Crown. All roads lead here.";
         if (kind === "building" || kind === "hook") {
           return examineLine(id, pathLines.get(id), dirArch.get(id.split("/")[0]!) ?? "quarter");
         }
