@@ -69,7 +69,21 @@ export function buildTerrain(map: MapLayout, seed: number): TerrainInfo {
     }
   }
 
-  const heightAt = (tx: number, ty: number) => (inCity(tx, ty) ? 1 : 0);
+  // layout-law water (coastline, archipelago channels, rivers): carved to sea
+  // level so city channels get cliff banks; bridge tiles stay road-height land
+  const carved = new Uint8Array(side * side);
+  for (const key of map.water) {
+    if (map.bridges.has(key)) continue;
+    const [tx, ty] = key.split(",").map(Number);
+    if (!inBounds(tx!, ty!)) continue;
+    const i = ty! * side + tx!;
+    carved[i] = 1;
+    water[i] = 1;
+    map.used.add(key);
+  }
+
+  const heightAt = (tx: number, ty: number) =>
+    inBounds(tx, ty) && carved[ty * side + tx] === 1 ? 0 : inCity(tx, ty) ? 1 : 0;
 
   return {
     side,

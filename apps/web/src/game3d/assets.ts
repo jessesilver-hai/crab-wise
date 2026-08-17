@@ -34,6 +34,7 @@ export const MODEL_FILES: Record<string, string> = {
   // nature
   tree_A: "nature/tree_single_A.glb",
   tree_B: "nature/tree_single_B.glb",
+  tree_cut: "nature/tree_single_A_cut.glb",
   trees_small: "nature/trees_A_small.glb",
   trees_medium: "nature/trees_A_medium.glb",
   trees_B_medium: "nature/trees_B_medium.glb",
@@ -47,9 +48,24 @@ export const MODEL_FILES: Record<string, string> = {
   target: "props/target.glb",
   weaponrack: "props/weaponrack.glb",
   book_set: "props/book_set.glb",
+  book_single: "props/book_single.glb",
   sack: "props/sack.glb",
   crate_big: "props/crate_A_big.glb",
   barrel: "props/barrel.glb",
+  // world-DNA district props (keys match WorldDNA.props vocabulary)
+  banner_red: "props/banner_red.glb",
+  banner_blue: "props/banner_blue.glb",
+  tent: "props/tent.glb",
+  torch_lit: "props/torch_lit.glb",
+  torch_mounted: "props/torch_mounted.glb",
+  crate_A_small: "props/crate_A_small.glb",
+  crate_A_big: "props/crate_A_big.glb",
+  crate_open: "props/crate_open.glb",
+  wheelbarrow: "props/wheelbarrow.glb",
+  flag_blue: "props/flag_blue.glb",
+  resource_lumber: "props/resource_lumber.glb",
+  resource_stone: "props/resource_stone.glb",
+  chest: "props/chest.glb",
   // characters
   Rogue: "characters/Rogue.glb",
   Barbarian: "characters/Barbarian.glb",
@@ -172,37 +188,47 @@ export class Assets {
     const file = MODEL_FILES[key];
     if (!file) return Promise.resolve();
     return new Promise((resolve) => {
-      this.loader.load(
-        BASE + file,
-        (gltf) => {
-          try {
-            if (CHARACTER_KEYS.has(key)) {
-              const scene = gltf.scene;
-              scene.updateMatrixWorld(true);
-              const box = new THREE.Box3().setFromObject(scene);
-              const clips = new Map<string, THREE.AnimationClip>();
-              for (const clip of gltf.animations) {
-                clips.set(clip.name.split("|").pop() ?? clip.name, clip);
+      // fetches issued in the first moments of page life can abort spuriously
+      // (observed under headless SwiftShader); retry with backoff before
+      // declaring the model failed
+      const attempt = (triesLeft: number) => {
+        this.loader.load(
+          BASE + file,
+          (gltf) => {
+            try {
+              if (CHARACTER_KEYS.has(key)) {
+                const scene = gltf.scene;
+                scene.updateMatrixWorld(true);
+                const box = new THREE.Box3().setFromObject(scene);
+                const clips = new Map<string, THREE.AnimationClip>();
+                for (const clip of gltf.animations) {
+                  clips.set(clip.name.split("|").pop() ?? clip.name, clip);
+                }
+                this.chars.set(key, { scene, clips, height: Math.max(0.001, box.max.y - box.min.y) });
+              } else {
+                this.statics.set(key, bakeStatic(gltf.scene));
               }
-              this.chars.set(key, { scene, clips, height: Math.max(0.001, box.max.y - box.min.y) });
-            } else {
-              this.statics.set(key, bakeStatic(gltf.scene));
+              for (const cb of this.listeners.get(key) ?? []) cb(key);
+              this.listeners.delete(key);
+            } catch (err) {
+              this.failed.add(key);
+              console.error(`[assets3d] bake failed for ${key}:`, err);
             }
-            for (const cb of this.listeners.get(key) ?? []) cb(key);
-            this.listeners.delete(key);
-          } catch (err) {
+            resolve();
+          },
+          undefined,
+          (err) => {
+            if (triesLeft > 0) {
+              setTimeout(() => attempt(triesLeft - 1), 450 * (3 - triesLeft + 1));
+              return;
+            }
             this.failed.add(key);
-            console.error(`[assets3d] bake failed for ${key}:`, err);
-          }
-          resolve();
-        },
-        undefined,
-        (err) => {
-          this.failed.add(key);
-          console.error(`[assets3d] load failed for ${key}:`, err);
-          resolve();
-        },
-      );
+            console.error(`[assets3d] load failed for ${key}:`, err);
+            resolve();
+          },
+        );
+      };
+      attempt(3);
     });
   }
 

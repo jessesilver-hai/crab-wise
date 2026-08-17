@@ -1,4 +1,5 @@
 import { districtArchetype, type DistrictArchetype, type FileNode } from "@agent-empires/protocol";
+import { analyzeCensus } from "./census.js";
 
 /**
  * Structural-isomorphism layout: the settlement is a recursive treemap of the
@@ -7,6 +8,12 @@ import { districtArchetype, type DistrictArchetype, type FileNode } from "@agent
  * else file count); every file is a building plot; roads are exactly the
  * parent↔child tree edges. The layout is a pure function of
  * (repoTree, weights, mapSeed) — no unseeded randomness anywhere.
+ *
+ * Landmass law (v2): the water is code-made too. The coastline is a seeded
+ * scallop that never bites the city; a monorepo floods the corridors between
+ * its top-level packages into sea channels (an archipelago, bridged where
+ * the roads cross); nesting ≥ RIVER_MIN_DEPTH sends a river from the deepest
+ * quarter's gate to the sea.
  */
 
 export const TILE_W = 64;
@@ -18,8 +25,10 @@ export const STEP = 10;
 export const MAX_INDIVIDUAL_BUILDINGS = 1200;
 export const AGGREGATE_THRESHOLD = 1500;
 
-/** Wilderness ring around the city plateau (purely cosmetic terrain). */
-export const WILD_MARGIN = 7;
+/** Wilderness ring around the city plateau (coast + vegetation live here). */
+export const WILD_MARGIN = 9;
+/** Nesting depth at which a river is carved from the deepest quarter. */
+export const RIVER_MIN_DEPTH = 5;
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
@@ -63,6 +72,12 @@ export type MapLayout = {
   used: Set<string>;
   townCenter: { tx: number; ty: number };
   rng: () => number;
+  /** Tiles under water: coast, monorepo channels, rivers. Never city floor. */
+  water: Set<string>;
+  /** Road tiles that cross water — rendered as bridges (subset of roads). */
+  bridges: Set<string>;
+  /** Land tiles orthogonally adjacent to water (shore tinting). */
+  coast: Set<string>;
 };
 
 export function mulberry32(seed: number): () => number {
@@ -405,6 +420,156 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
     }
   }
 
+  // ---- water: the landmass is code-made too ---------------------------------
+  const census = analyzeCensus(tree);
+  const water = new Set<string>();
+  const inRect = (tx: number, ty: number, r: Rect) => tx >= r.x && ty >= r.y && tx < r.x + r.w && ty < r.y + r.h;
+  const inAnyQuarter = (tx: number, ty: number) => quarters.some((q) => inRect(tx, ty, q.rect));
+  const dry = (tx: number, ty: number) => used.has(`${tx},${ty}`);
+
+  // 1. Scalloped coastline: a seeded max-norm radius per angle. The scallop
+  //    amplitude is capped so the sea never comes within 2 tiles of the city.
+  {
+    const crng = mulberry32((seed ^ 0xc0a57) >>> 0);
+    const harmonics = [1, 2, 3, 5].map((k) => ({
+      k,
+      amp: (WILD_MARGIN - 3) * (0.2 + 0.8 * crng()) * (1 / (1 + k * 0.6)),
+      phase: crng() * Math.PI * 2,
+    }));
+    const ampSum = harmonics.reduce((n, h) => n + h.amp, 0) || 1;
+    const cx = (side - 1) / 2;
+    const cy = (side - 1) / 2;
+    const baseR = side / 2 - 1.5;
+    for (let ty = 0; ty < side; ty++) {
+      for (let tx = 0; tx < side; tx++) {
+        const u = tx - cx;
+        const v = ty - cy;
+        const rad = Math.max(Math.abs(u), Math.abs(v));
+        if (rad <= citySide / 2 + 1) continue; // never near the city
+        const theta = Math.atan2(v, u);
+        let a = 0;
+        for (const h of harmonics) a += h.amp * (1 + Math.sin(h.k * theta + h.phase)) * 0.5;
+        const coastR = baseR - (a / ampSum) * (WILD_MARGIN - 3);
+        if (rad > coastR && !dry(tx, ty)) water.add(`${tx},${ty}`);
+      }
+    }
+  }
+
+  // 2. Monorepo archipelago: each package quarter becomes an islet. A
+  //    container dir (packages/, apps/, …) dissolves into a bay holding its
+  //    children; other top-level quarters keep their own shores. Everything
+  //    outside an islet or plaza floods; roads become the bridges.
+  const MONOREPO_CONTAINER = /^(packages|apps|crates|services|libs|modules|projects|workspaces|plugins)\/?$/i;
+  const depth1 = quarters.filter((q) => q.depth === 1);
+  const containers = depth1.filter((q) => MONOREPO_CONTAINER.test(q.label));
+  if (census.monorepo && containers.length > 0) {
+    const isles: Rect[] = [
+      ...quarters.filter((q) => containers.some((c) => q.depth === 2 && q.parentPath === c.path)).map((q) => q.rect),
+      ...depth1.filter((q) => !containers.includes(q)).map((q) => q.rect),
+    ];
+    // container-interior file areas (stray root-level files of the container)
+    const dryAreas = filesAreas
+      .filter((a) => a.dirPath === tree.path || containers.some((c) => a.dirPath === c.path))
+      .map((a) => a.rect);
+    if (isles.length >= 2) {
+      for (let ty = cityRect.y; ty < cityRect.y + cityRect.h; ty++) {
+        for (let tx = cityRect.x; tx < cityRect.x + cityRect.w; tx++) {
+          if (isles.some((r) => inRect(tx, ty, r))) continue;
+          if (dryAreas.some((r) => inRect(tx, ty, r))) continue;
+          if (dry(tx, ty)) continue;
+          water.add(`${tx},${ty}`);
+        }
+      }
+    }
+  }
+
+  // 3. River: deep nesting sends a river from the flank of the deepest
+  //    quarter's top-level ancestor out to the sea — threading corridors,
+  //    sidestepping quarters, never entering one.
+  if (census.maxDepth >= RIVER_MIN_DEPTH && quarters.length > 0) {
+    const byPath = new Map(quarters.map((q) => [q.path, q]));
+    const deepest = [...quarters].sort((a, b) => b.depth - a.depth || (a.path < b.path ? -1 : 1))[0]!;
+    let anc = deepest;
+    while (anc.depth > 1) anc = byPath.get(anc.parentPath) ?? anc;
+    const A = anc.rect;
+    const acx = A.x + A.w / 2;
+    const acy = A.y + A.h / 2;
+    const exits = [
+      { d: acx, dx: -1, dy: 0 },
+      { d: side - acx, dx: 1, dy: 0 },
+      { d: acy, dx: 0, dy: -1 },
+      { d: side - acy, dx: 0, dy: 1 },
+    ].sort((p, q) => p.d - q.d);
+    const dir = exits[0]!;
+    // headwater: just off the ancestor's flank, mid-rect on the cross axis
+    let tx = dir.dx !== 0 ? (dir.dx < 0 ? A.x - 1 : A.x + A.w) : Math.floor(acx);
+    let ty = dir.dy !== 0 ? (dir.dy < 0 ? A.y - 1 : A.y + A.h) : Math.floor(acy);
+    const rrng = mulberry32((seed ^ 0x51e77) >>> 0);
+    // upstream stretch: the river rises among the deep quarters, running along
+    // the ancestor's flank corridor before it turns for the sea
+    {
+      let ux = tx;
+      let uy = ty;
+      for (let s = 0; s < 9; s++) {
+        // hug the flank: move along the cross axis (perpendicular to exit)
+        if (dir.dx !== 0) uy += 1;
+        else ux += 1;
+        if (ux <= 0 || uy <= 0 || ux >= side - 1 || uy >= side - 1) break;
+        if (inAnyQuarter(ux, uy) || dry(ux, uy)) break;
+        water.add(`${ux},${uy}`);
+      }
+    }
+    let sideStep = rrng() < 0.5 ? -1 : 1;
+    let guard = side * 4;
+    while (tx > 0 && ty > 0 && tx < side - 1 && ty < side - 1 && guard-- > 0) {
+      if (inAnyQuarter(tx, ty)) {
+        // sidestep along the cross axis until clear — never enter a quarter
+        if (dir.dx !== 0) ty += sideStep;
+        else tx += sideStep;
+        continue;
+      }
+      const key = `${tx},${ty}`;
+      const reachedSea = water.has(key);
+      if (!dry(tx, ty)) water.add(key);
+      if (reachedSea) break;
+      // widen to a 2-tile bed once out in the wilderness
+      if (!inRect(tx, ty, cityRect)) {
+        const wx = tx + (dir.dx === 0 ? 1 : 0);
+        const wy = ty + (dir.dy === 0 ? 1 : 0);
+        if (!dry(wx, wy) && !inAnyQuarter(wx, wy)) water.add(`${wx},${wy}`);
+      }
+      // seeded meander on the cross axis
+      if (rrng() < 0.3) {
+        const mx = tx + (dir.dx === 0 ? (rrng() < 0.5 ? -1 : 1) : 0);
+        const my = ty + (dir.dy === 0 ? (rrng() < 0.5 ? -1 : 1) : 0);
+        if (!inAnyQuarter(mx, my) && !dry(mx, my)) {
+          tx = mx;
+          ty = my;
+          water.add(`${tx},${ty}`);
+        }
+      }
+      tx += dir.dx;
+      ty += dir.dy;
+      if (rrng() < 0.15) sideStep = -sideStep; // rivers wander both ways
+    }
+  }
+
+  // Bridges are exactly the roads that cross water; the roads themselves are
+  // untouched so tree-edge connectivity is preserved by construction.
+  const bridges = new Set<string>();
+  for (const r of roads) if (water.has(r)) bridges.add(r);
+  const coast = new Set<string>();
+  for (const key of water) {
+    const [wtx, wty] = key.split(",").map(Number) as [number, number];
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = wtx + dx;
+      const ny = wty + dy;
+      const nk = `${nx},${ny}`;
+      if (nx < 0 || ny < 0 || nx >= side || ny >= side) continue;
+      if (!water.has(nk)) coast.add(nk);
+    }
+  }
+
   return {
     side,
     cityRect,
@@ -418,6 +583,9 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
     used,
     townCenter,
     rng,
+    water,
+    bridges,
+    coast,
   };
 }
 
@@ -443,7 +611,7 @@ export function assignPlot(map: MapLayout, path: string): { tx: number; ty: numb
         const ty = cy + dy;
         if (tx < 1 || ty < 1 || tx >= map.side - 1 || ty >= map.side - 1) continue;
         const key = `${tx},${ty}`;
-        if (map.used.has(key) || map.roads.has(key)) continue;
+        if (map.used.has(key) || map.roads.has(key) || map.water.has(key)) continue;
         map.used.add(key);
         const cell = { tx, ty };
         map.plots.set(path, cell);
@@ -485,5 +653,9 @@ export function layoutHash(map: MapLayout): string {
   for (const hm of map.hamlets) mix(`h:${hm.dirPath}:${hm.tx},${hm.ty},${hm.count};`);
   const roadKeys = [...map.roads].sort();
   for (const r of roadKeys) mix(`r:${r};`);
+  const waterKeys = [...map.water].sort();
+  for (const w of waterKeys) mix(`w:${w};`);
+  const bridgeKeys = [...map.bridges].sort();
+  for (const b of bridgeKeys) mix(`g:${b};`);
   return h.toString(16).padStart(8, "0");
 }

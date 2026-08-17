@@ -55,6 +55,19 @@ Also set biome.archetype to whichever of "ash-steppe", "harbor-citadel", "oracle
 "glacier-vault", "verdant-ruin", "dune-monolith" best fits this repository's domain — it
 selects the world's terrain, props, and weather.
 
+THE LAW OF ISOMORPHISM. You will receive a CODE CENSUS: measured facts about this
+repository (language shares, test/docs/config ratios, nesting depth, monorepo-ness,
+giant-file share). The land must EXPRESS those facts so plainly that a visitor could
+guess the census from the terrain alone:
+- choose biome.archetype for the code's true temperament, not the prettiest option;
+- set world.timeOfDay and world.vegetation only to sharpen that expression
+  (e.g. a barren dusk for a dying C relic, a lush dawn for a well-tended garden repo);
+- write 3-6 world.worldLore entries that CITE the numbers — e.g.
+  { "subject": "walls", "line": "The walls stand triple-ringed — trials guard 31% of all lines." }
+  These become examine-text in the world; they are the visitor's Rosetta stone.
+- never default to a temperate green field unless the census truly reads garden;
+  two different repositories must never feel like the same land.
+
 Rules for text: faction name ≤ 5 words; tagline one evocative sentence; the king is the
 sovereign-figure title; enemyName is what failing tests are called (plural, ominous, domain-tied);
 herald openers/closers are short liturgical fragments; personas are 4-6 workers with name,
@@ -103,6 +116,8 @@ export async function generateTheme(opts: {
   repoLabel: string;
   readme: string;
   treeSummary: string;
+  /** Measured code facts (censusBrief) — the Law of Isomorphism's evidence. */
+  censusBrief?: string;
 }): Promise<ThemePack | null> {
   const client = new Anthropic({
     apiKey: opts.apiKey || "crown-funded",
@@ -132,8 +147,29 @@ export async function generateTheme(opts: {
                   grassColors: { type: "array", items: { type: "string" }, description: "3-4 ground-tile hex colors" },
                   fogColor: { type: "string" },
                   accentColor: { type: "string" },
+                  archetype: {
+                    type: "string",
+                    enum: ["ash-steppe", "harbor-citadel", "oracle-forge", "glacier-vault", "verdant-ruin", "dune-monolith"],
+                  },
                 },
-                required: ["grassColors", "fogColor", "accentColor"],
+                required: ["grassColors", "fogColor", "accentColor", "archetype"],
+              },
+              world: {
+                type: "object",
+                description: "Isomorphism sharpeners; every choice must express a census fact.",
+                properties: {
+                  timeOfDay: { type: "string", enum: ["dawn", "noon", "dusk", "night"] },
+                  vegetation: { type: "string", enum: ["barren", "sparse", "wooded", "lush"] },
+                  worldLore: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: { subject: { type: "string" }, line: { type: "string" } },
+                      required: ["subject", "line"],
+                    },
+                    description: "3-6 examine-lore lines that cite census numbers",
+                  },
+                },
               },
               heraldOpeners: { type: "array", items: { type: "string" } },
               heraldClosers: { type: "array", items: { type: "string" } },
@@ -219,6 +255,9 @@ export async function generateTheme(opts: {
         {
           role: "user",
           content: `Repository: ${opts.repoLabel}
+
+CODE CENSUS (measured — the land must express these facts):
+${opts.censusBrief ?? "(census unavailable — derive temperament from the tree)"}
 
 README (truncated):
 ${opts.readme.slice(0, 5000) || "(no readme)"}

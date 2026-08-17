@@ -25,6 +25,8 @@ import {
 } from "../game/map.js";
 import { visibleFloor } from "../game/palette.js";
 import { resolveArchetype, type Archetype } from "../game/archetypes.js";
+import { analyzeCensus, type Census } from "../game/census.js";
+import { deriveWorldDNA, type TimeOfDay, type WorldDNA } from "../game/worlddna.js";
 import { Assets } from "./assets.js";
 import { RtsCamera } from "./camera.js";
 import { City, type BuildingRec3D, type PickInfo } from "./city.js";
@@ -39,6 +41,18 @@ const FOG_REVEAL_RADIUS = 2;
 const MAX_RAIDERS = 8;
 const CONSTRUCTION_MS = 1400;
 const IDLE_STATUSES: ReadonlySet<AgentStatus> = new Set(["idle", "resting", "done"]);
+
+/** Worldsmith timeOfDay override → sun remap (curated, DNA-register). */
+const TIME_OF_DAY: Record<TimeOfDay, { azimuth: number; elevation: number; color: number }> = {
+  dawn: { azimuth: 0.8, elevation: 0.35, color: 0xf5c9a0 },
+  noon: { azimuth: 1.6, elevation: 0.55, color: 0xfff2dc },
+  dusk: { azimuth: 3.9, elevation: 0.18, color: 0xff9a5a },
+  night: { azimuth: 4.7, elevation: 0.25, color: 0x9db8dc },
+};
+/** Worldsmith vegetation override → density multiplier over DNA. */
+const VEGETATION_MULT: Record<string, number> = { barren: 0.15, sparse: 0.5, wooded: 1.0, lush: 1.6 };
+/** Ambient never drops below this — the night world stays readable. */
+const AMBIENT_FLOOR = 0.35;
 
 /** The renderer handle: match-view's Renderer plus the in-world hooks. */
 export type GameRendererHandle = Renderer & {
@@ -150,6 +164,9 @@ class Game3D {
   private map: MapLayout | null = null;
   private mapSeed = 1;
   private archetype: Archetype = resolveArchetype(undefined, 0);
+  private census: Census | null = null;
+  private dna: WorldDNA | null = null;
+  private landLoreIdx = 0;
   private theme: ThemePack | null = null;
   private spec: WorldSpec | null = null;
   private accent = 0xe3b264;
@@ -260,6 +277,10 @@ class Game3D {
       worldReady: () => this.map !== null,
       layoutHash: () => this.layoutHashValue,
       map: () => this.map,
+      dna: () => this.dna,
+      waterTilesRendered: () => this.ground.waterTileCount,
+      bridgesRendered: () => this.ground.bridgeCount,
+      decorStats: () => this.city.decorStats(),
       buildings: () => this.city.buildings,
       instanceCount: () => this.city.buildingInstanceCount(),
       drawCalls: () => this.renderer.info.render.calls,
@@ -512,9 +533,29 @@ class Game3D {
       entries.push({ label: `Examine ${name}`, cb: () => this.examine(null, name, fallback, sx, sy) });
     } else {
       entries.push({ label: "Walk here", cb: () => this.walkHere(wx, wz) });
+      entries.push({ label: "Examine the land", cb: () => this.examineLand(wx, wz, sx, sy) });
     }
     entries.push({ label: "Cancel", cb: null });
     return entries;
+  }
+
+  /**
+   * Ground examine: cite the world's DNA. Prefers Worldsmith worldLore, else
+   * derived loreNotes; water picks archipelago/river lines, land the rest.
+   * Cycles through applicable lines on repeat examines.
+   */
+  private examineLand(wx: number, wz: number, sx: number, sy: number): void {
+    const onWater = this.map?.water.has(`${Math.round(wx)},${Math.round(wz)}`) ?? false;
+    const themeLore = this.theme?.world?.worldLore;
+    const pool = (themeLore && themeLore.length > 0 ? themeLore : this.dna?.loreNotes) ?? [];
+    const subjectRe = onWater ? /archipelago|river|water|sea|shore|coast/i : /realm|wall|fort|megalith|script/i;
+    let lines = pool.filter((l) => subjectRe.test(l.subject));
+    if (lines.length === 0) lines = pool;
+    const fallback = onWater
+      ? "Dark water. Even the coastline here was shaped by the code."
+      : "The living ground of the realm.";
+    const line = lines.length > 0 ? lines[this.landLoreIdx++ % lines.length]!.line : fallback;
+    this.examine(null, "the land", line, sx, sy);
   }
 
   private openMenuAt(px: number, py: number): void {
@@ -620,9 +661,17 @@ class Game3D {
     const hash = layoutHash(map);
     this.layoutHashValue = hash;
 
-    this.ground.build(map, event.mapSeed);
+    // world DNA: measured code facts → render directives (theme may override)
+    this.census = analyzeCensus(event.repoTree);
+    const dna = this.applyWorldOverrides(
+      deriveWorldDNA(this.census, event.mapSeed, this.theme?.biome.archetype),
+    );
+    this.dna = dna;
+
+    this.ground.build(map, event.mapSeed, dna);
     this.ground.onFogTile = (tx, ty, alpha) => this.city.setTileLight(tx, ty, alpha);
-    this.city.buildWorld(map, event.mapSeed, this.archetypeAt, this.ground.fogAlphaAt);
+    this.city.buildWorld(map, event.mapSeed, this.archetypeAt, this.ground.fogAlphaAt, dna, this.degraded);
+    this.city.retintFlags(dna.buildingTint.trim);
     this.buildDistrictLabels(map);
 
     for (const hm of map.hamlets) for (const p of hm.paths) this.hamletByPath.set(p, hm);
@@ -631,10 +680,8 @@ class Game3D {
     this.citadel = { x: tc.tx, z: tc.ty, tx: tc.tx, ty: tc.ty };
     this.ground.reveal(tc.tx, tc.ty, 4, true);
 
-    // sun over the map, shadow frustum covering the whole city
-    const cx = map.side / 2;
-    this.sun.position.set(cx - map.side * 0.55, map.side * 0.9, cx - map.side * 0.35);
-    this.sun.target.position.set(cx, 0, cx);
+    // sun from DNA, shadow frustum covering the whole city
+    this.applySun(dna);
     const d = map.side * 0.72;
     const sc = this.sun.shadow.camera;
     sc.left = -d;
@@ -1043,6 +1090,49 @@ class Game3D {
     }
   }
 
+  // --- world DNA ---------------------------------------------------------------
+
+  /** Fold ThemePack.world overrides (timeOfDay/vegetation) into the DNA. */
+  private applyWorldOverrides(dna: WorldDNA): WorldDNA {
+    const world = this.theme?.world;
+    if (!world) return dna;
+    let sun = dna.sun;
+    if (world.timeOfDay) {
+      const t = TIME_OF_DAY[world.timeOfDay];
+      sun = {
+        timeOfDay: world.timeOfDay,
+        azimuth: t.azimuth,
+        elevation: t.elevation,
+        color: t.color,
+        ambient: Math.max(AMBIENT_FLOOR, dna.sun.ambient),
+      };
+    }
+    let vegetation = dna.vegetation;
+    if (world.vegetation) {
+      const mult = VEGETATION_MULT[world.vegetation] ?? 1;
+      vegetation = { ...vegetation, density: Math.min(1, Math.max(0, vegetation.density * mult)) };
+    }
+    return { ...dna, sun, vegetation };
+  }
+
+  /** Point the directional light per dna.sun; DNA colors are curated. */
+  private applySun(dna: WorldDNA): void {
+    const map = this.map;
+    if (!map) return;
+    const cx = map.side / 2;
+    const el = (0.12 + Math.min(1, Math.max(0, dna.sun.elevation)) * 0.78) * (Math.PI / 2);
+    const dist = map.side * 0.9;
+    this.sun.position.set(
+      cx + Math.cos(dna.sun.azimuth) * dist * Math.cos(el),
+      Math.max(map.side * 0.2, dist * Math.sin(el)),
+      cx + Math.sin(dna.sun.azimuth) * dist * Math.cos(el),
+    );
+    this.sun.target.position.set(cx, 0, cx);
+    this.sun.color.set(dna.sun.color);
+    this.sun.intensity = 1.1 + dna.sun.elevation * 0.8;
+    this.ambient.intensity = Math.max(AMBIENT_FLOOR, dna.sun.ambient);
+  }
+
   // --- theme -------------------------------------------------------------------
 
   /** ThemePack arrived: re-tint sky, lights, ground, banners, units in place. */
@@ -1050,6 +1140,20 @@ class Game3D {
     this.theme = theme;
     this.archetype = resolveArchetype(theme.biome.archetype, this.mapSeed);
     this.spec = theme.worldSpec ?? null;
+
+    // re-derive DNA under the theme's form override + world overrides, then
+    // re-apply everything DNA-driven (ground colors, decor, tints, sun)
+    if (this.census) {
+      this.dna = this.applyWorldOverrides(
+        deriveWorldDNA(this.census, this.mapSeed, theme.biome.archetype),
+      );
+    }
+    if (this.map && this.dna) {
+      this.ground.setDna(this.dna.ground);
+      this.city.buildDecor(this.map, this.mapSeed, this.dna, this.degraded);
+      this.city.retintBuildings(this.dna.buildingTint.roof);
+      this.applySun(this.dna);
+    }
     const themeAccent = hexColor(theme.biome.accentColor);
     this.accent = visibleFloor(themeAccent ?? this.archetype.glow, 0x50);
 

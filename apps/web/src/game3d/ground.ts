@@ -1,10 +1,12 @@
 // Ground plane (vertex-colored treemap districts + roads + plaza + shore),
-// animated water ring, and the fog-of-war veil. All placement colors derive
-// from the map layout + mulberry32(seed) — no unseeded randomness.
+// animated water (outer sea + map.water tiles), bridges, and the fog-of-war
+// veil. All placement colors derive from the map layout + mulberry32(seed) +
+// the census-derived world DNA — no unseeded randomness.
 import * as THREE from "three";
-import type { DistrictPatch } from "@agent-empires/protocol";
+import type { DistrictArchetype, DistrictPatch } from "@agent-empires/protocol";
 import { mulberry32, quarterOf, type MapLayout } from "../game/map.js";
 import { visibleFloor } from "../game/palette.js";
+import type { WorldDNA } from "../game/worlddna.js";
 import { ARCH_TINT, mixColor, scaleColor, soften } from "./util.js";
 
 const BASE_GRASS = 0x55703c;
@@ -13,6 +15,23 @@ const ROAD = 0x6b5a41;
 const PLAZA = 0x8d8878;
 const SAND = 0xb9a878;
 const WATER = 0x2a4a5e;
+const BRIDGE_PLANK = 0x8a6b46;
+/** Water surface sits below the land plane; the bed dips beneath it. */
+const WATER_Y = -0.06;
+
+type GroundColors = WorldDNA["ground"];
+
+const FALLBACK_COLORS: GroundColors = {
+  base: BASE_GRASS,
+  wild: WILD_GRASS,
+  road: ROAD,
+  plaza: PLAZA,
+  shore: SAND,
+  water: WATER,
+  district: Object.fromEntries(
+    Object.entries(ARCH_TINT).map(([k, v]) => [k, soften(v, 0.5)]),
+  ) as Record<DistrictArchetype, number>,
+};
 
 export class Ground {
   readonly group = new THREE.Group();
@@ -27,6 +46,16 @@ export class Ground {
   private jitter: Float32Array = new Float32Array(0);
   private patchTints = new Map<string, number>(); // district path → tint
   private themeTint: number | undefined;
+  private colors: GroundColors = FALLBACK_COLORS;
+
+  // inland water + bridges (map.water / map.bridges)
+  private waterTiles: THREE.Mesh | null = null;
+  private waterTilesMat: THREE.MeshLambertMaterial;
+  private bridgeMesh: THREE.InstancedMesh | null = null;
+  private bridgeMat: THREE.MeshLambertMaterial | null = null;
+  /** Rendered counts, exposed for the smoke battery. */
+  waterTileCount = 0;
+  bridgeCount = 0;
 
   // fog veil
   private veil: THREE.Mesh | null = null;
@@ -62,9 +91,24 @@ export class Ground {
     this.water.rotation.x = -Math.PI / 2;
     this.water.position.y = -0.1;
     this.group.add(this.water);
+
+    // inland water: geometry is baked in world coords (no mesh rotation), so
+    // the wave uses position.x/z rather than the plane-local x/y above
+    this.waterTilesMat = new THREE.MeshLambertMaterial({ color: WATER, transparent: true, opacity: 0.92 });
+    this.waterTilesMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this.waterUniforms.uTime;
+      shader.vertexShader =
+        "uniform float uTime;\n" +
+        shader.vertexShader.replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+           transformed.y += sin(uTime * 1.3 + position.x * 0.55 + position.z * 0.4) * 0.03;`,
+        );
+    };
   }
 
-  build(map: MapLayout, seed: number): void {
+  build(map: MapLayout, seed: number, dna?: WorldDNA): void {
+    if (dna) this.colors = dna.ground;
     this.map = map;
     this.side = map.side;
     const side = map.side;
@@ -81,6 +125,7 @@ export class Ground {
     for (let i = 0; i < side * side; i++) this.jitter[i] = rand();
     this.tileBase = new Int32Array(side * side);
     this.tileColors = new Int32Array(side * side);
+    this.applyWaterRelief(geo, map);
     this.computeTileBase();
     this.paint();
 
@@ -88,39 +133,156 @@ export class Ground {
     this.water.geometry = new THREE.PlaneGeometry(side * 5, side * 5, 40, 40);
     this.water.rotation.x = -Math.PI / 2;
     this.water.position.set((side - 1) / 2, -0.1, (side - 1) / 2);
+    (this.water.material as THREE.MeshLambertMaterial).color.set(this.colors.water);
 
+    this.buildWaterTiles(map);
+    this.buildBridges(map);
     this.buildVeil(map);
   }
 
-  /** Static per-tile color: district tint, road, plaza, shoreline. */
+  /** Re-derive all DNA-driven colors in place (form change via reskin). */
+  setDna(colors: GroundColors): void {
+    this.colors = colors;
+    (this.water.material as THREE.MeshLambertMaterial).color.set(colors.water);
+    this.waterTilesMat.color.set(colors.water);
+    if (this.map) {
+      this.computeTileBase();
+      this.paint();
+    }
+  }
+
+  /** Dip land-plane vertices under water tiles so the sea reads as sunken. */
+  private applyWaterRelief(geo: THREE.PlaneGeometry, map: MapLayout): void {
+    if (map.water.size === 0) return;
+    const side = map.side;
+    const att = geo.getAttribute("position") as THREE.BufferAttribute;
+    for (let iz = 0; iz <= side; iz++) {
+      for (let ix = 0; ix <= side; ix++) {
+        let wet = 0;
+        let n = 0;
+        for (const [dx, dz] of [[-1, -1], [0, -1], [-1, 0], [0, 0]] as const) {
+          const tx = ix + dx;
+          const ty = iz + dz;
+          if (tx < 0 || ty < 0 || tx >= side || ty >= side) continue;
+          n++;
+          if (map.water.has(`${tx},${ty}`)) wet++;
+        }
+        if (wet === 0) continue;
+        // fully-wet vertices form the bed; mixed ones slope the shoreline
+        att.setY(iz * (side + 1) + ix, wet === n ? -0.42 : -0.16);
+      }
+    }
+    geo.computeVertexNormals();
+  }
+
+  /** One merged quad per map.water tile, sharing the animated wave uniform. */
+  private buildWaterTiles(map: MapLayout): void {
+    if (this.waterTiles) {
+      this.waterTiles.geometry.dispose();
+      this.waterTiles.removeFromParent();
+      this.waterTiles = null;
+    }
+    this.waterTileCount = map.water.size;
+    if (map.water.size === 0) return;
+    const n = map.water.size;
+    const pos = new Float32Array(n * 4 * 3);
+    const nrm = new Float32Array(n * 4 * 3);
+    const idx = new Uint32Array(n * 6);
+    let q = 0;
+    for (const key of map.water) {
+      const [tx, ty] = key.split(",").map(Number) as [number, number];
+      const v = q * 4;
+      const corners = [
+        [tx - 0.5, ty - 0.5],
+        [tx + 0.5, ty - 0.5],
+        [tx + 0.5, ty + 0.5],
+        [tx - 0.5, ty + 0.5],
+      ] as const;
+      corners.forEach(([x, z], i) => {
+        pos[(v + i) * 3] = x;
+        pos[(v + i) * 3 + 1] = WATER_Y;
+        pos[(v + i) * 3 + 2] = z;
+        nrm[(v + i) * 3 + 1] = 1;
+      });
+      idx.set([v, v + 2, v + 1, v, v + 3, v + 2], q * 6);
+      q++;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute("normal", new THREE.BufferAttribute(nrm, 3));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    this.waterTilesMat.color.set(this.colors.water);
+    this.waterTiles = new THREE.Mesh(geo, this.waterTilesMat);
+    this.waterTiles.frustumCulled = false;
+    this.group.add(this.waterTiles);
+  }
+
+  /** Raised plank per bridge tile — the road continues across the water. */
+  private buildBridges(map: MapLayout): void {
+    if (this.bridgeMesh) {
+      this.bridgeMesh.geometry.dispose();
+      this.bridgeMesh.removeFromParent();
+      this.bridgeMesh.dispose();
+      this.bridgeMesh = null;
+    }
+    this.bridgeCount = map.bridges.size;
+    if (map.bridges.size === 0) return;
+    if (!this.bridgeMat) this.bridgeMat = new THREE.MeshLambertMaterial({ color: BRIDGE_PLANK });
+    const geo = new THREE.BoxGeometry(1.04, 0.1, 0.84);
+    const mesh = new THREE.InstancedMesh(geo, this.bridgeMat, map.bridges.size);
+    const m = new THREE.Matrix4();
+    let i = 0;
+    for (const key of map.bridges) {
+      const [tx, ty] = key.split(",").map(Number) as [number, number];
+      const horiz = map.roads.has(`${tx - 1},${ty}`) || map.roads.has(`${tx + 1},${ty}`);
+      m.makeRotationY(horiz ? 0 : Math.PI / 2);
+      m.setPosition(tx, 0.02, ty);
+      mesh.setMatrixAt(i++, m);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.frustumCulled = false;
+    mesh.receiveShadow = true;
+    this.bridgeMesh = mesh;
+    this.group.add(mesh);
+  }
+
+  /** Static per-tile color: district tint, road, plaza, water, shoreline. */
   private computeTileBase(): void {
     const map = this.map!;
     const side = this.side;
+    const g = this.colors;
     const c = map.cityRect;
     const tc = map.townCenter;
     const quarterTint = new Map<string, number>();
-    for (const q of map.quarters) quarterTint.set(q.path, soften(ARCH_TINT[q.archetype], 0.5));
+    for (const q of map.quarters) quarterTint.set(q.path, g.district[q.archetype] ?? g.base);
     for (let ty = 0; ty < side; ty++) {
       for (let tx = 0; tx < side; tx++) {
         const i = ty * side + tx;
+        const key = `${tx},${ty}`;
+        const j = 0.94 + this.jitter[i]! * 0.12;
+        if (map.water.has(key)) {
+          // the bed under the animated surface (and the minimap silhouette)
+          this.tileBase[i] = scaleColor(g.water, j);
+          continue;
+        }
         const inCity = tx >= c.x && ty >= c.y && tx < c.x + c.w && ty < c.y + c.h;
-        let color = inCity ? BASE_GRASS : WILD_GRASS;
+        let color = inCity ? g.base : g.wild;
         if (inCity) {
-          // deepest quarter tint (softened archetype color)
+          // deepest quarter tint (DNA district color for its archetype)
           let best: { depth: number; tint: number } | null = null;
           for (const q of map.quarters) {
             if (tx >= q.rect.x && ty >= q.rect.y && tx < q.rect.x + q.rect.w && ty < q.rect.y + q.rect.h) {
               if (!best || q.depth > best.depth) best = { depth: q.depth, tint: quarterTint.get(q.path)! };
             }
           }
-          if (best) color = mixColor(color, best.tint, 0.4);
-          if (Math.abs(tx - tc.tx) <= 2 && Math.abs(ty - tc.ty) <= 2) color = mixColor(color, PLAZA, 0.75);
-          if (map.roads.has(`${tx},${ty}`)) color = mixColor(color, ROAD, 0.72);
+          if (best) color = mixColor(color, best.tint, 0.45);
+          if (Math.abs(tx - tc.tx) <= 2 && Math.abs(ty - tc.ty) <= 2) color = mixColor(color, g.plaza, 0.75);
+          if (map.roads.has(key)) color = mixColor(color, g.road, 0.72);
         }
+        if (map.coast.has(key)) color = mixColor(color, g.shore, 0.55);
         const edge = Math.min(tx, ty, side - 1 - tx, side - 1 - ty);
-        if (edge <= 1) color = mixColor(color, SAND, edge === 0 ? 0.85 : 0.45);
+        if (edge <= 1) color = mixColor(color, g.shore, edge === 0 ? 0.85 : 0.45);
         // deterministic jitter: ±6% luminance from the seeded stream
-        const j = 0.94 + this.jitter[i]! * 0.12;
         this.tileBase[i] = scaleColor(color, j);
       }
     }
@@ -140,10 +302,13 @@ export class Ground {
       for (let tx = 0; tx < side; tx++) {
         const i = ty * side + tx;
         let color = this.tileBase[i]!;
-        if (this.themeTint !== undefined) color = mixColor(color, this.themeTint, 0.35);
-        for (const p of patchRects) {
-          if (tx >= p.rect.x && ty >= p.rect.y && tx < p.rect.x + p.rect.w && ty < p.rect.y + p.rect.h) {
-            color = mixColor(color, p.tint, 0.35);
+        // water keeps its DNA color so archipelago/river silhouettes stay legible
+        if (!map.water.has(`${tx},${ty}`)) {
+          if (this.themeTint !== undefined) color = mixColor(color, this.themeTint, 0.35);
+          for (const p of patchRects) {
+            if (tx >= p.rect.x && ty >= p.rect.y && tx < p.rect.x + p.rect.w && ty < p.rect.y + p.rect.h) {
+              color = mixColor(color, p.tint, 0.35);
+            }
           }
         }
         this.tileColors[i] = color;
@@ -188,7 +353,9 @@ export class Ground {
   }
 
   setWaterColor(color: number): void {
-    (this.water.material as THREE.MeshLambertMaterial).color.set(visibleFloor(color, 0x24));
+    const floored = visibleFloor(color, 0x24);
+    (this.water.material as THREE.MeshLambertMaterial).color.set(floored);
+    this.waterTilesMat.color.set(floored);
   }
 
   // --- fog veil --------------------------------------------------------------
@@ -307,6 +474,13 @@ export class Ground {
     (this.mesh.material as THREE.Material).dispose();
     this.water.geometry.dispose();
     (this.water.material as THREE.Material).dispose();
+    this.waterTiles?.geometry.dispose();
+    this.waterTilesMat.dispose();
+    if (this.bridgeMesh) {
+      this.bridgeMesh.geometry.dispose();
+      this.bridgeMesh.dispose();
+    }
+    this.bridgeMat?.dispose();
     if (this.veil) {
       this.veil.geometry.dispose();
       (this.veil.material as THREE.Material).dispose();

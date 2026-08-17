@@ -10,7 +10,11 @@ of Villeneuve). You bring an Anthropic API key, paste a public git URL, and a
 settlement is founded on your repo:
 
 - The **map** is generated from the repo tree — directories become territories,
-  files become building plots, fog of war covers unexplored code.
+  files become building plots, fog of war covers unexplored code. The land
+  itself expresses a measured **code census** (the Law of Isomorphism):
+  languages set the world-form and palette, test share raises fortifications,
+  monorepos shatter into bridged archipelagos, deep nesting carves rivers,
+  and examine-lore cites the numbers behind every feature.
 - A **Hierophant** (orchestrator agent) greets you and awaits orders. You speak
   in plain language from the command bar; he dispatches **worker agents** who
   read, search, edit, and run commands — every tool call rendered as scouting,
@@ -47,12 +51,13 @@ Player browser                        Relay (Fly)                 Sandbox VM (pe
 │ agent loop + your key ──┼─────────▶│                   │        │ sandboxd (zero-dep)  │
 │    │ tool calls         │   ws +   │ rooms · history   │  http  │ clone/read/write/    │
 │    └────────────────────┼─────────▶│ sandbox manager ──┼───────▶│ search/exec/diff     │
-│ Pixi isometric renderer │   REST   │ theme cache       │        │ git + node + python  │
+│ Three.js RTS renderer   │   REST   │ theme cache       │        │ git + node + python  │
 └─────────────────────────┘          └───────────────────┘        └──────────────────────┘
         ▲ Anthropic API (direct)            │ broadcast ▼ spectators
 ```
 
-- `apps/web` — Vite + PixiJS frontend: lobby, isometric renderer, command bar
+- `apps/web` — Vite frontend: lobby, Three.js 3D renderer (KayKit CC0 kit;
+  `?r=2d` falls back to the Phaser isometric engine), command bar
 - `apps/relay` — Fastify + ws: match rooms, event history, sandbox drivers
   (`process` for dev, Fly Machines for prod), theme cache
 - `packages/protocol` — zod event schema shared by everything
@@ -84,9 +89,10 @@ per-session via the Machines API.
 fly apps create crab-wise
 fly apps create crab-wise-sandbox
 fly deploy --config fly.toml                     # relay + frontend
-fly deploy --app crab-wise-sandbox \
-  --dockerfile infra/sandbox.Dockerfile --build-only --push \
-  --image-label sandbox                          # push sandbox image
+# NB: use the dedicated config — `--dockerfile` alone gets silently
+# overridden by fly.toml's [build] and clobbers the sandbox image.
+fly deploy --config fly.sandbox.toml \
+  --build-only --push --image-label sandbox      # push sandbox image
 fly secrets set --app crab-wise \
   FLY_API_TOKEN=<deploy token for crab-wise-sandbox> \
   SANDBOX_APP=crab-wise-sandbox \

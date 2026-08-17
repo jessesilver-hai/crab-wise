@@ -4,6 +4,7 @@ import { hostMatch } from "./relay.js";
 import { createMatchView } from "./match-view.js";
 import { selectRenderer } from "./renderer-select.js";
 import { getCachedTheme, generateTheme, repoKey } from "./themer.js";
+import { analyzeCensus, censusBrief } from "./game/census.js";
 
 export type SettlementStart = {
   repoUrl: string;
@@ -155,7 +156,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
 
   view.setStatusLine("Unearthing the record — cloning the repository…");
   try {
-    const { readme, treeSummary } = await settlement.start();
+    const { readme, treeSummary, tree } = await settlement.start();
     view.hideOverlay();
     if (opts.firstOrder && !abort.signal.aborted) settlement.speak(opts.firstOrder);
 
@@ -164,7 +165,8 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
       const narrate = (text: string) =>
         onEvent({ seq: 0, ts: Date.now(), type: "log", level: "info", text });
       narrate(`⟡ The chroniclers read the record of ${repoLabel}…`);
-      void generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary }).then(async (theme) => {
+      const brief = censusBrief(analyzeCensus(tree));
+      void generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary, censusBrief: brief }).then(async (theme) => {
         if (abort.signal.aborted) return;
         if (theme) {
           // Fake-stream the world's own loading narration while it morphs in.

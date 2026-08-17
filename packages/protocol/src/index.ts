@@ -187,6 +187,19 @@ export const ThemePack = z.object({
   sprites: z.array(PixelSprite).max(14),
   /** Optional composed world geometry; invalid specs are dropped, not fatal. */
   worldSpec: WorldSpec.optional(),
+  /**
+   * Isomorphism overrides: the Worldsmith may bend the census-derived world
+   * DNA, but every choice must express a measured code fact (the charge asks
+   * it to cite them in worldLore). Unknown/invalid values fall back to DNA.
+   */
+  world: z
+    .object({
+      timeOfDay: z.enum(["dawn", "noon", "dusk", "night"]).optional(),
+      vegetation: z.enum(["barren", "sparse", "wooded", "lush"]).optional(),
+      /** Examine-lore lines tying visuals to code facts, e.g. the walls to the test ratio. */
+      worldLore: z.array(z.object({ subject: z.string().max(40), line: z.string().max(200) })).max(10).optional(),
+    })
+    .optional(),
 });
 export type ThemePack = z.infer<typeof ThemePack>;
 

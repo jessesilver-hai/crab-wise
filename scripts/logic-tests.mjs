@@ -342,6 +342,166 @@ console.log("Scroll rendering safety");
   check("svgThreatScan rejects non-svg", !svgThreatScan("<div>not svg</div>"));
 }
 
+// --- Code Made Visible: census, world DNA, landmass -------------------------------
+console.log("Code census");
+{
+  const { analyzeCensus, censusBrief } = await import("../apps/web/src/game/census.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  const pyTree = dir("", [
+    dir("src", [file("src/a.py", 800), file("src/b.py", 600)]),
+    dir("tests", [file("tests/test_a.py", 500)]),
+    dir("docs", [file("docs/guide.md", 100)]),
+  ]);
+  const c = analyzeCensus(pyTree);
+  check("census dominant language", c.dominant === "python");
+  check("census test ratio measured", c.testRatio === 500 / 2000);
+  check("census docs ratio measured", c.docsRatio === 100 / 2000);
+  check("census depth + counts", c.maxDepth === 1 && c.fileCount === 4 && c.totalLines === 2000);
+  check("census not monorepo", c.monorepo === false);
+
+  const mono = dir("", [
+    dir("packages", [
+      dir("packages/a", [file("packages/a/i.ts", 300)]),
+      dir("packages/b", [file("packages/b/i.ts", 300)]),
+    ]),
+    file("README.md", 50),
+  ]);
+  const cm = analyzeCensus(mono);
+  check("census detects monorepo", cm.monorepo === true && cm.dominant === "script");
+  check("census counts island-works", cm.packageDirs === 2);
+  check("census brief cites the facts", censusBrief(cm).includes("MONOREPO") && censusBrief(c).includes("python"));
+}
+
+console.log("World DNA");
+{
+  const { analyzeCensus } = await import("../apps/web/src/game/census.ts");
+  const { deriveWorldDNA } = await import("../apps/web/src/game/worlddna.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  const treeOf = (ext, extra = []) =>
+    dir("", [dir("src", [file(`src/a.${ext}`, 900), file(`src/b.${ext}`, 700)]), ...extra]);
+
+  // determinism: same census + seed → identical DNA
+  const c1 = analyzeCensus(treeOf("rs"));
+  const d1 = deriveWorldDNA(c1, 1234);
+  const d2 = deriveWorldDNA(c1, 1234);
+  check("DNA deterministic", JSON.stringify(d1) === JSON.stringify(d2));
+
+  // maximal variety: contrasting repos land on distinct forms
+  const forms = new Set(
+    [
+      ["rs", 7], ["ts", 7], ["md", 7], ["java", 7], ["py", 7], ["html", 7],
+    ].map(([ext, seed]) => deriveWorldDNA(analyzeCensus(treeOf(ext)), seed).form),
+  );
+  check("DNA spreads forms across repos", forms.size >= 4, `forms=${[...forms].join(",")}`);
+
+  // legible overrides: the walls follow the test garrison
+  const fortified = analyzeCensus(
+    dir("", [dir("src", [file("src/a.go", 500)]), dir("tests", [file("tests/a_test.go", 400)])]),
+  );
+  check("DNA fortification from tests", deriveWorldDNA(fortified, 1).fortification >= 2);
+  check("DNA lore cites census", deriveWorldDNA(fortified, 1).loreNotes.some((n) => n.line.includes("%")));
+
+  // the Worldsmith may override the form, but only to a real one
+  check("DNA form override honored", deriveWorldDNA(c1, 1234, "glacier-vault").form === "glacier-vault");
+  check("DNA bogus override ignored", deriveWorldDNA(c1, 1234, "candy-land").form === d1.form);
+}
+
+console.log("Landmass v2 (coast, archipelago, rivers)");
+{
+  const { layoutMap, layoutHash } = await import("../apps/web/src/game/map.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  const plain = dir("", [
+    dir("src", [file("src/a.ts", 300), file("src/b.ts", 200)]),
+    dir("tests", [file("tests/a.test.ts", 150)]),
+    file("README.md", 40),
+  ]);
+  const m1 = layoutMap(plain, 42);
+  const m2 = layoutMap(plain, 42);
+  check("water deterministic", [...m1.water].sort().join() === [...m2.water].sort().join());
+  check("coastline exists", m1.water.size > 40);
+  check("water never floods structures", [...m1.water].every((k) => !m1.used.has(k)));
+  check("water never enters quarters (plain repo)", (() => {
+    const inRect = (tx, ty, r) => tx >= r.x && ty >= r.y && tx < r.x + r.w && ty < r.y + r.h;
+    return [...m1.water].every((k) => {
+      const [tx, ty] = k.split(",").map(Number);
+      return !m1.quarters.some((q) => inRect(tx, ty, q.rect));
+    });
+  })());
+  check("bridges are exactly roads ∩ water", (() => {
+    for (const b of m1.bridges) if (!m1.roads.has(b) || !m1.water.has(b)) return false;
+    for (const r of m1.roads) if (m1.water.has(r) && !m1.bridges.has(r)) return false;
+    return true;
+  })());
+  check("coast rings the water", m1.coast.size > 0 && [...m1.coast].every((k) => !m1.water.has(k)));
+  const hashA = layoutHash(m1);
+  check("hash stable across runs", hashA === layoutHash(m2));
+  check("hash varies with seed", hashA !== layoutHash(layoutMap(plain, 43)));
+
+  // different seeds → different silhouettes (scallop actually varies)
+  const w43 = [...layoutMap(plain, 43).water].sort().join();
+  check("coastline varies by seed", w43 !== [...m1.water].sort().join());
+
+  // monorepo → archipelago: channels flood the top-level corridors
+  const mono = dir("", [
+    dir("packages", [
+      dir("packages/alpha", [file("packages/alpha/a.ts", 400), file("packages/alpha/b.ts", 200)]),
+      dir("packages/beta", [file("packages/beta/a.ts", 400), file("packages/beta/b.ts", 300)]),
+      dir("packages/gamma", [file("packages/gamma/a.ts", 350)]),
+    ]),
+    file("README.md", 30),
+  ]);
+  const mm = layoutMap(mono, 7);
+  const inland = (k) => {
+    const [tx, ty] = k.split(",").map(Number);
+    const r = mm.cityRect;
+    return tx >= r.x && ty >= r.y && tx < r.x + r.w && ty < r.y + r.h;
+  };
+  check("archipelago floods city corridors", [...mm.water].some(inland));
+  check("archipelago is bridged", mm.bridges.size > 0);
+  check("islet quarters stay dry", (() => {
+    const inRect = (tx, ty, r) => tx >= r.x && ty >= r.y && tx < r.x + r.w && ty < r.y + r.h;
+    const isles = mm.quarters.filter((q) => q.depth === 2 && q.parentPath === "packages");
+    if (isles.length < 2) return false;
+    return [...mm.water].every((k) => {
+      const [tx, ty] = k.split(",").map(Number);
+      return !isles.some((q) => inRect(tx, ty, q.rect));
+    });
+  })());
+  const mp = layoutMap(plain, 7);
+  check("plain repos stay inland-dry", ![...mp.water].some((k) => {
+    const [tx, ty] = k.split(",").map(Number);
+    const r = mp.cityRect;
+    return tx >= r.x && ty >= r.y && tx < r.x + r.w && ty < r.y + r.h;
+  }));
+
+  // deep nesting carves a river that reaches the sea
+  const deep = dir("", [
+    dir("a", [dir("a/b", [dir("a/b/c", [dir("a/b/c/d", [dir("a/b/c/d/e", [file("a/b/c/d/e/deep.ts", 200)])])])])]),
+    dir("src", [file("src/x.ts", 500)]),
+  ]);
+  const md = layoutMap(deep, 11);
+  // the coast scallop can never reach inside the guaranteed-land band, so any
+  // water there is river water by construction
+  const riverTiles = [...md.water].filter((k) => {
+    const [tx, ty] = k.split(",").map(Number);
+    const c = (md.side - 1) / 2;
+    const rad = Math.max(Math.abs(tx - c), Math.abs(ty - c));
+    return rad < md.side / 2 - 1.5 - 6;
+  });
+  check("deep nesting carves a river", riverTiles.length >= 3, `river tiles=${riverTiles.length}`);
+
+  // new files never land in the water
+  const { assignPlot } = await import("../apps/web/src/game/map.ts");
+  const spot = assignPlot(m1, "src/new-file.ts");
+  check("mid-match plots stay dry", !m1.water.has(`${spot.tx},${spot.ty}`));
+}
+
 // --- Sandbox slot lifecycle ------------------------------------------------------
 console.log("Sandbox slot lifecycle");
 {

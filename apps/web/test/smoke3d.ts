@@ -42,19 +42,20 @@ const TREE: FN = dir(".", [
 ]);
 const SEED = 12345;
 
-/** ?big=1 → ~1600-file synthetic repo (1200 plots + hamlets) + 40 units. */
+/** ?big=1 → ~1600-file synthetic packages/ monorepo (1200 plots + hamlets)
+ * + 40 units — the archipelago + bridges must render under load. */
 const BIG = new URLSearchParams(location.search).has("big");
 function bigTree(): FN {
-  const dirs: FN[] = [];
+  const pkgs: FN[] = [];
   for (let d = 0; d < 40; d++) {
-    const dn = `src/d${String(d).padStart(2, "0")}`;
+    const dn = `packages/p${String(d).padStart(2, "0")}`;
     const files: FN[] = [];
     for (let f = 0; f < 40; f++) {
       files.push(file(`${dn}/f${String(f).padStart(2, "0")}.ts`, ((d * 37 + f * 13) % 600) + 20));
     }
-    dirs.push(dir(dn, files));
+    pkgs.push(dir(dn, files));
   }
-  return dir(".", [file("package.json", 40), file("README.md", 120), dir("src", dirs)]);
+  return dir(".", [file("package.json", 40), file("README.md", 120), dir("packages", pkgs)]);
 }
 
 function glRendererString(): string {
@@ -74,7 +75,16 @@ function glRendererString(): string {
 type Debug = {
   worldReady(): boolean;
   layoutHash(): string;
-  map(): { plots: Map<string, { tx: number; ty: number }>; hamlets: { count: number }[] } | null;
+  map(): {
+    plots: Map<string, { tx: number; ty: number }>;
+    hamlets: { count: number }[];
+    water: Set<string>;
+    bridges: Set<string>;
+  } | null;
+  dna(): { form: string; ground: unknown; fortification: number; loreNotes: { subject: string; line: string }[] } | null;
+  waterTilesRendered(): number;
+  bridgesRendered(): number;
+  decorStats(): { wallSegments: number; props: number; trees: number; rocks: number };
   buildings(): Map<string, unknown>;
   instanceCount(): number;
   drawCalls(): number;
@@ -183,6 +193,28 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   check("file-coverage", plotCount + hamletFiles === totalFiles, `plots=${plotCount} hamlets=${hamletFiles}`);
   console.info(`[smoke3d] draw-calls=${dbg().drawCalls()}`);
 
+  // world DNA computed + exposed; water/bridge render counts match the layout
+  const dna = dbg().dna();
+  check(
+    "dna-computed",
+    dna !== null && typeof dna.form === "string" && dna.ground !== undefined && dna.loreNotes.length > 0,
+    `form=${dna?.form} fort=${dna?.fortification} lore=${dna?.loreNotes.length}`,
+  );
+  check(
+    "water-render",
+    map.water.size > 0 && dbg().waterTilesRendered() === map.water.size,
+    `water=${map.water.size} rendered=${dbg().waterTilesRendered()}`,
+  );
+  check(
+    "bridges-render",
+    dbg().bridgesRendered() === map.bridges.size && (!BIG || map.bridges.size > 0),
+    `bridges=${map.bridges.size} rendered=${dbg().bridgesRendered()} big=${BIG}`,
+  );
+  const decor = dbg().decorStats();
+  console.info(
+    `[smoke3d] decor walls=${decor.wallSegments} props=${decor.props} trees=${decor.trees} rocks=${decor.rocks}`,
+  );
+
   if (BIG) {
     // perf probe: 40 units + raiders over ~1200 instanced buildings
     for (let i = 0; i < 40; i++) {
@@ -195,7 +227,7 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
       });
     }
     for (let i = 0; i < 39; i++) {
-      ev({ type: "agent_moved", agentId: `w${i + 1}`, path: `src/d${String(i % 40).padStart(2, "0")}/f0${i % 10}.ts` });
+      ev({ type: "agent_moved", agentId: `w${i + 1}`, path: `packages/p${String(i % 40).padStart(2, "0")}/f0${i % 10}.ts` });
       ev({ type: "agent_status", agentId: `w${i + 1}`, status: "building" });
     }
     ev({
@@ -207,7 +239,7 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
       summary: "4 failed",
       testsFailed: 4,
       testsPassed: 10,
-      failures: [0, 1, 2, 3].map((i) => ({ name: `big failure ${i}`, path: `src/d0${i}/f00.ts` })),
+      failures: [0, 1, 2, 3].map((i) => ({ name: `big failure ${i}`, path: `packages/p0${i}/f00.ts` })),
     });
     await sleep(4000);
     stage("mid");

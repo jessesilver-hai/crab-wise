@@ -3,6 +3,7 @@ import {
   DistrictPatch,
   ORCHESTRATOR_NAME,
   VILLAGER_NAMES,
+  type FileNode,
   type GameEvent,
   type ThemePack,
 } from "@agent-empires/protocol";
@@ -263,7 +264,7 @@ export class Settlement {
   }
 
   /** Clone, map the realm, seat the King. Returns repo intel for theming. */
-  async start(): Promise<{ readme: string; treeSummary: string }> {
+  async start(): Promise<{ readme: string; treeSummary: string; tree: FileNode }> {
     const { executor, repoUrl, repoLabel, model } = this.opts;
     this.emitter.emit("session_status", { phase: "cloning", detail: repoUrl });
     const { readme } = await executor.clone(repoUrl);
@@ -335,7 +336,7 @@ Do NOT emit ASSIGN lines yet.`,
         ...(c.kind === "dir" ? summarize(c, depth + 1) : []),
       ]);
     };
-    return { readme, treeSummary: summarize(tree, 0).slice(0, 120).join("\n") };
+    return { readme, treeSummary: summarize(tree, 0).slice(0, 120).join("\n"), tree };
   }
 
   private kingSystem(): string {
