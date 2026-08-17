@@ -188,6 +188,7 @@ class Game3D {
   private fpsNow = 60;
   private lowSeconds = 0;
   private degraded = false;
+  private districtLabels: { sprite: THREE.Sprite; dispose: () => void }[] = [];
 
   private detachers: (() => void)[] = [];
 
@@ -302,6 +303,7 @@ class Game3D {
     for (const rec of this.agents.values()) rec.unit.destroy();
     for (const rec of this.raiders.values()) rec.unit.destroy();
     this.fx.dispose();
+    for (const l of this.districtLabels) l.dispose();
     this.city.dispose();
     this.ground.dispose();
     this.assets.dispose();
@@ -364,12 +366,14 @@ class Game3D {
         }
         return;
       }
-      if (this.leftDown && Math.hypot(p.x - this.leftDown.x, p.y - this.leftDown.y) > 8) {
+      if (this.leftDown && (this.panned || Math.hypot(p.x - this.leftDown.x, p.y - this.leftDown.y) > 8)) {
         this.panned = true;
         if (this.longPress !== null) {
           window.clearTimeout(this.longPress);
           this.longPress = null;
         }
+        this.cam.panPx(dx, dy, w, h);
+        this.mount.style.cursor = "grabbing";
       }
     });
     on("pointerup", (e) => {
@@ -393,6 +397,7 @@ class Game3D {
         const wasPan = this.panned;
         this.leftDown = null;
         this.panned = false;
+        this.mount.style.cursor = "";
         if (!wasPan) this.handleLeftClick(p.x, p.y);
       }
     });
@@ -618,6 +623,7 @@ class Game3D {
     this.ground.build(map, event.mapSeed);
     this.ground.onFogTile = (tx, ty, alpha) => this.city.setTileLight(tx, ty, alpha);
     this.city.buildWorld(map, event.mapSeed, this.archetypeAt, this.ground.fogAlphaAt);
+    this.buildDistrictLabels(map);
 
     for (const hm of map.hamlets) for (const p of hm.paths) this.hamletByPath.set(p, hm);
 
@@ -650,6 +656,55 @@ class Game3D {
       `[world] layout-hash=${hash} side=${map.side} quarters=${map.quarters.length} ` +
         `blocks=${map.blocks.length} buildings=${map.plots.size} hamlets=${map.hamlets.length}`,
     );
+  }
+
+  /** Directory names floated over their quarters: the map explains the repo. */
+  private buildDistrictLabels(map: MapLayout): void {
+    for (const l of this.districtLabels) {
+      this.scene.remove(l.sprite);
+      l.dispose();
+    }
+    this.districtLabels = [];
+    const put = (
+      text: string,
+      x: number,
+      z: number,
+      o: { sizePx: number; color: string; worldH: number; y: number },
+    ) => {
+      const b = makeBillboard(text, {
+        sizePx: o.sizePx,
+        color: o.color,
+        worldH: o.worldH,
+        bold: true,
+        bg: "rgba(10,8,5,0.45)",
+        border: "none",
+        pad: 7,
+      });
+      (b.sprite.material as THREE.SpriteMaterial).depthTest = false;
+      b.sprite.renderOrder = 30;
+      b.sprite.position.set(x, o.y, z);
+      this.scene.add(b.sprite);
+      this.districtLabels.push(b);
+    };
+    for (const q of map.quarters) {
+      if (q.depth > 2) continue;
+      const size = Math.min(q.rect.w, q.rect.h);
+      if (q.depth === 2 && size < 7) continue;
+      const name = q.path.split("/").pop() ?? q.path;
+      const label = name.length > 20 ? `${name.slice(0, 19)}…` : name;
+      put(label, q.rect.x + q.rect.w / 2, q.rect.y + q.rect.h / 2, {
+        sizePx: 34,
+        color: q.depth === 1 ? "#f0d9a0" : "#c9b98e",
+        worldH: q.depth === 1 ? Math.min(2.4, Math.max(1.25, size * 0.1)) : 0.9,
+        y: q.depth === 1 ? 3.4 : 2.1,
+      });
+    }
+    put("⚜ THE CITADEL", map.townCenter.tx, map.townCenter.ty, {
+      sizePx: 36,
+      color: "#ffe9a8",
+      worldH: 1.5,
+      y: 4.6,
+    });
   }
 
   private posForPath(path: string): { x: number; z: number; tx: number; ty: number } {

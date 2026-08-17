@@ -492,22 +492,33 @@ pre.diff .dl-hunk { color: var(--dim); display: inline; }
   border-left: 2px solid var(--border);
   background: var(--panel);
   min-height: 0;
+  min-width: 0;
 }
 .sidebar-tabs { display: flex; border-bottom: 1px solid var(--border); }
 .sidebar-tabs button {
   flex: 1; border: none; border-radius: 0; background: var(--panel);
-  font-size: 0.95rem; padding: 0.5rem;
+  font-size: 0.8rem; padding: 0.5rem 0.2rem;
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .sidebar-tabs button.active { background: var(--panel-2); color: var(--gold-bright); }
 
 .feed {
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 0.7rem;
   font-size: 0.85rem;
   line-height: 1.5;
   min-height: 0;
 }
-.feed .entry { margin-bottom: 0.55rem; }
+.feed .entry { margin-bottom: 0.55rem; overflow-wrap: anywhere; }
+.feed .entry.clamp > span {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+}
+.feed .entry.clamp.expanded > span { -webkit-line-clamp: unset; }
 .feed .entry .who { color: var(--gold); font-weight: bold; }
 .feed .entry.herald-msg { color: var(--parchment); }
 .feed .entry.system { color: var(--dim); font-style: italic; }
@@ -516,6 +527,33 @@ pre.diff .dl-hunk { color: var(--dim); display: inline; }
 .feed .entry.raw { font-family: "IBM Plex Mono", monospace; font-size: 0.75rem; color: #9a9080; }
 .feed .entry.raw.error { color: var(--red); }
 .feed .entry.decree { color: var(--gold-bright); border-left: 2px solid var(--gold); padding-left: 0.5rem; }
+
+/* ---------- First steps (host onboarding) ---------- */
+
+#first-steps {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 3.4rem;
+  max-width: min(92%, 640px);
+  background: rgba(18, 14, 8, 0.92);
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+  padding: 0.55rem 0.8rem;
+  text-align: center;
+  z-index: 5;
+  box-shadow: 0 0 18px rgba(212, 168, 67, 0.15);
+}
+#first-steps .fs-hint { color: var(--parchment); font-size: 0.8rem; margin-bottom: 0.45rem; }
+#first-steps .fs-row { display: flex; gap: 0.45rem; justify-content: center; flex-wrap: wrap; }
+#first-steps .fs-btn {
+  font-size: 0.78rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--gold);
+  color: var(--gold-bright);
+  background: var(--panel-2);
+}
+#first-steps .fs-btn:hover { background: var(--gold); color: #1a1408; }
 
 /* ---------- Command bar ---------- */
 

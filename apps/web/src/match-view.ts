@@ -93,6 +93,14 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         <div class="game-area">
           <div id="game-mount" style="position:absolute;inset:0;"></div>
           ${isHost ? `
+          <div id="first-steps">
+            <div class="fs-hint">⟡ Your realm awaits orders. Drag to pan · scroll to zoom · right-click anything to act — or decree:</div>
+            <div class="fs-row">
+              <button class="fs-btn" data-decree="Run the test suite and slay every failure you find.">⚔ Run the tests</button>
+              <button class="fs-btn" data-decree="Survey the realm and report the three riskiest files.">⌕ Survey the risks</button>
+              <button class="fs-btn" data-decree="Inscribe a scroll: a short health report of this realm, with one chart.">❧ Inscribe a report</button>
+            </div>
+          </div>
           <div class="command-bar">
             <select id="cmd-target"><option value="">⟡ The Realm</option></select>
             <input id="cmd-input" placeholder="Speak, and the realm obeys — issue an order or address a worker…" maxlength="2000"/>
@@ -131,6 +139,12 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
   const el = (id: string) => root.querySelector<HTMLElement>("#" + id)!;
   const heraldFeed = el("feed-herald");
   const scribeFeed = el("feed-scribe");
+  // Long herald lines clamp to three rows; a click unfolds them.
+  heraldFeed.addEventListener("click", (ev) => {
+    const t = ev.target as HTMLElement;
+    if (t.closest("a,button,details,.work-link,.scroll-open")) return;
+    t.closest(".entry.clamp")?.classList.toggle("expanded");
+  });
   const overlaySlot = el("overlay-slot");
   const gameMount = el("game-mount");
   const statusChip = el("status-chip");
@@ -474,6 +488,12 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") submit();
     });
+    for (const btn of root.querySelectorAll<HTMLButtonElement>(".fs-btn")) {
+      btn.onclick = () => {
+        input.value = btn.dataset.decree ?? "";
+        submit();
+      };
+    }
   }
   if (isHost && opts.onPatch) {
     root.querySelector<HTMLButtonElement>("#patch-btn")!.onclick = () => opts.onPatch!();
@@ -542,6 +562,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         };
       }
       case "decree":
+        root.querySelector("#first-steps")?.remove();
         return {
           cls: "decree",
           html: `♛ The Crown${e.toId ? ` (to ${escapeHtml(e.toId)})` : ""}: “${escapeHtml(e.text)}”`,
@@ -561,9 +582,14 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         return { cls: "system", html: `⧉ ${who(e.agentId)} enters the realm${charge}` };
       }
       case "message": {
+        // One line per message: the plain text. The liturgy flourish the
+        // agents wrap around their words lives in the hover title only.
         const speaker = e.fromId === "crown" ? "The Crown" : name(e.fromId);
-        const flavor = e.herald && e.herald !== e.text ? `<em class="liturgy">${escapeHtml(e.herald)}</em><br/>` : "";
-        return { cls: "herald-msg", html: `◈ <span class="who">${escapeHtml(speaker)}</span>: ${flavor}${escapeHtml(e.text)}` };
+        const flavor = e.herald && e.herald !== e.text ? ` title="${escapeHtml(e.herald)}"` : "";
+        return {
+          cls: "herald-msg clamp",
+          html: `<span${flavor}>◈ <span class="who">${escapeHtml(speaker)}</span>: ${escapeHtml(e.text)}</span>`,
+        };
       }
       case "log":
         if (e.level === "error") return { cls: "battle", html: `⚠ ${escapeHtml(e.text.slice(0, 300))}` };
