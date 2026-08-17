@@ -230,7 +230,13 @@ export class SandboxManager {
   /** Host socket dropped: destroy after a grace period (they may refresh). */
   hostDisconnected(matchId: string): void {
     const session = this.sessions.get(matchId);
-    if (!session) return;
+    if (!session) {
+      // Still provisioning. The match is already finished (a closed host
+      // cannot resume it), so the machine must self-destruct on arrival
+      // rather than squat the visitor's slot until the TTL.
+      if (this.pending.has(matchId)) this.endedEarly.add(matchId);
+      return;
+    }
     session.graceTimer = setTimeout(() => void this.destroy(matchId), HOST_DISCONNECT_GRACE_MS);
   }
 

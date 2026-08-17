@@ -342,5 +342,37 @@ console.log("Scroll rendering safety");
   check("svgThreatScan rejects non-svg", !svgThreatScan("<div>not svg</div>"));
 }
 
+// --- Sandbox slot lifecycle ------------------------------------------------------
+console.log("Sandbox slot lifecycle");
+{
+  const { SandboxManager } = await import("../apps/relay/src/sandbox.ts");
+  const destroyed = [];
+  const slowDriver = {
+    create: (matchId) =>
+      new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              baseUrl: "http://fake",
+              token: "t",
+              destroy: async () => void destroyed.push(matchId),
+            }),
+          30,
+        ),
+      ),
+  };
+  const mgr = new SandboxManager(slowDriver);
+  // Host vanishes while the machine is still booting.
+  const p = mgr.provision("m1", "1.2.3.4").catch((e) => e);
+  mgr.hostDisconnected("m1");
+  const res = await p;
+  check("provision rejects when host left mid-boot", res instanceof Error);
+  check("mid-boot abandon destroys the machine", destroyed.includes("m1"));
+  const second = await mgr.provision("m2", "1.2.3.4").then(() => "ok").catch((e) => String(e));
+  check("visitor slot is free after mid-boot abandon", second === "ok");
+  await mgr.destroy("m2");
+  check("normal destroy releases the machine", destroyed.includes("m2"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
