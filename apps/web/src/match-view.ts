@@ -35,6 +35,8 @@ export type MatchView = {
   setStatusLine(text: string): void;
   gameMount: HTMLElement;
   attachRenderer(r: Renderer): void;
+  /** Ask the departing Crown whether this world joins the Prior Worlds. */
+  confirmLeave(): Promise<"save" | "discard" | "stay">;
 };
 
 export type MatchViewOptions = {
@@ -53,6 +55,8 @@ export type MatchViewOptions = {
   onSpeakTo?: (agentId: string, text: string) => void;
   /** Host only: real command verbs from the map (attend a file / hunt a test). */
   onOrder?: (kind: "attend" | "hunt", target: string, agentId?: string) => void;
+  /** Host only: intercept in-app exits so the save-or-burn choice can be offered. */
+  onLeaveAttempt?: () => void;
 };
 
 const BUILDING_LABEL: Record<string, string> = {
@@ -86,6 +90,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
           <span class="res food" title="context remaining"><span class="icon">☽</span><span id="res-food">100%</span></span>
           <span class="res pop" title="agents"><span class="icon">⧉</span><span id="res-pop">0</span></span>
           <span class="res renown" title="renown earned (bounties cleared)"><span class="icon">☨</span><span id="res-renown">0</span></span>
+          ${isHost ? '<button id="behold-btn" class="patch-btn" hidden title="Open the realm’s built work, running in a sealed pane">⌂ Behold the Work</button>' : ""}
           ${isHost ? '<button id="patch-btn" class="patch-btn" title="Download the session diff as a .patch">⎘ Royal Decree</button>' : ""}
         </div>
       </div>
@@ -283,6 +288,69 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       if (slayer) grantVisuals([skills.grant(slayer, "Slaying", 150)], historical);
     }
     if (postedNow.length > 0 || clearedNow.length > 0 || e.type === "tokens") renderBounties();
+  }
+
+  // --- Behold: the built artifact, running in a sealed pane -------------------
+  // Tracks the most recently written .html file (index.html wins ties) so
+  // greenfield realms — "build me Snake" — can be seen, not just read.
+  let artifactPath: string | null = null;
+  function noteArtifact(path: string) {
+    if (!/\.html?$/i.test(path)) return;
+    if (artifactPath === null || /(?:^|\/)index\.html?$/i.test(path) || !/(?:^|\/)index\.html?$/i.test(artifactPath)) {
+      artifactPath = path;
+    }
+    if (isHost && opts.onReadFile) {
+      const btn = root.querySelector<HTMLButtonElement>("#behold-btn");
+      if (btn) btn.hidden = false;
+    }
+  }
+  async function openBehold() {
+    if (!artifactPath || !opts.onReadFile) return;
+    const modal = document.createElement("div");
+    modal.className = "patch-modal";
+    modal.innerHTML = `<div class="patch-modal-inner behold">
+      <button class="patch-close">✕ seal</button>
+      <h3 class="inspect-title mono">⌂ ${escapeHtml(artifactPath)}</h3>
+      <p class="behold-note">The work itself, conjured in a sealed pane. <button class="behold-refresh">⟳ Conjure anew</button></p>
+      <iframe class="behold-frame" sandbox="allow-scripts" title="the built work"></iframe>
+    </div>`;
+    root.querySelector(".match-view")!.appendChild(modal);
+    modal.querySelector<HTMLButtonElement>(".patch-close")!.onclick = () => modal.remove();
+    const frame = modal.querySelector<HTMLIFrameElement>(".behold-frame")!;
+    const load = async () => {
+      try {
+        frame.srcdoc = (await opts.onReadFile!(artifactPath!)) || "<p style='color:#ccc;font-family:serif'>The scroll is empty yet.</p>";
+      } catch (err) {
+        frame.srcdoc = `<p style='color:#ccc;font-family:serif'>The work resists beholding: ${escapeHtml(String(err))}</p>`;
+      }
+    };
+    modal.querySelector<HTMLButtonElement>(".behold-refresh")!.onclick = () => void load();
+    await load();
+  }
+
+  // --- Leaving: worlds persist only by choice ---------------------------------
+  function confirmLeave(): Promise<"save" | "discard" | "stay"> {
+    return new Promise((resolve) => {
+      const modal = document.createElement("div");
+      modal.className = "patch-modal";
+      modal.innerHTML = `<div class="patch-modal-inner leave-gate">
+        <h3>Depart this world?</h3>
+        <p class="leave-copy">Only worlds you save are interred among the <strong>Prior Worlds</strong>, where any visitor may replay their chronicle. Unsaved worlds burn with the campfires.</p>
+        <div class="leave-actions">
+          <button class="leave-save">☾ Save to Prior Worlds &amp; depart</button>
+          <button class="leave-burn">🔥 Let it burn</button>
+          <button class="leave-stay">Stay</button>
+        </div>
+      </div>`;
+      root.querySelector(".match-view")!.appendChild(modal);
+      const done = (choice: "save" | "discard" | "stay") => {
+        modal.remove();
+        resolve(choice);
+      };
+      modal.querySelector<HTMLButtonElement>(".leave-save")!.onclick = () => done("save");
+      modal.querySelector<HTMLButtonElement>(".leave-burn")!.onclick = () => done("discard");
+      modal.querySelector<HTMLButtonElement>(".leave-stay")!.onclick = () => done("stay");
+    });
   }
 
   // --- Inspect panel: the actual code, per file ------------------------------
@@ -498,6 +566,15 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
   if (isHost && opts.onPatch) {
     root.querySelector<HTMLButtonElement>("#patch-btn")!.onclick = () => opts.onPatch!();
   }
+  if (isHost && opts.onReadFile) {
+    root.querySelector<HTMLButtonElement>("#behold-btn")!.onclick = () => void openBehold();
+  }
+  if (opts.onLeaveAttempt) {
+    root.querySelector<HTMLAnchorElement>(".home-link")!.onclick = (e) => {
+      e.preventDefault();
+      opts.onLeaveAttempt!();
+    };
+  }
 
   const agentNames = new Map<string, string>();
   const activeAgents = new Set<string>();
@@ -599,6 +676,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         }
         return null;
       case "file_write": {
+        noteArtifact(e.path);
         const label = BUILDING_LABEL[e.buildingKind] ?? "a structure";
         const verb = e.created ? "raises" : "reinforces";
         const snip = e.diffSnippet
@@ -738,6 +816,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       if (status) status.textContent = text;
     },
     gameMount,
+    confirmLeave,
     attachRenderer(r) {
       renderer = r;
       r.setInspectHandler?.((path) => void openInspect(path));

@@ -163,6 +163,15 @@ input:focus, select:focus { outline: none; border-color: var(--gold); }
 .common-chip span { font-size: 0.65rem; color: var(--dim); text-transform: none; letter-spacing: 0; }
 .common-chip:hover span { color: inherit; }
 
+/* --- Commission a new realm: build software from bare earth --- */
+.commission-row { display: flex; gap: 0.5rem; }
+.commission-row input { flex: 1; }
+.commission-row button { white-space: nowrap; font-size: 0.85rem; padding: 0.45rem 0.9rem; }
+.quest-grid { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.55rem 0 0.2rem; }
+.quest-chip { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.7rem; font-size: 0.82rem; }
+.quest-chip .q-icon { font-size: 0.95rem; }
+.panel-sub { color: var(--dim); font-style: italic; font-size: 0.78rem; margin: -0.3rem 0 0.6rem; line-height: 1.4; }
+
 details.advanced { margin: 1.1rem 0 0.4rem; border-top: 1px solid var(--border); padding-top: 0.7rem; }
 details.advanced summary {
   cursor: pointer;
@@ -340,6 +349,21 @@ body:has(.match-view) { overflow: hidden; min-height: 0; }
   margin-top: 0.6rem;
 }
 .patch-close { align-self: flex-end; font-size: 0.75rem; }
+
+/* --- Behold the Work: the built artifact running in a sealed pane --- */
+.patch-modal-inner.behold { max-width: 1100px; height: 84vh; max-height: 84vh; }
+.behold-note { color: var(--dim); font-style: italic; font-size: 0.78rem; margin: 0 0 0.5rem; }
+.behold-note button { font-size: 0.72rem; padding: 0.15rem 0.55rem; margin-left: 0.5rem; }
+.behold-frame { flex: 1; width: 100%; border: 1px solid var(--border); background: #fff; min-height: 0; }
+
+/* --- The leave gate: worlds persist only by choice --- */
+.patch-modal-inner.leave-gate { max-width: 460px; }
+.leave-gate h3 { color: var(--gold); margin: 0 0 0.5rem; }
+.leave-copy { color: var(--parchment); font-size: 0.88rem; line-height: 1.5; margin: 0 0 0.9rem; }
+.leave-actions { display: flex; flex-direction: column; gap: 0.45rem; }
+.leave-actions button { font-size: 0.85rem; padding: 0.5rem 0.8rem; }
+.leave-actions .leave-save { border-color: var(--gold); color: var(--gold); }
+.leave-actions .leave-stay { color: var(--dim); }
 
 /* --- Inspect panel: per-file diff + live source --- */
 .patch-modal-inner.inspect { max-width: 1180px; }

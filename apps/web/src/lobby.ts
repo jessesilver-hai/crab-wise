@@ -6,9 +6,28 @@ import type { HallEntry, MatchSummary } from "@agent-empires/protocol";
 type RepoChip = { label: string; url: string; note: string };
 type Tier = { name: string; hint: string; repos: RepoChip[] };
 
-// One door in: a public repo. Fun-first curation: every playable pick is
-// Node or Python (the only toolchains in the sandbox), so decrees like "run
-// the tests" spawn real specters. Ruins & Relics is honestly labeled lore.
+// Two doors in: a public repo to rule, or a commission to build from nothing.
+// Fun-first curation: every playable pick is Node or Python (the only
+// toolchains in the sandbox), so decrees like "run the tests" spawn real
+// specters. Ruins & Relics is honestly labeled lore.
+type Quest = { label: string; icon: string; slug: string; what: string };
+
+// Single self-contained index.html keeps ⌂ Behold the Work honest: the built
+// page runs alone in a sealed iframe, no server or bundler required.
+const QUEST_CHARGE = (what: string) =>
+  `Your commission from the Crown: build ${what}. Create index.html as a single self-contained page — ` +
+  `inline CSS and JS, no external dependencies, no build step; it must run alone when opened. ` +
+  `You may add a README or supporting files. When it works, read your own code end to end and polish it until it is genuinely good.`;
+
+const QUESTS: Quest[] = [
+  { label: "Snake", icon: "🐍", slug: "snake", what: "the classic Snake game: keyboard controls, score, gentle speed-up, game-over and restart" },
+  { label: "Pong", icon: "🏓", slug: "pong", what: "Pong against a simple computer opponent: mouse or keys, score to 7, satisfying ball physics" },
+  { label: "Pomodoro", icon: "⏱", slug: "pomodoro", what: "a beautiful pomodoro timer: 25/5 work-break cycles, big readable countdown, chime, session tally" },
+  { label: "Todo", icon: "☑", slug: "todo", what: "a polished todo list: add, complete, delete, filter, localStorage persistence, pleasing design" },
+  { label: "Particle toy", icon: "✦", slug: "particles", what: "an interactive particle fireworks toy: particles chase and burst around the mouse, color cycling, sliders for count and gravity" },
+  { label: "Bakery page", icon: "🥖", slug: "bakery", what: "a gorgeous landing page for an imaginary bakery: hero, menu cards, hours, tasteful typography, no frameworks" },
+];
+
 const TIERS: Tier[] = [
   {
     name: "Hamlets",
@@ -93,8 +112,9 @@ export function renderLobby(root: HTMLElement): void {
     <div class="lobby">
       <div class="hero">
         <h1>AGENT EMPIRES</h1>
-        <p class="tagline">Paste a public repository. A civilization wakes upon the code —
-        agents labor, specters rise from failing tests, and you rule it all by decree.</p>
+        <p class="tagline">Paste a public repository — or commission new software from bare earth.
+        A civilization wakes upon the code: agents labor, specters rise from failing tests,
+        and you rule it all by decree.</p>
         <div class="rule"></div>
       </div>
       <div class="lobby-grid">
@@ -104,15 +124,26 @@ export function renderLobby(root: HTMLElement): void {
             <input id="repo-url" type="text" autofocus
               placeholder="https://github.com/owner/repo — press Enter" />
           </div>
-          <div class="one-door">That is the only door in. The Crown funds the agents;
-          the repository becomes the realm — every file a building, every directory a walled quarter.</div>
+          <div class="one-door">The Crown funds the agents; the repository becomes the realm —
+          every file a building, every directory a walled quarter.</div>
           <div class="error-note" id="start-error"></div>
-          <div class="sample-label">— or choose a realm, by size —</div>
+          <div class="sample-label">— or commission a new realm, built from nothing —</div>
+          <div class="form-row commission-row">
+            <input id="brief-input" type="text" placeholder="describe what to build — e.g. a tiny drum machine" />
+            <button id="brief-btn" title="Found a bare realm and set the agents building">⚒ Found</button>
+          </div>
+          <div class="one-door">The realm begins as bare earth. Watch the city rise file by file,
+          then press <strong>⌂ Behold the Work</strong> to run what they built.</div>
+          <div class="quest-grid" id="quest-grid">${QUESTS.map(
+            (q, i) => `<button class="quest-chip" data-q="${i}"><span class="q-icon">${q.icon}</span>${escapeHtml(q.label)}</button>`,
+          ).join("")}</div>
+          <div class="sample-label">— or choose an existing realm, by size —</div>
           <div id="tier-list"></div>
         </div>
         <div class="panel">
-          <h2>The Chronicle</h2>
-          <div id="finished-list"><p class="empty-note">No records yet.</p></div>
+          <h2>☾ Prior Worlds</h2>
+          <p class="panel-sub">Worlds saved at departure — click one to replay its chronicle.</p>
+          <div id="finished-list"><p class="empty-note">None yet. When you depart a settlement, choose to save it and it will rest here.</p></div>
           <h2 style="margin-top:1.5rem">☨ Hall of Legends</h2>
           <div id="hall-list"><p class="empty-note">No legends yet. Clear bounties — fix failing tests — and be remembered.</p></div>
         </div>
@@ -129,12 +160,12 @@ export function renderLobby(root: HTMLElement): void {
   const foundPanel = root.querySelector<HTMLElement>("#found-panel")!;
   let starting = false;
 
-  function begin(repoUrl: string, repoLabel: string) {
+  function begin(repoUrl: string, repoLabel: string, firstOrder?: string) {
     if (starting) return;
     starting = true;
     errorNote.textContent = "";
     foundPanel.classList.add("starting");
-    startSettlement(document.getElementById("app")!, { repoUrl, repoLabel, apiKey: "", model: "" }).catch((err) => {
+    startSettlement(document.getElementById("app")!, { repoUrl, repoLabel, apiKey: "", model: "", firstOrder }).catch((err) => {
       errorNote.textContent = String(err);
       starting = false;
       foundPanel.classList.remove("starting");
@@ -150,6 +181,28 @@ export function renderLobby(root: HTMLElement): void {
     }
     begin(typedUrl, typedUrl.split("/").slice(-2).join("/"));
   });
+
+  const briefInput = root.querySelector<HTMLInputElement>("#brief-input")!;
+  const commission = () => {
+    const what = briefInput.value.trim();
+    if (what.length < 8) {
+      errorNote.textContent = "Describe the commission in a few words — e.g. “a tiny drum machine”.";
+      return;
+    }
+    // Slug keeps the realm's seed, README title, and divined theme distinct per brief.
+    const slug = what.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 40) || "commission";
+    begin(`new:${slug}`, `New Realm — ${what.slice(0, 40)}`, QUEST_CHARGE(what));
+  };
+  root.querySelector<HTMLButtonElement>("#brief-btn")!.onclick = commission;
+  briefInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") commission();
+  });
+  for (const chip of root.querySelectorAll<HTMLElement>(".quest-chip")) {
+    chip.onclick = () => {
+      const q = QUESTS[Number(chip.dataset.q)]!;
+      begin(`new:${q.slug}`, `New Realm — ${q.label}`, QUEST_CHARGE(q.what));
+    };
+  }
 
   const tierList = root.querySelector<HTMLElement>("#tier-list")!;
   tierList.innerHTML = TIERS.map(
@@ -212,10 +265,12 @@ async function refreshMatches(root: HTMLElement) {
 }
 
 function matchRow(m: MatchSummary): string {
+  // A quit-and-saved world reads "saved", not "abandoned" — saving was chosen.
+  const label = m.result === "abandoned" ? "saved" : m.result ?? "over";
   const badge =
     m.status === "live"
       ? '<span class="badge live">LIVE</span>'
-      : `<span class="badge ${m.result ?? "abandoned"}">${m.result ?? "over"}</span>`;
+      : `<span class="badge ${m.result ?? "abandoned"}">${label}</span>`;
   return `
     <div class="match-row" data-id="${m.matchId}">
       <div>

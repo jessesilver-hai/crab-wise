@@ -65,7 +65,16 @@ async function handleClone(body) {
   await fs.mkdir(WORK_DIR, { recursive: true });
   const url = String(body.url ?? "");
 
-  if (url.startsWith("sample:")) {
+  if (url.startsWith("new:")) {
+    // A commissioned realm: bare earth plus a founding stone. The Crown's
+    // charge arrives as the first decree; agents raise the work from nothing.
+    const slug = url.slice("new:".length).replace(/[^a-z0-9-]/gi, "").slice(0, 40) || "commission";
+    await fs.mkdir(REPO_DIR, { recursive: true });
+    await fs.writeFile(
+      path.join(REPO_DIR, "README.md"),
+      `# New Realm — ${slug}\n\nFounded bare by decree of the Crown. The work will rise here, file by file.\n`,
+    );
+  } else if (url.startsWith("sample:")) {
     if (!SAMPLES_DIR) throw new Error("samples not available on this sandbox");
     const name = url.slice("sample:".length).replace(/[^a-z0-9-]/gi, "");
     const src = path.join(SAMPLES_DIR, name);

@@ -57,7 +57,7 @@ function syntheticRun(withBounties) {
   return ev;
 }
 
-async function hostAndPublish(taskId, events) {
+async function hostAndPublish(taskId, events, endMode = "close") {
   const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
   const messages = [];
   ws.on("message", (d) => messages.push(JSON.parse(String(d))));
@@ -75,9 +75,19 @@ async function hostAndPublish(taskId, events) {
   if (!matchId) throw new Error("never hosted");
   for (const e of events) ws.send(JSON.stringify({ type: "publish", event: e }));
   await new Promise((r) => setTimeout(r, 400));
-  ws.close(); // live match + host close → finishMatch(abandoned) unless match_ended came through
+  // Ending is intentional: "save" inters the world, "burn" discards it, and a
+  // raw close (host vanished) must also discard unless match_ended came through.
+  if (endMode === "save") ws.send(JSON.stringify({ type: "end", save: true }));
+  else if (endMode === "burn") ws.send(JSON.stringify({ type: "end", save: false }));
+  await new Promise((r) => setTimeout(r, 200));
+  ws.close();
   await new Promise((r) => setTimeout(r, 400));
   return matchId;
+}
+
+async function finishedIds() {
+  const { finished } = await (await fetch(`${RELAY}/api/matches`)).json();
+  return finished.map((m) => m.matchId);
 }
 
 async function spectateHistory(matchId) {
@@ -145,7 +155,23 @@ try {
   if (hall.entries.length === 1) ok("hall persisted across restart");
   else bad(`hall lost on restart: ${hall.entries.length} entries`);
 
-  // 5. Theme cache PUT validation: garbage → 422, never cached.
+  // 5. Intentional saves: only a save=true farewell joins the prior worlds.
+  const liveOnly = syntheticRun(false).filter((e) => e.type !== "match_ended");
+  const savedId = await hostAndPublish("quit-saved", liveOnly, "save");
+  const burnedId = await hostAndPublish("quit-burned", liveOnly, "burn");
+  const vanishedId = await hostAndPublish("quit-vanished", liveOnly, "close");
+  const ids = await finishedIds();
+  if (ids.includes(savedId)) ok("saved quit joins the prior worlds");
+  else bad(`saved quit missing from finished list: ${JSON.stringify(ids)}`);
+  if (!ids.includes(burnedId)) ok("burned quit leaves no record");
+  else bad("burned quit was listed");
+  if (!ids.includes(vanishedId)) ok("vanished host leaves no record");
+  else bad("vanished host was listed");
+  const savedHistory = await spectateHistory(savedId);
+  if (savedHistory.events.length === liveOnly.length) ok("saved world replays its chronicle");
+  else bad(`saved world history ${savedHistory.events.length} events, expected ${liveOnly.length}`);
+
+  // 6. Theme cache PUT validation: garbage → 422, never cached.
   const put = await fetch(`${RELAY}/api/theme/test-key`, {
     method: "PUT",
     headers: { "content-type": "application/json" },

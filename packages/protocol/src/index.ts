@@ -535,7 +535,9 @@ export const HostMessage = z.discriminatedUnion("type", [
     repoUrl: z.string().optional(),
   }),
   z.object({ type: z.literal("publish"), event: GameEvent }),
-  z.object({ type: z.literal("end") }),
+  // Ending is intentional: save=true inters the world among the prior worlds;
+  // save=false (or a vanished host) discards it entirely.
+  z.object({ type: z.literal("end"), save: z.boolean().optional() }),
 ]);
 export type HostMessage = z.infer<typeof HostMessage>;
 

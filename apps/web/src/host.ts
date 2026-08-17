@@ -29,6 +29,22 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   let settlement: Settlement | null = null;
   let fileReader: ((path: string) => Promise<string>) | null = null;
 
+  // Worlds persist only by choice: departing offers save-or-burn, and only a
+  // saved world joins the Prior Worlds. A vanished tab burns unrecorded.
+  const abort = new AbortController();
+  const warnUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+  window.addEventListener("beforeunload", warnUnload);
+  let matchOver = false;
+  let departed = false;
+  const depart = (save: boolean) => {
+    if (departed) return;
+    departed = true;
+    abort.abort();
+    settlement?.end();
+    end(save);
+    window.removeEventListener("beforeunload", warnUnload);
+  };
+
   const view = createMatchView(root, {
     matchId,
     title: repoLabel,
@@ -64,20 +80,34 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
       const { patch } = await settlement.requestPatch();
       return patch;
     },
+    onLeaveAttempt: () => {
+      if (matchOver || departed) {
+        location.hash = "#/";
+        return;
+      }
+      void view.confirmLeave().then((choice) => {
+        if (choice === "stay") return;
+        depart(choice === "save");
+        location.hash = "#/";
+      });
+    },
   });
   view.showOverlay("loading", "Raising the vessel — a sandbox wakes for this repository…");
   void selectRenderer(view.gameMount).then((r) => view.attachRenderer(r));
 
-  const abort = new AbortController();
-  const warnUnload = (e: BeforeUnloadEvent) => e.preventDefault();
-  window.addEventListener("beforeunload", warnUnload);
   window.addEventListener(
     "hashchange",
     () => {
-      abort.abort();
-      settlement?.end();
-      end();
-      window.removeEventListener("beforeunload", warnUnload);
+      // Browser-driven exits (back button, overlay's return button) can't show
+      // the pretty gate mid-navigation; a native prompt still honors the law.
+      if (!departed && !matchOver) {
+        const save = confirm(
+          "Save this world to the Prior Worlds before you go?\n\nOK — save its chronicle for any visitor to replay.\nCancel — let it burn, unrecorded.",
+        );
+        depart(save);
+      } else {
+        depart(true);
+      }
     },
     { once: true },
   );
@@ -87,7 +117,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     hostToken = await sandbox;
   } catch (err) {
     view.showOverlay("abandoned", `No vessel could be raised: ${String((err as Error).message ?? err)}`);
-    end();
+    depart(false); // a world that never woke leaves no record
     return;
   }
 
@@ -104,6 +134,11 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   const onEvent = (event: Parameters<typeof view.onEvent>[0]) => {
     publish(event);
     view.onEvent(event, false);
+    if (event.type === "match_ended") {
+      // Completed runs are already interred by the relay; exits stop prompting.
+      matchOver = true;
+      window.removeEventListener("beforeunload", warnUnload);
+    }
   };
 
   settlement = new Settlement({

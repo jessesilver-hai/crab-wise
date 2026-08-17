@@ -102,4 +102,5 @@ machines, a global sandbox cap, one settlement per IP.
 - Test parsing is best-effort outside TAP/pytest/jest/go/cargo — unknown
   frameworks fall back to exit codes (one anonymous specter).
 - The relay keeps rooms in memory; a restart forgets finished chronicles.
-- If the host closes their tab, the settlement sleeps (spectators keep the log).
+- Saving is intentional: quitting offers save-or-burn, and only saved worlds
+  join the Prior Worlds. A host tab that simply vanishes burns unrecorded.

@@ -27,7 +27,7 @@ export function hostMatch(
 ): Promise<{
   matchId: string;
   publish: (e: GameEvent) => void;
-  end: () => void;
+  end: (save?: boolean) => void;
   sandbox: Promise<string>;
 }> {
   return new Promise((resolve, reject) => {
@@ -68,8 +68,8 @@ export function hostMatch(
             }
             send({ type: "publish", event });
           },
-          end: () => {
-            if (ws.readyState === WebSocket.OPEN) send({ type: "end" });
+          end: (save?: boolean) => {
+            if (ws.readyState === WebSocket.OPEN) send({ type: "end", save: !!save });
             ws.close();
           },
           sandbox,

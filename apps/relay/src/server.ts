@@ -110,6 +110,15 @@ function recordLegend(match: Match) {
   }
 }
 
+/** Remove a live match without record: no chronicle row, no legend. */
+function discardMatch(match: Match) {
+  if (match.status === "finished") return; // completed runs are already interred
+  match.status = "finished";
+  match.host = null;
+  broadcast(match, { type: "match_over" });
+  matches.delete(match.matchId);
+}
+
 function finishMatch(match: Match, result: "victory" | "defeat" | "abandoned") {
   if (match.status === "finished") return;
   match.status = "finished";
@@ -328,7 +337,10 @@ wss.on("connection", (ws, req) => {
           return;
         }
         if (msg.type === "end" && role === "host" && match) {
-          finishMatch(match, "abandoned");
+          // Saving is intentional: only a save=true farewell joins the
+          // prior worlds; anything else is razed without record.
+          if (msg.save) finishMatch(match, "abandoned");
+          else discardMatch(match);
           // Free the visitor's sandbox slot now, not when the socket closes.
           void sandboxes.destroy(match.matchId);
           return;
@@ -361,8 +373,8 @@ wss.on("connection", (ws, req) => {
     if (role === "spectator") {
       match.spectators.delete(ws);
     } else if (role === "host" && match.status === "live") {
-      // The villagers have abandoned the town.
-      finishMatch(match, "abandoned");
+      // Host vanished without choosing to save: the world is not recorded.
+      discardMatch(match);
       sandboxes.hostDisconnected(match.matchId);
     } else if (role === "host") {
       void sandboxes.destroy(match.matchId);
