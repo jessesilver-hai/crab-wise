@@ -42,6 +42,9 @@ type Match = {
 
 const matches = new Map<string, Match>();
 const sandboxes = new SandboxManager(driverFromEnv());
+// Reap machines stranded by prior relay processes, at boot and on a slow beat.
+void sandboxes.sweepOrphans();
+setInterval(() => void sandboxes.sweepOrphans(), 15 * 60_000).unref();
 
 // In-memory theme cache: repeat visitors to the same repo pay no theming tokens.
 const themeCache = new Map<string, string>();

@@ -372,6 +372,32 @@ console.log("Sandbox slot lifecycle");
   check("visitor slot is free after mid-boot abandon", second === "ok");
   await mgr.destroy("m2");
   check("normal destroy releases the machine", destroyed.includes("m2"));
+
+  // Orphan sweep: a restarted relay must reap machines it no longer owns,
+  // while sparing the fleet of live and still-booting sessions.
+  const reapedNames = [];
+  const sweepDriver = {
+    create: slowDriver.create,
+    fleet: ["sb-live1", "sb-old-a", "sb-old-b", "sb-booting"],
+    sweep: async (keep) => {
+      let n = 0;
+      for (const name of sweepDriver.fleet) {
+        if (keep.has(name)) continue;
+        reapedNames.push(name);
+        n++;
+      }
+      return n;
+    },
+  };
+  const mgr2 = new SandboxManager(sweepDriver);
+  await mgr2.provision("live1", "9.9.9.9");
+  const booting = mgr2.provision("booting", "8.8.8.8");
+  const reaped = await mgr2.sweepOrphans();
+  await booting;
+  check("sweep reaps only orphan machines", reaped === 2 && reapedNames.includes("sb-old-a") && reapedNames.includes("sb-old-b"));
+  check("sweep spares live and booting sessions", !reapedNames.includes("sb-live1") && !reapedNames.includes("sb-booting"));
+  const noSweepMgr = new SandboxManager(slowDriver);
+  check("sweep is a no-op for drivers without fleets", (await noSweepMgr.sweepOrphans()) === 0);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

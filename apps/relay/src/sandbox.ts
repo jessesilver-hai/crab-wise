@@ -13,6 +13,8 @@ export type SandboxHandle = {
 
 export interface SandboxDriver {
   create(sessionId: string): Promise<SandboxHandle>;
+  /** Destroy machines owned by no live session (a restarted relay forgets its fleet). */
+  sweep?(keepNames: Set<string>): Promise<number>;
 }
 
 const SANDBOXD_PATH = path.resolve(
@@ -114,6 +116,17 @@ export class FlyDriver implements SandboxDriver {
       },
     };
   }
+
+  async sweep(keepNames: Set<string>): Promise<number> {
+    const machines: { id: string; name: string }[] = await this.api("GET", "/machines");
+    let reaped = 0;
+    for (const m of machines) {
+      if (keepNames.has(m.name)) continue;
+      await this.api("DELETE", `/machines/${m.id}?force=true`).catch(() => {});
+      reaped++;
+    }
+    return reaped;
+  }
 }
 
 async function waitHealthy(baseUrl: string, timeoutMs: number): Promise<void> {
@@ -157,6 +170,21 @@ export class SandboxManager {
 
   get count(): number {
     return this.sessions.size;
+  }
+
+  /**
+   * Reap machines no live or pending session owns. Session state lives in
+   * relay memory, so every redeploy used to strand its whole fleet until TTL
+   * — and TTL timers died with the process, stranding them forever.
+   */
+  async sweepOrphans(): Promise<number> {
+    if (!this.driver.sweep) return 0;
+    const keep = new Set<string>();
+    for (const id of this.sessions.keys()) keep.add(`sb-${id}`);
+    for (const id of this.pending.keys()) keep.add(`sb-${id}`);
+    const reaped = await this.driver.sweep(keep).catch(() => 0);
+    if (reaped > 0) console.log(`sandbox sweep: reaped ${reaped} orphan machine(s)`);
+    return reaped;
   }
 
   async provision(matchId: string, ip: string): Promise<{ hostToken: string }> {
