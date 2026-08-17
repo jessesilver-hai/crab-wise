@@ -133,18 +133,29 @@ export class Ground {
     this.water.geometry = new THREE.PlaneGeometry(side * 5, side * 5, 40, 40);
     this.water.rotation.x = -Math.PI / 2;
     this.water.position.set((side - 1) / 2, -0.1, (side - 1) / 2);
-    (this.water.material as THREE.MeshLambertMaterial).color.set(this.colors.water);
+    this.tintWaterMats(this.colors.water);
 
     this.buildWaterTiles(map);
     this.buildBridges(map);
     this.buildVeil(map);
   }
 
+  /**
+   * Water must read at any sun/veil state: self-lit toward its own hue so the
+   * sea separates from the sky void and channels glint through dim light.
+   */
+  private tintWaterMats(color: number): void {
+    for (const m of [this.water.material as THREE.MeshLambertMaterial, this.waterTilesMat]) {
+      m.color.set(color);
+      m.emissive.set(color);
+      m.emissiveIntensity = 0.55;
+    }
+  }
+
   /** Re-derive all DNA-driven colors in place (form change via reskin). */
   setDna(colors: GroundColors): void {
     this.colors = colors;
-    (this.water.material as THREE.MeshLambertMaterial).color.set(colors.water);
-    this.waterTilesMat.color.set(colors.water);
+    this.tintWaterMats(colors.water);
     if (this.map) {
       this.computeTileBase();
       this.paint();
@@ -353,9 +364,7 @@ export class Ground {
   }
 
   setWaterColor(color: number): void {
-    const floored = visibleFloor(color, 0x24);
-    (this.water.material as THREE.MeshLambertMaterial).color.set(floored);
-    this.waterTilesMat.color.set(floored);
+    this.tintWaterMats(visibleFloor(color, 0x2c));
   }
 
   // --- fog veil --------------------------------------------------------------
@@ -372,6 +381,17 @@ export class Ground {
     this.fogCur = new Float32Array(r.w * r.h).fill(0.55);
     this.fogTarget = new Float32Array(r.w * r.h).fill(0.55);
     this.fogCleared = new Uint8Array(r.w * r.h);
+    // the sea is not unexplored code: bays and channels show through the veil
+    // so the archipelago silhouette reads from the first frame
+    for (let iz = 0; iz < r.h; iz++) {
+      for (let ix = 0; ix < r.w; ix++) {
+        if (!map.water.has(`${r.x + ix},${r.y + iz}`)) continue;
+        const i = iz * r.w + ix;
+        this.fogCur[i] = 0.12;
+        this.fogTarget[i] = 0.12;
+        this.fogCleared[i] = 1;
+      }
+    }
     const geo = new THREE.PlaneGeometry(r.w, r.h, r.w, r.h);
     geo.rotateX(-Math.PI / 2);
     const colors = new Float32Array((r.w + 1) * (r.h + 1) * 4);
