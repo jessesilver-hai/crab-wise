@@ -126,7 +126,31 @@ input:focus, select:focus { outline: none; border-color: var(--gold); }
 .task-card .t-go { color: var(--dim); font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase; margin-top: 0.45rem; opacity: 0; transition: opacity 0.15s; }
 .task-card:hover .t-go { opacity: 1; color: var(--gold); }
 
-#common-list { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.one-door {
+  color: var(--dim);
+  font-style: italic;
+  font-size: 0.82rem;
+  margin: 0.55rem 0 0.2rem;
+  line-height: 1.45;
+}
+.tier { margin-bottom: 0.9rem; }
+.tier-label {
+  font-family: "Cinzel", Georgia, serif;
+  color: var(--gold);
+  font-size: 0.82rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0.9rem 0 0.45rem;
+}
+.tier-label span {
+  font-family: inherit;
+  color: var(--dim);
+  text-transform: none;
+  letter-spacing: 0.03em;
+  font-style: italic;
+  font-size: 0.76rem;
+}
+.chip-grid { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .common-chip {
   display: inline-flex;
   flex-direction: column;
