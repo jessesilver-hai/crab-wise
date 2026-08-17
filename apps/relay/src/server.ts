@@ -114,12 +114,24 @@ function recordLegend(match: Match) {
 }
 
 /** Remove a live match without record: no chronicle row, no legend. */
-function discardMatch(match: Match) {
-  if (match.status === "finished") return; // completed runs are already interred
+function discardMatch(match: Match, force = false) {
+  if (match.status === "finished" && !force) return; // completed runs are already interred
   match.status = "finished";
   match.host = null;
   broadcast(match, { type: "match_over" });
   matches.delete(match.matchId);
+}
+
+/** A burned world leaves no legend either (its racy obituary may have written one). */
+function unrecordLegend(matchId: string) {
+  const i = hall.findIndex((h) => h.matchId === matchId);
+  if (i < 0) return;
+  hall.splice(i, 1);
+  try {
+    writeFileSync(HALL_PATH, JSON.stringify(hall));
+  } catch (err) {
+    app.log.warn(`hall write failed: ${String(err)}`);
+  }
 }
 
 function finishMatch(match: Match, result: "victory" | "defeat" | "abandoned") {
@@ -341,9 +353,15 @@ wss.on("connection", (ws, req) => {
         }
         if (msg.type === "end" && role === "host" && match) {
           // Saving is intentional: only a save=true farewell joins the
-          // prior worlds; anything else is razed without record.
+          // prior worlds; anything else is razed without record. The explicit
+          // verdict outranks the session's own "abandoned" obituary — the
+          // match_ended event races this message — but a real victory/defeat
+          // stays interred.
           if (msg.save) finishMatch(match, "abandoned");
-          else discardMatch(match);
+          else if (match.status !== "finished" || match.result === "abandoned") {
+            discardMatch(match, true);
+            unrecordLegend(match.matchId);
+          }
           // Free the visitor's sandbox slot now, not when the socket closes.
           void sandboxes.destroy(match.matchId);
           return;

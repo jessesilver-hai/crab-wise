@@ -171,6 +171,24 @@ try {
   if (savedHistory.events.length === liveOnly.length) ok("saved world replays its chronicle");
   else bad(`saved world history ${savedHistory.events.length} events, expected ${liveOnly.length}`);
 
+  // 7. The obituary race: settlement.end() emits match_ended{abandoned} just
+  // before the explicit verdict lands. Burn must still raze the world — and
+  // any legend the racy obituary wrote — but a true victory stays interred.
+  const abandonedObit = syntheticRun(true).map((e) =>
+    e.type === "match_ended" ? { ...e, result: "abandoned" } : e,
+  );
+  const racedBurnId = await hostAndPublish("raced-burn", abandonedObit, "burn");
+  const racedIds = await finishedIds();
+  if (!racedIds.includes(racedBurnId)) ok("burn outranks the abandoned obituary");
+  else bad("raced burn was interred anyway");
+  hall = await (await fetch(`${RELAY}/api/hall`)).json();
+  if (!hall.entries.some((h) => h.matchId === racedBurnId)) ok("raced burn leaves no legend");
+  else bad("raced burn kept its hall legend");
+  const victoryBurnId = await hostAndPublish("victory-then-burn", syntheticRun(true), "burn");
+  const vIds = await finishedIds();
+  if (vIds.includes(victoryBurnId)) ok("a true victory cannot be razed");
+  else bad("completed victory was razed by a burn message");
+
   // 6. Theme cache PUT validation: garbage → 422, never cached.
   const put = await fetch(`${RELAY}/api/theme/test-key`, {
     method: "PUT",

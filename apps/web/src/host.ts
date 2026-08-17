@@ -41,8 +41,10 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     if (departed) return;
     departed = true;
     abort.abort();
-    settlement?.end();
+    // The Crown's verdict travels first: settlement.end() emits an
+    // "abandoned" obituary that must never outrun an explicit burn.
     end(save);
+    settlement?.end();
     window.removeEventListener("beforeunload", warnUnload);
   };
 
