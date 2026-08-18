@@ -222,5 +222,34 @@ export function censusBrief(c: Census): string {
     `tests ${pct(c.testRatio)} of lines · docs ${pct(c.docsRatio)} · config ${pct(c.configRatio)} · binary assets ${pct(c.assetRatio)} of files`,
     `giant files (≥1k lines) hold ${pct(c.giantShare)} of all lines`,
     c.monorepo ? `structure: MONOREPO of ${c.packageDirs} packages — the realm is an archipelago` : `structure: single settlement (${c.topLevelDirs} top-level dirs)`,
+    `world-form: ${compositionBrief(c)}`,
   ].join("\n");
+}
+
+/** The world's macro-form, picked from the measured census. */
+export type CompositionKind = "terrace-mount" | "archipelago" | "ring-city" | "canyon-strata";
+
+/**
+ * Deterministic composition law. Priority order matters: a deeply nested
+ * monorepo is still an archipelago; a deep single-core repo is still a mount.
+ */
+export function pickComposition(census: Census): CompositionKind {
+  if (census.monorepo && census.packageDirs >= 2) return "archipelago";
+  if (census.maxDepth >= 4) return "terrace-mount";
+  if (census.coreShare >= 0.55 && census.topLevelDirs >= 2) return "ring-city";
+  return "canyon-strata";
+}
+
+/** One line naming the composition the layout law picks, with its cause. */
+function compositionBrief(c: Census): string {
+  switch (pickComposition(c)) {
+    case "archipelago":
+      return `ARCHIPELAGO — ${c.packageDirs} package isles in one sea`;
+    case "terrace-mount":
+      return `TERRACE MOUNT — nesting runs ${c.maxDepth} deep, altitude is depth`;
+    case "ring-city":
+      return `RING CITY — ${c.coreDir || "the core"} holds ${(c.coreShare * 100).toFixed(0)}% of all lines, roads circle it`;
+    case "canyon-strata":
+      return `CANYON STRATA — ${c.topLevelDirs} shallow strata along one Long Road`;
+  }
 }

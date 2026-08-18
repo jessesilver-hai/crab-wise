@@ -1,5 +1,5 @@
 import { districtArchetype, type DistrictArchetype, type FileNode } from "@agent-empires/protocol";
-import { analyzeCensus, classifyRole, type Census, type FileRole } from "./census.js";
+import { analyzeCensus, classifyRole, pickComposition, type CompositionKind, type FileRole } from "./census.js";
 
 /**
  * Structural-isomorphism layout: the settlement derives from the repository.
@@ -53,22 +53,10 @@ export const RIVER_MIN_DEPTH = 5;
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
-/** The world's macro-form, picked from the measured census. */
-export type CompositionKind = "terrace-mount" | "archipelago" | "ring-city" | "canyon-strata";
-
 /** One measured import: `from` requires `to` (repo-relative file paths). */
 export type DepEdge = { from: string; to: string };
 
-/**
- * Deterministic composition law. Priority order matters: a deeply nested
- * monorepo is still an archipelago; a deep single-core repo is still a mount.
- */
-export function pickComposition(census: Census): CompositionKind {
-  if (census.monorepo && census.packageDirs >= 2) return "archipelago";
-  if (census.maxDepth >= 4) return "terrace-mount";
-  if (census.coreShare >= 0.55 && census.topLevelDirs >= 2) return "ring-city";
-  return "canyon-strata";
-}
+export { pickComposition, type CompositionKind } from "./census.js";
 
 /** LOC bucket → building size class (0 hut, 1 house, 2 large workshop). */
 export type SizeBucket = 0 | 1 | 2;
