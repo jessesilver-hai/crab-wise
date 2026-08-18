@@ -287,6 +287,8 @@ export const MatchStartedEvent = z.object({
   }),
   mapSeed: z.number(),
   repoTree: FileNode,
+  /** Founding-time import survey: real edges become the street law (v3). */
+  depEdges: z.array(z.object({ from: z.string(), to: z.string() })).optional(),
 });
 
 /** The LLM-generated world skin arrived (may follow match_started by a while). */

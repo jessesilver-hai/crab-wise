@@ -775,7 +775,7 @@ class Game3D {
     this.mapSeed = event.mapSeed;
     this.repoTree = event.repoTree;
     this.archetype = resolveArchetype(this.theme?.biome.archetype, event.mapSeed);
-    const map = layoutMap(event.repoTree, event.mapSeed);
+    const map = layoutMap(event.repoTree, event.mapSeed, event.depEdges);
     this.map = map;
     const hash = layoutHash(map);
     this.layoutHashValue = hash;

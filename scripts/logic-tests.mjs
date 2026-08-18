@@ -695,6 +695,53 @@ console.log("Worlds Apart (composition law)");
   }
 }
 
+// --- Dependency survey: grep hits → real file edges ---------------------------
+console.log("Dependency survey (street law)");
+{
+  const { parseDepHits, resolveDepEdges } = await import("../packages/runtime/src/depscan.ts");
+  const files = [
+    "src/a.ts",
+    "src/b.ts",
+    "src/ui/index.tsx",
+    "packages/y/src/index.ts",
+    "packages/x/src/main.ts",
+    "rich/console.py",
+    "rich/__init__.py",
+    "pkg/mod.py",
+    "pkg/x.py",
+    "src/main/java/com/foo/Bar.java",
+    "src/main/java/com/foo/App.java",
+    "src/main.rs",
+    "src/util.rs",
+    "src/game/map.rs",
+  ];
+  const hits = parseDepHits([
+    './src/a.ts:1:import { b } from "./b";',
+    './src/a.ts:2:import ui from "./ui";',
+    './src/a.ts:3:import React from "react";',
+    './packages/x/src/main.ts:1:import { y } from "@scope/y";',
+    './rich/table.py:9:from rich.console import Console',
+    "./pkg/mod.py:3:from .x import thing",
+    "./src/main/java/com/foo/App.java:4:import com.foo.Bar;",
+    "./src/main.rs:2:mod util;",
+    "./src/main.rs:3:use crate::game::map::Layout;",
+    './src/a.ts:1:import { b } from "./b";',
+  ]);
+  check("grep lines parse with ./ stripped", hits.length === 10 && hits[0].path === "src/a.ts");
+  const edges = resolveDepEdges(hits, [...files, "rich/table.py"]);
+  const has = (from, to) => edges.some((e) => e.from === from && e.to === to);
+  check("js relative resolves with extension inference", has("src/a.ts", "src/b.ts"));
+  check("js dir import resolves to index", has("src/a.ts", "src/ui/index.tsx"));
+  check("external packages resolve to nothing", !edges.some((e) => e.to.includes("react")));
+  check("workspace import maps to the package entry", has("packages/x/src/main.ts", "packages/y/src/index.ts"));
+  check("python absolute import resolves", has("rich/table.py", "rich/console.py"));
+  check("python relative import resolves", has("pkg/mod.py", "pkg/x.py"));
+  check("java unique suffix resolves", has("src/main/java/com/foo/App.java", "src/main/java/com/foo/Bar.java"));
+  check("rust mod resolves to sibling", has("src/main.rs", "src/util.rs"));
+  check("rust use crate:: walks down to the file", has("src/main.rs", "src/game/map.rs"));
+  check("duplicate hits dedupe", edges.filter((e) => e.from === "src/a.ts" && e.to === "src/b.ts").length === 1);
+}
+
 // --- Sandbox slot lifecycle ------------------------------------------------------
 console.log("Sandbox slot lifecycle");
 {

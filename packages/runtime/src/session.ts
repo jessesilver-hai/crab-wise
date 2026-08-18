@@ -8,6 +8,7 @@ import {
   type ThemePack,
 } from "@agent-empires/protocol";
 import { Agent, type Inbox } from "./agent.js";
+import { collectFilePaths, DEP_SCAN_COMMAND, parseDepHits, resolveDepEdges } from "./depscan.js";
 import { Emitter } from "./emitter.js";
 import { heraldCharge, heraldMessage, type HeraldLexicon } from "./herald.js";
 import type { Executor } from "./executor.js";
@@ -296,6 +297,16 @@ export class Settlement {
     const { readme } = await executor.clone(repoUrl);
     const tree = await executor.tree();
 
+    // Founding-time dependency survey: one bounded grep; failure = no streets.
+    let depEdges: { from: string; to: string }[] | undefined;
+    try {
+      const res = await executor.exec(DEP_SCAN_COMMAND, 20_000);
+      const edges = resolveDepEdges(parseDepHits(res.output.split("\n")), collectFilePaths(tree));
+      if (edges.length > 0) depEdges = edges;
+    } catch {
+      // the surveyors came home empty-handed; tree roads only
+    }
+
     this.emitter.emit("match_started", {
       matchId: "",
       task: {
@@ -306,6 +317,7 @@ export class Settlement {
       },
       mapSeed: hashString(repoUrl),
       repoTree: tree,
+      depEdges,
     });
     if (this.theme) this.emitter.emit("theme_ready", { theme: this.theme });
 

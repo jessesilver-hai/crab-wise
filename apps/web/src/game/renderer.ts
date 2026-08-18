@@ -1787,7 +1787,7 @@ class MainScene extends Phaser.Scene {
 
   private buildWorld(event: Extract<GameEvent, { type: "match_started" }>): void {
     this.mapSeed = event.mapSeed;
-    const map = layoutMap(event.repoTree, event.mapSeed);
+    const map = layoutMap(event.repoTree, event.mapSeed, event.depEdges);
     this.map = map;
     const hash = layoutHash(map);
     const terrain = buildTerrain(map, event.mapSeed);
