@@ -1110,5 +1110,27 @@ console.log("Castle Era (master builder law)");
   check("garbage input yields silence", lawfulChoices("nonsense", g).length === 0 && lawfulChoices(null, g).length === 0);
 }
 
+console.log("Castle Era (persistence law)");
+{
+  const { upsertRecord, CASTLE_ID_RE } = await import("../apps/relay/src/castles.ts");
+  const { HostMessage } = await import("../packages/protocol/src/index.ts");
+  const rec = (id, updatedAt, extra = {}) => ({
+    id, name: id, createdAt: updatedAt, updatedAt, commissions: 1, lastTitle: "t", ledger: { version: 1 }, hasBundle: false, ...extra,
+  });
+  const first = upsertRecord([], rec("bakery", 100));
+  check("first save founds the record", first.list.length === 1 && first.list[0].commissions === 1);
+  const again = upsertRecord(first.list, rec("bakery", 200, { hasBundle: true }));
+  check("resave increments commissions and keeps founding date", again.list[0].commissions === 2 && again.list[0].createdAt === 100);
+  check("bundle flag is sticky", upsertRecord(again.list, rec("bakery", 300)).list[0].hasBundle === true);
+  const many = Array.from({ length: 5 }, (_, i) => rec(`c${i}`, i * 10));
+  const capped = upsertRecord(many, rec("fresh", 999), 3);
+  check("eviction drops the oldest", capped.list.length === 3 && capped.evicted.includes("c0") && capped.list[0].id === "fresh");
+  check("castle ids are slugs", CASTLE_ID_RE.test("iron-bakery-9") && !CASTLE_ID_RE.test("Iron Bakery") && !CASTLE_ID_RE.test("a"));
+  const hostMsg = HostMessage.safeParse({ type: "host", protocolVersion: 1, taskId: "t", taskTitle: "T", repoUrl: "castle:bakery", castleId: "bakery" });
+  check("host message carries castleId", hostMsg.success);
+  const endMsg = HostMessage.safeParse({ type: "end", save: true, castle: { id: "bakery", name: "The Bakery", ledger: { version: 1, seed: 7, entries: {} } } });
+  check("end message carries the farewell", endMsg.success);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

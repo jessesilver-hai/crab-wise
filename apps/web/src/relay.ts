@@ -20,14 +20,17 @@ export async function fetchMatches(): Promise<{ live: MatchSummary[]; finished: 
  * Host side: opens the relay socket, returns the assigned match id, a publish
  * fn, and (when repoUrl was given) a promise for the sandbox host token.
  */
+export type CastleFarewell = { id: string; name: string; ledger: unknown };
+
 export function hostMatch(
   taskId: string,
   taskTitle: string,
   repoUrl?: string,
+  castleId?: string,
 ): Promise<{
   matchId: string;
   publish: (e: GameEvent) => void;
-  end: (save?: boolean) => void;
+  end: (save?: boolean, castle?: CastleFarewell) => void;
   sandbox: Promise<string>;
 }> {
   return new Promise((resolve, reject) => {
@@ -43,7 +46,8 @@ export function hostMatch(
     });
     sandbox.catch(() => {}); // demo sessions never await this
 
-    ws.onopen = () => send({ type: "host", protocolVersion: PROTOCOL_VERSION, taskId, taskTitle, repoUrl });
+    ws.onopen = () =>
+      send({ type: "host", protocolVersion: PROTOCOL_VERSION, taskId, taskTitle, repoUrl, castleId });
     ws.onerror = () => reject(new Error("relay connection failed"));
     ws.onmessage = (raw) => {
       const msg = RelayMessage.parse(JSON.parse(raw.data));
@@ -68,8 +72,8 @@ export function hostMatch(
             }
             send({ type: "publish", event });
           },
-          end: (save?: boolean) => {
-            if (ws.readyState === WebSocket.OPEN) send({ type: "end", save: !!save });
+          end: (save?: boolean, castle?: CastleFarewell) => {
+            if (ws.readyState === WebSocket.OPEN) send({ type: "end", save: !!save, castle });
             ws.close();
           },
           sandbox,

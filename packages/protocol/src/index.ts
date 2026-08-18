@@ -303,6 +303,8 @@ export const MatchStartedEvent = z.object({
   depEdges: z.array(z.object({ from: z.string(), to: z.string() })).optional(),
   /** Founding-time fact survey: measured colors/routes/tables (Castle Era). */
   probeHits: z.array(ProbeHit).optional(),
+  /** Castle Era: prior ledger of a persistent castle — claims never move. */
+  castleLedger: z.unknown().optional(),
 });
 
 /** The LLM-generated world skin arrived (may follow match_started by a while). */
@@ -591,13 +593,22 @@ export const HostMessage = z.discriminatedUnion("type", [
     protocolVersion: z.number(),
     taskId: z.string(),
     taskTitle: z.string(),
-    /** Git URL or "sample:<id>". Absent for demo/scripted sessions. */
+    /** Git URL, "sample:<id>", "new:<slug>" or "castle:<id>". Absent for demo sessions. */
     repoUrl: z.string().optional(),
+    /** Castle Era: found upon an existing castle — its bundle seeds the clone. */
+    castleId: z.string().max(64).optional(),
   }),
   z.object({ type: z.literal("publish"), event: GameEvent }),
   // Ending is intentional: save=true inters the world among the prior worlds;
   // save=false (or a vanished host) discards it entirely.
-  z.object({ type: z.literal("end"), save: z.boolean().optional() }),
+  z.object({
+    type: z.literal("end"),
+    save: z.boolean().optional(),
+    /** Castle Era: a saved castle carries its ledger and workspace onward. */
+    castle: z
+      .object({ id: z.string().max(64), name: z.string().max(80), ledger: z.unknown() })
+      .optional(),
+  }),
 ]);
 export type HostMessage = z.infer<typeof HostMessage>;
 

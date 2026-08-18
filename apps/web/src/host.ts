@@ -6,6 +6,8 @@ import { selectRenderer } from "./renderer-select.js";
 import { getCachedTheme, generateTheme, repoKey } from "./themer.js";
 import { analyzeCensus, censusBrief } from "./game/census.js";
 import { buildComponentGraph } from "./game/components.js";
+import { CastleState } from "./game/castlestate.js";
+import type { CastleLedger } from "./game/castle.js";
 import { generateRepresentation } from "./reprloop.js";
 
 export type SettlementStart = {
@@ -15,7 +17,18 @@ export type SettlementStart = {
   model: string;
   /** Auto-issued as the Crown's first decree (sample worlds use this). */
   firstOrder?: string;
+  /** Castle Era: found upon (or found) a persistent castle. */
+  castle?: { id: string; name: string };
 };
+
+/** Only a shape the plan law can actually merge counts as a prior ledger. */
+function asLedger(u: unknown): CastleLedger | undefined {
+  if (typeof u !== "object" || u === null) return undefined;
+  const c = u as { version?: unknown; entries?: unknown; seed?: unknown };
+  if (c.version !== 1 || typeof c.seed !== "number") return undefined;
+  if (typeof c.entries !== "object" || c.entries === null) return undefined;
+  return u as CastleLedger;
+}
 
 /** Model used when the visitor brings no key and the Crown pays via OpenRouter. */
 export const FUNDED_MODEL = "x-ai/grok-4.6";
@@ -25,7 +38,19 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   const funded = !apiKey;
   const model = funded ? FUNDED_MODEL : opts.model;
 
-  const { matchId, publish, end, sandbox } = await hostMatch(repoUrl, repoLabel, repoUrl);
+  // A returning castle brings its ledger (claims never move) and its bundle
+  // (the relay seeds the sandbox before the clone).
+  let priorLedger: CastleLedger | undefined;
+  if (opts.castle) {
+    try {
+      const res = await fetch(`/api/castle/${opts.castle.id}`);
+      if (res.ok) priorLedger = asLedger(((await res.json()) as { ledger?: unknown }).ledger);
+    } catch {
+      // a fresh castle has no record yet
+    }
+  }
+
+  const { matchId, publish, end, sandbox } = await hostMatch(repoUrl, repoLabel, repoUrl, opts.castle?.id);
   history.replaceState(null, "", `#/match/${matchId}`);
 
   root.innerHTML = "";
@@ -45,7 +70,11 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     abort.abort();
     // The Crown's verdict travels first: settlement.end() emits an
     // "abandoned" obituary that must never outrun an explicit burn.
-    end(save);
+    const farewell =
+      save && opts.castle && shadow.plan
+        ? { id: opts.castle.id, name: opts.castle.name, ledger: shadow.plan.ledger }
+        : undefined;
+    end(save, farewell);
     settlement?.end();
     window.removeEventListener("beforeunload", warnUnload);
   };
@@ -136,9 +165,32 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     : undefined;
   const cachedTheme: ThemePack | null = await getCachedTheme(repoKey(repoUrl));
 
+  // The host's shadow castle: the same law the renderer runs, folded here so
+  // the departing ledger (and thus the persistent claims) is host-authoritative.
+  const shadow = new CastleState();
+
   const onEvent = (event: Parameters<typeof view.onEvent>[0]) => {
     publish(event);
     view.onEvent(event, false);
+    try {
+      if (event.type === "match_started") {
+        shadow.found(
+          event.repoTree,
+          event.mapSeed,
+          event.depEdges ?? [],
+          event.probeHits ?? [],
+          priorLedger,
+        );
+      } else if (event.type === "file_write") {
+        shadow.applyWrite(event.path, event.created, event.linesAdded, event.linesRemoved);
+      } else if (event.type === "component_facts") {
+        shadow.applyFacts(event.path, event.hits);
+      } else if (event.type === "castle_repr") {
+        shadow.applyRepr(event.componentId, event.form, event.cited);
+      }
+    } catch {
+      // the shadow must never break the session
+    }
     if (event.type === "match_started") {
       // The Master Builder studies the measured ledger and may re-dress
       // components — lawfully, with citations. The castle never waits on it.
@@ -200,6 +252,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     theme: cachedTheme,
     llm,
     signal: abort.signal,
+    castleLedger: priorLedger,
     onEvent,
   });
 

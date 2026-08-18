@@ -46,12 +46,12 @@ function safePath(rel) {
   return abs;
 }
 
-async function readBody(req) {
+async function readBody(req, limit = 5_000_000) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 5_000_000) throw new Error("body too large");
+    if (size > limit) throw new Error("body too large");
     chunks.push(chunk);
   }
   const text = Buffer.concat(chunks).toString("utf-8");
@@ -60,15 +60,26 @@ async function readBody(req) {
 
 // --- git clone / samples -----------------------------------------------------
 
+const SEED_BUNDLE = path.join(WORK_DIR, "seed.bundle");
+
 async function handleClone(body) {
   await fs.rm(REPO_DIR, { recursive: true, force: true });
   await fs.mkdir(WORK_DIR, { recursive: true });
   const url = String(body.url ?? "");
 
-  if (url.startsWith("new:")) {
+  const hasSeed = await fs.access(SEED_BUNDLE).then(() => true, () => false);
+  if (hasSeed) {
+    // A persistent castle returns: its archived workspace outranks the url.
+    await execFileP("git", ["clone", SEED_BUNDLE, REPO_DIR], {
+      timeout: CLONE_TIMEOUT,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    await fs.rm(SEED_BUNDLE, { force: true });
+  } else if (url.startsWith("new:") || url.startsWith("castle:")) {
     // A commissioned realm: bare earth plus a founding stone. The Crown's
     // charge arrives as the first decree; agents raise the work from nothing.
-    const slug = url.slice("new:".length).replace(/[^a-z0-9-]/gi, "").slice(0, 40) || "commission";
+    const prefix = url.startsWith("new:") ? "new:" : "castle:";
+    const slug = url.slice(prefix.length).replace(/[^a-z0-9-]/gi, "").slice(0, 40) || "commission";
     await fs.mkdir(REPO_DIR, { recursive: true });
     await fs.writeFile(
       path.join(REPO_DIR, "README.md"),
@@ -257,6 +268,38 @@ function handleExec(body) {
   });
 }
 
+// --- castle archive / seed --------------------------------------------------
+// A saved castle's workspace leaves the machine as a git bundle and returns
+// as a seed the next founding's clone prefers over any url.
+
+const MAX_BUNDLE_BYTES = 30_000_000;
+
+async function handleArchive() {
+  await execFileP("git", ["add", "-A"], { cwd: REPO_DIR });
+  // nothing new to commit is fine; the bundle still carries every ref
+  await execFileP("git", ["commit", "-qm", "the castle rests"], { cwd: REPO_DIR }).catch(() => {});
+  const bundlePath = path.join(WORK_DIR, "castle.bundle");
+  await fs.rm(bundlePath, { force: true });
+  await execFileP("git", ["bundle", "create", bundlePath, "--all"], {
+    cwd: REPO_DIR,
+    timeout: CLONE_TIMEOUT,
+  });
+  const buf = await fs.readFile(bundlePath);
+  await fs.rm(bundlePath, { force: true });
+  if (buf.length > MAX_BUNDLE_BYTES) throw new Error("the castle is too heavy to carry");
+  return { ok: true, bytes: buf.length, bundleB64: buf.toString("base64") };
+}
+
+async function handleSeed(body) {
+  const b64 = String(body.bundleB64 ?? "");
+  const buf = Buffer.from(b64, "base64");
+  if (buf.length === 0) throw new Error("empty bundle");
+  if (buf.length > MAX_BUNDLE_BYTES) throw new Error("bundle too large");
+  await fs.mkdir(WORK_DIR, { recursive: true });
+  await fs.writeFile(SEED_BUNDLE, buf);
+  return { ok: true, bytes: buf.length };
+}
+
 // --- diff -----------------------------------------------------------------------
 
 async function handleDiff() {
@@ -285,11 +328,15 @@ const server = createServer(async (req, res) => {
     if (!TOKEN || req.headers.authorization !== `Bearer ${TOKEN}`) {
       return send(401, { error: "unauthorized" });
     }
-    const body = req.method === "POST" ? await readBody(req) : {};
+    const body = req.method === "POST" ? await readBody(req, req.url === "/seed" ? 45_000_000 : undefined) : {};
 
     switch (req.url) {
       case "/clone":
         return send(200, await handleClone(body));
+      case "/archive":
+        return send(200, await handleArchive());
+      case "/seed":
+        return send(200, await handleSeed(body));
       case "/tree":
         return send(200, { tree: await buildTree(REPO_DIR, "", 0, { files: MAX_TREE_FILES, lineBytes: 64_000_000 }) });
       case "/read": {

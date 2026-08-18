@@ -28,6 +28,8 @@ export type SettlementOptions = {
   onEvent: (event: GameEvent) => void;
   theme?: ThemePack | null;
   signal?: AbortSignal;
+  /** Castle Era: prior ledger of a persistent castle, passed through opaque. */
+  castleLedger?: unknown;
 };
 
 const MAX_ROUNDS_PER_ORDER = 3;
@@ -339,6 +341,7 @@ export class Settlement {
       repoTree: tree,
       depEdges,
       probeHits,
+      castleLedger: this.opts.castleLedger,
     });
     if (this.theme) this.emitter.emit("theme_ready", { theme: this.theme });
 

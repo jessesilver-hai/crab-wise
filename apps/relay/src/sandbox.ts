@@ -255,6 +255,27 @@ export class SandboxManager {
     return { status: res.status, body: await res.text() };
   }
 
+  /**
+   * Relay-internal sandboxd call (castle seed/archive) — no host token, not
+   * reachable through the public proxy whitelist.
+   */
+  async call(matchId: string, op: "seed" | "archive", body: unknown): Promise<unknown> {
+    const session = this.sessions.get(matchId);
+    if (!session) throw new Error("no such session");
+    const res = await fetch(`${session.handle.baseUrl}/${op}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${session.handle.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`sandboxd ${op}: ${res.status} ${text.slice(0, 200)}`);
+    return JSON.parse(text);
+  }
+
   /** Host socket dropped: destroy after a grace period (they may refresh). */
   hostDisconnected(matchId: string): void {
     const session = this.sessions.get(matchId);

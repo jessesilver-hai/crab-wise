@@ -16,6 +16,7 @@ import {
   type HallEntry,
 } from "@agent-empires/protocol";
 import { SandboxManager, driverFromEnv } from "./sandbox.js";
+import { CastleStore, CASTLE_ID_RE } from "./castles.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const MAX_FINISHED_MATCHES = 50;
@@ -38,6 +39,8 @@ type Match = {
   events: GameEvent[];
   host: WebSocket | null;
   spectators: Set<WebSocket>;
+  /** Castle Era: this match founds upon (or founds) a persistent castle. */
+  castleId?: string;
 };
 
 const matches = new Map<string, Match>();
@@ -79,6 +82,11 @@ function summarize(m: Match): MatchSummary {
     spectators: m.spectators.size,
   };
 }
+
+// --- Persistent castles: records + workspace bundles on the data volume ------
+const CASTLES_PATH = process.env.CASTLES_PATH ?? path.join(process.cwd(), "data", "castles.json");
+const CASTLE_BUNDLES_DIR = process.env.CASTLE_BUNDLES_DIR ?? path.join(process.cwd(), "data", "castles");
+const castles = new CastleStore(CASTLES_PATH, CASTLE_BUNDLES_DIR);
 
 // --- Hall of Legends: finished settlements ranked by renown, persisted -------
 const HALL_PATH = process.env.HALL_PATH ?? path.join(process.cwd(), "data", "hall.json");
@@ -168,6 +176,17 @@ app.get("/api/matches", async () => {
 app.get("/healthz", async () => ({ ok: true }));
 
 app.get("/api/hall", async () => ({ entries: hall.slice(0, 50) }));
+
+// --- Persistent castles ------------------------------------------------------
+
+app.get("/api/castles", async () => ({ castles: castles.list() }));
+
+app.get<{ Params: { id: string } }>("/api/castle/:id", async (req, reply) => {
+  if (!CASTLE_ID_RE.test(req.params.id)) return reply.code(400).send({ error: "invalid castle id" });
+  const rec = castles.get(req.params.id);
+  if (!rec) return reply.code(404).send({ error: "no such castle" });
+  return rec;
+});
 
 // --- Sandbox tool-call proxy (host-only, bearer hostToken) -------------------
 
@@ -329,6 +348,7 @@ wss.on("connection", (ws, req) => {
             events: [],
             host: ws,
             spectators: new Set(),
+            castleId: msg.castleId && CASTLE_ID_RE.test(msg.castleId) ? msg.castleId : undefined,
           };
           matches.set(match.matchId, match);
           send(ws, { type: "hosted", matchId: match.matchId });
@@ -337,7 +357,20 @@ wss.on("connection", (ws, req) => {
             const target = match;
             sandboxes
               .provision(target.matchId, ip)
-              .then(({ hostToken }) => send(ws, { type: "sandbox_ready", token: hostToken }))
+              .then(async ({ hostToken }) => {
+                // A returning castle's workspace rides in before the clone.
+                if (target.castleId) {
+                  const bundle = castles.readBundle(target.castleId);
+                  if (bundle) {
+                    try {
+                      await sandboxes.call(target.matchId, "seed", { bundleB64: bundle.toString("base64") });
+                    } catch (err) {
+                      app.log.warn(`castle seed failed for ${target.castleId}: ${String(err)}`);
+                    }
+                  }
+                }
+                send(ws, { type: "sandbox_ready", token: hostToken });
+              })
               .catch((err) => send(ws, { type: "sandbox_error", message: String(err?.message ?? err) }));
           }
           return;
@@ -362,8 +395,37 @@ wss.on("connection", (ws, req) => {
             discardMatch(match, true);
             unrecordLegend(match.matchId);
           }
-          // Free the visitor's sandbox slot now, not when the socket closes.
-          void sandboxes.destroy(match.matchId);
+          // A saved castle carries its workspace and ledger onward; the
+          // archive must land before the machine is freed.
+          const target = match;
+          const castle = msg.save ? msg.castle : undefined;
+          void (async () => {
+            if (castle && CASTLE_ID_RE.test(castle.id)) {
+              let hasBundle = castles.hasBundle(castle.id);
+              try {
+                const res = (await sandboxes.call(target.matchId, "archive", {})) as { bundleB64?: string };
+                if (res.bundleB64) {
+                  castles.writeBundle(castle.id, Buffer.from(res.bundleB64, "base64"));
+                  hasBundle = true;
+                }
+              } catch (err) {
+                app.log.warn(`castle archive failed for ${castle.id}: ${String(err)}`);
+              }
+              try {
+                castles.save({
+                  id: castle.id,
+                  name: castle.name.slice(0, 80) || castle.id,
+                  lastTitle: target.taskTitle,
+                  ledger: castle.ledger,
+                  hasBundle,
+                });
+              } catch (err) {
+                app.log.warn(`castle record failed for ${castle.id}: ${String(err)}`);
+              }
+            }
+            // Free the visitor's sandbox slot now, not when the socket closes.
+            await sandboxes.destroy(target.matchId);
+          })();
           return;
         }
       }
