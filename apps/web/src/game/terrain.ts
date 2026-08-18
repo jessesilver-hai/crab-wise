@@ -46,6 +46,8 @@ export type TerrainInfo = {
   isWater(tx: number, ty: number): boolean;
   isRoad(tx: number, ty: number): boolean;
   inCity(tx: number, ty: number): boolean;
+  /** Painted lift (px) of a water tile's surface — in-city canals ride high. */
+  waterLiftAt(tx: number, ty: number): number;
   /** Ground surface screen y at fractional tile coords (plateau-aware). */
   groundY(x: number, y: number): number;
 };
@@ -91,6 +93,54 @@ export function buildTerrain(map: MapLayout, seed: number): TerrainInfo {
         ? 1 + (map.heights.get(`${tx},${ty}`) ?? 0)
         : 0;
 
+  // In-city water paints brim-full: without this a 1-tile channel hides its
+  // own surface behind the near bank's cliff and the sea reads as a trench.
+  // Each connected channel/bay finds one level — a lip below its lowest bank —
+  // and the whole region floats there. Gameplay height stays 0 (the heights
+  // law never raises water); only the painted surface and groundY lift.
+  const CANAL_LIP = 10;
+  const waterLift = new Uint16Array(side * side);
+  {
+    const seen = new Uint8Array(side * side);
+    const DIRS = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const;
+    for (let ty = c.y; ty < c.y + c.h; ty++) {
+      for (let tx = c.x; tx < c.x + c.w; tx++) {
+        const start = ty * side + tx;
+        if (carved[start] !== 1 || seen[start] === 1) continue;
+        const region: number[] = [start];
+        seen[start] = 1;
+        let bank = Infinity;
+        for (let qi = 0; qi < region.length; qi++) {
+          const cur = region[qi]!;
+          const cx = cur % side;
+          const cy = (cur - cx) / side;
+          for (const [dx, dy] of DIRS) {
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (!inBounds(nx, ny)) continue;
+            const ni = ny * side + nx;
+            if (carved[ni] === 1) {
+              if (inCity(nx, ny) && seen[ni] !== 1) {
+                seen[ni] = 1;
+                region.push(ni);
+              }
+              continue;
+            }
+            if (water[ni] !== 1) bank = Math.min(bank, heightAt(nx, ny));
+          }
+        }
+        if (!Number.isFinite(bank) || bank < 1) continue;
+        const lift = bank * LIFT - CANAL_LIP;
+        for (const idx of region) waterLift[idx] = lift;
+      }
+    }
+  }
+
   return {
     side,
     water,
@@ -98,8 +148,12 @@ export function buildTerrain(map: MapLayout, seed: number): TerrainInfo {
     inCity,
     isWater: (tx, ty) => (inBounds(tx, ty) ? water[ty * side + tx] === 1 : false),
     isRoad: (tx, ty) => map.roads.has(`${tx},${ty}`),
+    waterLiftAt: (tx, ty) => (inBounds(tx, ty) ? waterLift[ty * side + tx]! : 0),
     groundY(x: number, y: number): number {
-      return isoY(x, y) - heightAt(Math.round(x), Math.round(y)) * LIFT;
+      const tx = Math.round(x);
+      const ty = Math.round(y);
+      if (inBounds(tx, ty) && water[ty * side + tx] === 1) return isoY(x, y) - waterLift[ty * side + tx]!;
+      return isoY(x, y) - heightAt(tx, ty) * LIFT;
     },
   };
 }
@@ -181,6 +235,7 @@ export function paintTerrain(
       const ty = d - tx;
       const i = ty * side + tx;
       if (t.isWater(tx, ty)) {
+        const lift = t.waterLiftAt(tx, ty);
         let m = 0;
         if (tx - 1 >= 0 && !t.isWater(tx - 1, ty)) m |= 1; // NW land
         if (ty - 1 >= 0 && !t.isWater(tx, ty - 1)) m |= 2; // NE land
@@ -188,12 +243,16 @@ export function paintTerrain(
         if (tx + 1 < side && !t.isWater(tx + 1, ty)) m |= 8; // SE land
         let frame: string;
         if (m === 0) frame = rng() < 0.03 ? pick(T.waterIsles) : pick(T.water);
-        else {
+        else if (lift > 0) {
+          // canal tiles: banks are stone lips, never grassy shores — plain
+          // water keeps the channel an unbroken ribbon
+          frame = pick(T.water);
+        } else {
           const table =
             T.shore[m] ?? T.shore[m & 3] ?? T.shore[m & 12] ?? T.shore[m & 5] ?? T.shore[m & 10];
           frame = table ? pick(table) : pick(T.water);
         }
-        stamp(frame, tx, ty, FLOOR_ORIGIN_Y, 0);
+        stamp(frame, tx, ty, FLOOR_ORIGIN_Y, lift);
         miniColors[i] = MINI.water;
         continue;
       }
