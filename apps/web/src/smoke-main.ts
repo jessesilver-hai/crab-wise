@@ -1,6 +1,7 @@
-/* Temporary headed smoke harness for the sprite renderer (not shipped). */
+/* Temporary headed smoke harness for the renderers (not shipped). Default
+ * mounts the 3D engine like the real app; `?r=2d` picks the sprite engine. */
 import type { FileNode, GameEvent } from "@agent-empires/protocol";
-import { attachGameRenderer } from "./game/renderer.js";
+import { selectRenderer } from "./renderer-select.js";
 
 type FN = FileNode & { lines?: number };
 const file = (path: string, lines?: number): FN =>
@@ -98,15 +99,15 @@ const [MOVE1, MOVE2, MOVE3] = MOVE_PATHS[COMP] ?? MOVE_PATHS.terrace ?? [];
 const countFiles = (n: FN): number =>
   n.kind === "file" ? 1 : (n.children ?? []).reduce((s, c) => s + countFiles(c as FN), 0);
 
-const r = attachGameRenderer(document.getElementById("app")!);
-r.setOrderHandler((kind, target, agentId) =>
-  console.info(`[order] ${kind} → ${target} (by ${agentId ?? "?"})`),
-);
-const ev = (e: GameEvent) => r.handleEvent(e, false);
-
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
 (async () => {
+  const r = await selectRenderer(document.getElementById("app")!);
+  r.setOrderHandler?.((kind, target, agentId) =>
+    console.info(`[order] ${kind} → ${target} (by ${agentId ?? "?"})`),
+  );
+  const ev = (e: GameEvent) => r.handleEvent(e, false);
+
   ev({
     type: "match_started",
     matchId: "smoke",
@@ -117,17 +118,21 @@ const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
   } as GameEvent);
   await sleep(1200);
 
-  // building-count assert: every file visible once fog is lifted
-  const scene = (globalThis as Record<string, unknown>).__aeScene as {
-    buildings: Map<string, unknown>;
-    map: { hamlets: { count: number }[] };
-  };
-  const total = countFiles(TREE);
-  const hamletFiles = scene.map.hamlets.reduce((s, h) => s + h.count, 0);
-  const shown = scene.buildings.size - 1 + hamletFiles; // minus the Citadel
-  console.info(
-    `[smoke] building-count ${shown === total ? "PASS" : "FAIL"}: files=${total} rendered=${shown}`,
-  );
+  // building-count assert (2D engine only — the 3D scene keeps no such map)
+  const scene = (globalThis as Record<string, unknown>).__aeScene as
+    | {
+        buildings: Map<string, unknown>;
+        map: { hamlets: { count: number }[] };
+      }
+    | undefined;
+  if (scene) {
+    const total = countFiles(TREE);
+    const hamletFiles = scene.map.hamlets.reduce((s, h) => s + h.count, 0);
+    const shown = scene.buildings.size - 1 + hamletFiles; // minus the Citadel
+    console.info(
+      `[smoke] building-count ${shown === total ? "PASS" : "FAIL"}: files=${total} rendered=${shown}`,
+    );
+  }
 
   ev({ type: "agent_spawned", agentId: "king", role: "orchestrator", name: "Aldwin the Grey", model: "m", charge: "Mend the broken parser." } as GameEvent);
   ev({ type: "agent_spawned", agentId: "w1", role: "worker", name: "Ashka the Mason", model: "m", charge: "Rebuild the lexer." } as GameEvent);
