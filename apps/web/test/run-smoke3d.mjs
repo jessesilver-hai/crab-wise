@@ -145,10 +145,11 @@ ws.onerror = (e) => {
   console.error("[run-smoke3d] ws error", e?.message ?? e);
 };
 
+// the composition-law scenario worlds add four extra builds after the main run
 const t0 = Date.now();
-while (!summary && Date.now() - t0 < 240000) await sleep(500);
+while (!summary && Date.now() - t0 < 360000) await sleep(500);
 if (!summary) {
-  console.error("[run-smoke3d] timeout: no SUMMARY within 240s");
+  console.error("[run-smoke3d] timeout: no SUMMARY within 360s");
   cleanup(1);
 }
 const ok = summary.fail === 0 && !sawFail && checks === summary.pass + summary.fail;

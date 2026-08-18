@@ -28,8 +28,9 @@ import { visibleFloor } from "../game/palette.js";
 import { resolveArchetype, type Archetype } from "../game/archetypes.js";
 import { analyzeCensus, districtCensus, surveyLine, type Census } from "../game/census.js";
 import { createShroud, type Shroud } from "../game/shroud.js";
-import { deriveWorldDNA, type TimeOfDay, type WorldDNA } from "../game/worlddna.js";
+import { deriveWorldDNA, type ScaleTier, type TimeOfDay, type WorldDNA } from "../game/worlddna.js";
 import { Assets } from "./assets.js";
+import { heightAt, levelAt } from "./terrain3d.js";
 import { RtsCamera, isTypingTarget } from "./camera.js";
 import { City, type BuildingRec3D, type PickInfo } from "./city.js";
 import { Ground } from "./ground.js";
@@ -58,6 +59,9 @@ const TIME_OF_DAY: Record<TimeOfDay, { azimuth: number; elevation: number; color
 const VEGETATION_MULT: Record<string, number> = { barren: 0.15, sparse: 0.5, wooded: 1.0, lush: 1.6 };
 /** Ambient never drops below this — the night world stays readable. */
 const AMBIENT_FLOOR = 0.35;
+
+/** Scale-tier camera envelope: how far out each world lets the eye pull. */
+const TIER_ZOOM_CAP: Record<ScaleTier, number> = { hamlet: 46, town: 100, city: 150, metropolis: 190 };
 
 /** The renderer handle: match-view's Renderer plus the in-world hooks. */
 export type GameRendererHandle = Renderer & {
@@ -290,6 +294,12 @@ class Game3D {
       waterTilesRendered: () => this.ground.waterTileCount,
       bridgesRendered: () => this.ground.bridgeCount,
       decorStats: () => this.city.decorStats(),
+      // Worlds Apart introspection: terrain, streets, typology, monument
+      heightAt: (tx: number, ty: number) => (this.map ? levelAt(this.map, tx, ty) : 0),
+      streetTiles: () => this.ground.streetTileCount,
+      structureAt: (path: string) => this.city.structureAt(path),
+      landmark: () => this.city.landmarkInfo(),
+      composition: () => this.map?.composition ?? null,
       buildings: () => this.city.buildings,
       instanceCount: () => this.city.buildingInstanceCount(),
       drawCalls: () => this.renderer.info.render.calls,
@@ -319,7 +329,7 @@ class Game3D {
       projectTile: (tx: number, ty: number) => {
         const w = this.mount.clientWidth || 800;
         const h = this.mount.clientHeight || 600;
-        return this.cam.worldToScreen(new THREE.Vector3(tx, 0, ty), w, h);
+        return this.cam.worldToScreen(new THREE.Vector3(tx, this.groundH(tx, ty), ty), w, h);
       },
       projectWorld: (x: number, y: number, z: number) => {
         const w = this.mount.clientWidth || 800;
@@ -464,33 +474,49 @@ class Game3D {
     );
     const list = [...this.unitPickables, ...this.city.pickables, ...this.extraPickables];
     const hits = this.raycaster.intersectObjects(list, false);
-    const found: PickInfo[] = [];
+    const found: { pick: PickInfo; dist: number }[] = [];
     for (const hit of hits) {
       const obj = hit.object;
       const direct = obj.userData.pick as PickInfo | undefined;
       if (direct) {
-        if (this.pickVisible(direct)) found.push(direct);
+        if (this.pickVisible(direct)) found.push({ pick: direct, dist: hit.distance });
         continue;
       }
       if ((obj as THREE.InstancedMesh).isInstancedMesh && hit.instanceId !== undefined) {
         const path = this.city.pathForInstance(obj as THREE.InstancedMesh, hit.instanceId);
         if (path && (!this.shroud || this.shroud.plotVisible(path))) {
-          found.push({ kind: "building", path });
+          found.push({ pick: { kind: "building", path }, dist: hit.distance });
         }
       }
     }
+    if (found.length === 0) return null;
+    // verb priority breaks ties among near-coincident hits only; a monument
+    // or obelisk in front must not lose to a building the ray clips far behind
+    const nearest = Math.min(...found.map((f) => f.dist));
+    const near = found.filter((f) => f.dist <= nearest + 0.8);
     const pri = ["unit", "raider", "building", "hamlet", "hook", "landmark", "prop"] as const;
     for (const k of pri) {
-      const f = found.find((p) => p.kind === k);
-      if (f) return f;
+      const f = near.find((p) => p.pick.kind === k);
+      if (f) return f.pick;
     }
-    return null;
+    return near[0]!.pick;
   }
+
+  /** Terrain sampler shared by everything that stands on the ground. */
+  private groundH = (x: number, z: number): number => (this.map ? heightAt(this.map, x, z) : 0);
 
   private groundPointAt(px: number, py: number): THREE.Vector3 {
     const w = this.mount.clientWidth || 800;
     const h = this.mount.clientHeight || 600;
-    return this.cam.screenToGround(px, py, w, h);
+    // iterate the pick plane onto the terrain so clicks on plateaus land true
+    let g = this.cam.screenToGround(px, py, w, h);
+    if (!this.map) return g;
+    for (let i = 0; i < 2; i++) {
+      const th = this.groundH(g.x, g.z);
+      if (Math.abs(th - g.y) < 1e-3) break;
+      g = this.cam.screenToGround(px, py, w, h, th);
+    }
+    return g;
   }
 
   // --- OSRS verbs --------------------------------------------------------------
@@ -714,7 +740,7 @@ class Game3D {
     const rrec = this.raiders.get(key);
     const name = rrec?.name ?? key;
     this.onOrder?.("hunt", name);
-    if (rrec) this.fx.float(`⚔ hunt: ${name.slice(0, 24)}`, rrec.unit.x, rrec.unit.z, 1.2, 0xd05a48);
+    if (rrec) this.fx.float(`⚔ hunt: ${name.slice(0, 24)}`, rrec.unit.x, rrec.unit.z, rrec.unit.y + 1.2, 0xd05a48);
     console.info(`HUNT:${name}`);
   }
 
@@ -722,13 +748,13 @@ class Game3D {
     if (path === "__towncenter__") return;
     this.onOrder?.("attend", path);
     const rec = this.city.buildings.get(path);
-    if (rec) this.fx.float("⚑ attend", rec.tx, rec.ty, 1.1, this.accent);
+    if (rec) this.fx.float("⚑ attend", rec.tx, rec.ty, 1.1 + this.groundH(rec.tx, rec.ty), this.accent);
     console.info(`ATTEND:${path}`);
   }
 
   /** Cosmetic waypoint (no unit selection model in 3D — flag only). */
   private walkHere(wx: number, wz: number): void {
-    this.fx.float("⚑", wx, wz, 0.4, this.accent, 26);
+    this.fx.float("⚑", wx, wz, 0.4 + this.groundH(wx, wz), this.accent, 26);
   }
 
   // --- OSRS feel: xp drops, level-ups ----------------------------------------
@@ -741,7 +767,7 @@ class Game3D {
     const spawn = () => {
       const rec = this.agents.get(agentId);
       if (!rec || this.destroyed) return;
-      this.fx.float(`◆ +${xp} ${skill}`, rec.unit.x, rec.unit.z, rec.unit.headHeight + 0.3, color, 20);
+      this.fx.float(`◆ +${xp} ${skill}`, rec.unit.x, rec.unit.z, rec.unit.y + rec.unit.headHeight + 0.3, color, 20);
     };
     if (start <= now) spawn();
     else {
@@ -756,8 +782,8 @@ class Game3D {
   showLevelUp(agentId: string, skill: string, level: number): void {
     const rec = this.agents.get(agentId);
     if (!rec) return;
-    this.fx.burst(rec.unit.x, rec.unit.headHeight + 0.3, rec.unit.z, [0xffd75e, 0xfff2c8, this.accent, 0xffb347]);
-    this.fx.banner(`⚔ ${skill} Level ${level}!`, rec.unit.x, rec.unit.z, rec.unit.headHeight + 0.6);
+    this.fx.burst(rec.unit.x, rec.unit.y + rec.unit.headHeight + 0.3, rec.unit.z, [0xffd75e, 0xfff2c8, this.accent, 0xffb347]);
+    this.fx.banner(`⚔ ${skill} Level ${level}!`, rec.unit.x, rec.unit.z, rec.unit.y + rec.unit.headHeight + 0.6);
   }
 
   setSkillStats(agentId: string, stats: { total: number; top: [string, number][] }): void {
@@ -765,11 +791,6 @@ class Game3D {
   }
 
   // --- world -------------------------------------------------------------------
-
-  private archetypeAt = (path: string): DistrictArchetype => {
-    if (!this.map) return "quarter";
-    return quarterOf(this.map, path)?.archetype ?? "quarter";
-  };
 
   private buildWorld(event: Extract<GameEvent, { type: "match_started" }>): void {
     this.mapSeed = event.mapSeed;
@@ -796,7 +817,7 @@ class Game3D {
     // deep veil before the city builds: instances bake their dimmed light
     for (const q of map.quarters) this.ground.veilQuarterRect(q.rect);
     this.ground.onFogTile = (tx, ty, alpha) => this.city.setTileLight(tx, ty, alpha);
-    this.city.buildWorld(map, event.mapSeed, this.archetypeAt, this.ground.fogAlphaAt, dna, this.degraded);
+    this.city.buildWorld(map, event.mapSeed, this.ground.fogAlphaAt, dna, this.degraded);
     this.city.retintFlags(dna.buildingTint.trim);
     this.buildDistrictLabels(map);
 
@@ -805,6 +826,10 @@ class Game3D {
     const tc = map.townCenter;
     this.citadel = { x: tc.tx, z: tc.ty, tx: tc.tx, ty: tc.ty };
     this.ground.reveal(tc.tx, tc.ty, 4, true);
+
+    // the Crown landmark: one census-cited monument, lit from frame one
+    const lm = this.city.placeLandmark(map, dna);
+    if (lm) this.ground.reveal(lm.tx, lm.ty, 2, true);
 
     // sun from DNA, shadow frustum covering the whole city
     this.applySun(dna);
@@ -820,7 +845,9 @@ class Game3D {
 
     const aspect = (this.mount.clientWidth || 800) / (this.mount.clientHeight || 600);
     this.cam.setBounds(map.cityRect);
-    this.cam.frame(map.cityRect, aspect);
+    // scale envelope: hamlets start close on a tight leash, metropolises wide
+    this.cam.setZoomEnvelope(Math.min(TIER_ZOOM_CAP[dna.scaleTier], Math.max(26, map.side * 1.6)));
+    this.cam.frame(map.cityRect, aspect, dna.scaleTier === "hamlet" ? 0.75 : 1);
 
     this.overlay.bakeMinimap(map, this.ground.tileColors);
     if (this.theme) this.reskin(this.theme);
@@ -871,18 +898,20 @@ class Game3D {
       if (q.depth === 2 && size < 7) continue;
       const name = q.path.split("/").pop() ?? q.path;
       const label = name.length > 20 ? `${name.slice(0, 19)}…` : name;
-      put(label, q.rect.x + q.rect.w / 2, q.rect.y + q.rect.h / 2, {
+      const cx = q.rect.x + q.rect.w / 2;
+      const cy = q.rect.y + q.rect.h / 2;
+      put(label, cx, cy, {
         sizePx: 34,
         color: q.depth === 1 ? "#f0d9a0" : "#c9b98e",
         worldH: q.depth === 1 ? Math.min(2.4, Math.max(1.25, size * 0.1)) : 0.9,
-        y: q.depth === 1 ? 3.4 : 2.1,
+        y: (q.depth === 1 ? 3.4 : 2.1) + this.groundH(cx, cy),
       });
     }
     put("⚜ THE CITADEL", map.townCenter.tx, map.townCenter.ty, {
       sizePx: 36,
       color: "#ffe9a8",
       worldH: 1.5,
-      y: 4.6,
+      y: 4.6 + this.groundH(map.townCenter.tx, map.townCenter.ty),
     });
   }
 
@@ -917,7 +946,7 @@ class Game3D {
           const y = ty + dy;
           if (x < 1 || y < 1 || x >= map.side - 1 || y >= map.side - 1) continue;
           const key = `${x},${y}`;
-          if (map.used.has(key) || map.roads.has(key)) continue;
+          if (map.used.has(key) || map.roads.has(key) || map.streets.has(key)) continue;
           map.used.add(key);
           return { tx: x, ty: y };
         }
@@ -975,6 +1004,7 @@ class Game3D {
           isKing ? "hero" : "villager",
           isKing ? 0.74 : 0.62,
         );
+        unit.groundY = this.groundH;
         const jitter = () => (Math.random() - 0.5) * 2.2;
         unit.setPosition(this.citadel.x + jitter(), this.citadel.z + 1.6 + jitter() / 2);
         this.scene.add(unit.group);
@@ -1016,7 +1046,7 @@ class Game3D {
         this.autoRevealAt(e.path, historical);
         const pos = this.posForPath(e.path);
         this.ground.reveal(pos.tx, pos.ty, 1, historical);
-        if (!historical) this.fx.float("✦", pos.x, pos.z, 0.6, this.accent, 18);
+        if (!historical) this.fx.float("✦", pos.x, pos.z, 0.6 + this.groundH(pos.x, pos.z), this.accent, 18);
         this.setSite(e.agentId, e.path, historical);
         break;
       }
@@ -1032,7 +1062,7 @@ class Game3D {
           this.autoRevealAt(path, historical);
           const pos = this.posForPath(path);
           this.ground.reveal(pos.tx, pos.ty, 1, historical);
-          if (!historical) this.fx.float("✦", pos.x, pos.z, 0.6, this.accent, 16);
+          if (!historical) this.fx.float("✦", pos.x, pos.z, 0.6 + this.groundH(pos.x, pos.z), this.accent, 16);
         }
         const first = e.paths[0];
         if (first) this.setSite(e.agentId, first, historical);
@@ -1046,7 +1076,7 @@ class Game3D {
         this.ground.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
         let rec = this.city.buildings.get(e.path);
         if (!rec) {
-          rec = this.city.addBuilding(e.path, e.buildingKind, this.archetypeAt(e.path), pos.tx, pos.ty);
+          rec = this.city.addBuilding(e.path, e.buildingKind, pos.tx, pos.ty);
           if (isNew && !historical) this.startConstruction(e.path, pos.tx, pos.ty);
         } else if (!historical) {
           this.city.flashBuilding(rec);
@@ -1055,7 +1085,7 @@ class Game3D {
         rec.writes++;
         rec.linesAdded += e.linesAdded;
         rec.linesRemoved += e.linesRemoved;
-        if (!historical) this.fx.float(`+${e.linesAdded}`, pos.x, pos.z, 1.0, 0x9ecf7a);
+        if (!historical) this.fx.float(`+${e.linesAdded}`, pos.x, pos.z, 1.0 + this.groundH(pos.x, pos.z), 0x9ecf7a);
         this.setSite(e.agentId, e.path, historical);
         break;
       }
@@ -1071,7 +1101,7 @@ class Game3D {
         if (e.kind !== "test") break;
         this.reconcileRaiders(e.failures ?? [], historical);
         if ((e.testsFailed ?? 0) === 0 && !historical) {
-          this.fx.float("⚑ tests green!", this.citadel.x, this.citadel.z, 2.6, 0x9ecf7a);
+          this.fx.float("⚑ tests green!", this.citadel.x, this.citadel.z, 2.6 + this.groundH(this.citadel.x, this.citadel.z), 0x9ecf7a);
         }
         break;
       }
@@ -1088,9 +1118,10 @@ class Game3D {
         if (!historical) {
           const rec = this.agents.get(e.authorId);
           const from = rec
-            ? new THREE.Vector3(rec.unit.x, rec.unit.headHeight, rec.unit.z)
+            ? new THREE.Vector3(rec.unit.x, rec.unit.y + rec.unit.headHeight, rec.unit.z)
             : new THREE.Vector3(this.citadel.x, 1, this.citadel.z);
-          this.fx.scrollArc(from, new THREE.Vector3(this.citadel.x, 2.2, this.citadel.z));
+          const cy = this.groundH(this.citadel.x, this.citadel.z);
+          this.fx.scrollArc(from, new THREE.Vector3(this.citadel.x, cy + 2.2, this.citadel.z));
         }
         break;
       }
@@ -1106,7 +1137,7 @@ class Game3D {
           rec.site = null;
           rec.sitePath = null;
           rec.unit.walkTo(this.citadel.x + 1, this.citadel.z + 1.4, historical);
-          if (!historical) this.fx.float("🍖", rec.unit.x, rec.unit.z, 0.9, 0xc98d5a);
+          if (!historical) this.fx.float("🍖", rec.unit.x, rec.unit.z, rec.unit.y + 0.9, 0xc98d5a);
         }
         break;
       }
@@ -1116,7 +1147,7 @@ class Game3D {
         this.tokenThrottle.set(e.agentId, n);
         const rec = this.agents.get(e.agentId);
         if (rec && n % 3 === 0) {
-          this.fx.float(`+${e.inputTokens + e.outputTokens}🪙`, rec.unit.x, rec.unit.z, rec.unit.headHeight, 0xf0c96a, 18);
+          this.fx.float(`+${e.inputTokens + e.outputTokens}🪙`, rec.unit.x, rec.unit.z, rec.unit.y + rec.unit.headHeight, 0xf0c96a, 18);
         }
         break;
       }
@@ -1153,7 +1184,7 @@ class Game3D {
         m.castShadow = true;
         g.add(m);
       }
-      g.position.set(tx, 0, ty);
+      g.position.set(tx, this.groundH(tx, ty), ty);
       g.scale.setScalar(0.85);
       this.scene.add(g);
       scaffold = g;
@@ -1169,6 +1200,7 @@ class Game3D {
     if (!char) return null;
     const displayName = this.theme?.enemyName ? this.theme.enemyName.slice(0, 14) : name.slice(0, 14);
     const unit = new Unit3D(char, { kind: "raider", key, name }, displayName, "#c0483c", "raider", 0.66);
+    unit.groundY = this.groundH;
     unit.walkSpeed = 0.85;
     this.styleUnit(unit, "raider");
     return unit;
@@ -1186,7 +1218,7 @@ class Game3D {
           this.raiders.delete(key);
         };
         if (!historical) {
-          this.fx.float("✕ bounty cleared", rec.unit.x, rec.unit.z, 1.4, 0xd4a843);
+          this.fx.float("✕ bounty cleared", rec.unit.x, rec.unit.z, rec.unit.y + 1.4, 0xd4a843);
           rec.unit.die(drop);
         } else drop();
       }
@@ -1224,7 +1256,7 @@ class Game3D {
         nextAt: 0,
         dying: false,
       });
-      if (!historical) this.fx.float("⚔", anchor.x, anchor.z, 1.2, 0xc0483c);
+      if (!historical) this.fx.float("⚔", anchor.x, anchor.z, 1.2 + this.groundH(anchor.x, anchor.z), 0xc0483c);
     }
   }
 
@@ -1289,7 +1321,7 @@ class Game3D {
     if (this.map && this.dna) {
       this.ground.setDna(this.dna.ground);
       this.city.buildDecor(this.map, this.mapSeed, this.dna, this.degraded);
-      this.city.retintBuildings(this.dna.buildingTint.roof);
+      this.city.retintBuildings(this.dna.buildingTint.roof, this.dna.buildingTint.trim);
       this.applySun(this.dna);
     }
     const themeAccent = hexColor(theme.biome.accentColor);
@@ -1381,7 +1413,7 @@ class Game3D {
         this.extraPickables.push(m);
         y += h;
       }
-      g.position.set(cell.tx, 0, cell.ty);
+      g.position.set(cell.tx, this.groundH(cell.tx, cell.ty), cell.ty);
       this.scene.add(g);
       rec.objects.push(g);
       this.ground.reveal(cell.tx, cell.ty, 1, historical);
@@ -1399,8 +1431,10 @@ class Game3D {
         roughness: 0.5,
       });
       rec.disposers.push(() => mat.dispose());
-      const m = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.8, 0.18).translate(0, 0.4, 0), mat);
-      m.position.set(cell.tx, 0, cell.ty);
+      const hy = this.groundH(cell.tx, cell.ty);
+      // tall enough to crest the plinth-raised skyline around its plot
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.3, 0.18).translate(0, 0.65, 0), mat);
+      m.position.set(cell.tx, hy, cell.ty);
       m.castShadow = true;
       m.userData.pick = {
         kind: "hook",
@@ -1414,7 +1448,7 @@ class Game3D {
       this.extraPickables.push(m);
       rec.objects.push(m);
       const glow = makeBillboard("✦", { sizePx: 26, color: "#ffe9a8", worldH: 0.3 });
-      glow.sprite.position.set(cell.tx, 0.95, cell.ty);
+      glow.sprite.position.set(cell.tx, hy + 1.45, cell.ty);
       this.scene.add(glow.sprite);
       rec.objects.push(glow.sprite);
       rec.disposers.push(() => glow.dispose());
@@ -1435,7 +1469,7 @@ class Game3D {
               map.used.add(tileKey);
               rec.tiles.push(tileKey);
               const m = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.3, 0.24).translate(0, 0.15, 0), mat);
-              m.position.set(tx, 0, ty);
+              m.position.set(tx, this.groundH(tx, ty), ty);
               m.rotation.y = rng() * Math.PI;
               m.userData.pick = {
                 kind: "prop",
@@ -1466,7 +1500,7 @@ class Game3D {
       ty: this.citadel.ty + 3,
     };
     this.ground.reveal(cell.tx, cell.ty, 4, historical);
-    this.fx.raiseWonder(cell.tx, cell.ty, this.accent);
+    this.fx.raiseWonder(cell.tx, cell.ty, this.accent, this.groundH(cell.tx, cell.ty));
     for (const [key, rec] of this.raiders) {
       rec.unit.destroy();
       const pi = this.unitPickables.indexOf(rec.unit.pickMesh);

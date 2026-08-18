@@ -72,6 +72,9 @@ function glRendererString(): string {
   }
 }
 
+/** One world-unit of terrain level in world Y (mirrors game3d/terrain3d.ELEV). */
+const ELEV = 0.35;
+
 type Debug = {
   worldReady(): boolean;
   layoutHash(): string;
@@ -81,8 +84,23 @@ type Debug = {
     hamlets: { count: number }[];
     water: Set<string>;
     bridges: Set<string>;
+    roads: Set<string>;
+    streets: Set<string>;
+    cityRect: { x: number; y: number; w: number; h: number };
+    townCenter: { tx: number; ty: number };
   } | null;
-  dna(): { form: string; ground: unknown; fortification: number; loreNotes: { subject: string; line: string }[] } | null;
+  dna(): {
+    form: string;
+    ground: unknown;
+    fortification: number;
+    landmark: { kind: string; subject: string; line: string };
+    loreNotes: { subject: string; line: string }[];
+  } | null;
+  heightAt(tx: number, ty: number): number;
+  streetTiles(): number;
+  structureAt(path: string): { kind: string; model: string } | null;
+  landmark(): { kind: string; tx: number; ty: number } | null;
+  composition(): string | null;
   waterTilesRendered(): number;
   bridgesRendered(): number;
   decorStats(): { wallSegments: number; props: number; trees: number; rocks: number };
@@ -99,7 +117,7 @@ type Debug = {
   fxActive(): number;
   menuEntries(): string[];
   projectWorld(x: number, y: number, z: number): { x: number; y: number };
-  agents(): Map<string, { unit: { x: number; z: number } }>;
+  agents(): Map<string, { unit: { x: number; y: number; z: number } }>;
 };
 
 const results: { name: string; pass: boolean; detail: string }[] = [];
@@ -220,6 +238,30 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     `[smoke3d] decor walls=${decor.wallSegments} props=${decor.props} trees=${decor.trees} rocks=${decor.rocks}`,
   );
 
+  // --- Worlds Apart: composition, streets, the Crown landmark -------------------
+  const composition = dbg().composition();
+  check(
+    "composition-exposed",
+    typeof composition === "string" && composition.length > 0 && (!BIG || composition === "archipelago"),
+    `composition=${composition}`,
+  );
+  check(
+    "streets-render",
+    dbg().streetTiles() === map.streets.size,
+    `streets=${map.streets.size} rendered=${dbg().streetTiles()}`,
+  );
+  const lm = dbg().landmark();
+  check(
+    "landmark-placed",
+    lm !== null && lm.kind === dna?.landmark.kind && !map.water.has(`${lm.tx},${lm.ty}`),
+    `landmark=${JSON.stringify(lm)} dna=${dna?.landmark.kind}`,
+  );
+  check(
+    "landmark-unshrouded",
+    lm !== null && dbg().fogAlphaAt(lm.tx, lm.ty) < 0.05,
+    `alpha=${lm ? dbg().fogAlphaAt(lm.tx, lm.ty).toFixed(3) : -1}`,
+  );
+
   // --- the shroud: terra incognita at first frame -------------------------------
   const quarters = map.quarters;
   const sh0 = dbg().shroud();
@@ -295,12 +337,36 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     return;
   }
 
+  // --- typology: the skyline is the census (roles → structures → models) --------
+  const sTest = dbg().structureAt("tests/parser.test.ts");
+  check(
+    "typology-watchtower",
+    sTest?.kind === "watchtower" && /^tower_/.test(sTest?.model ?? ""),
+    JSON.stringify(sTest),
+  );
+  const sDoc = dbg().structureAt("docs/guide.md");
+  check("typology-stela", sDoc?.kind === "stela", JSON.stringify(sDoc));
+  const sGiant = dbg().structureAt("src/core/engine.ts");
+  check(
+    "typology-megastructure",
+    sGiant?.kind === "megastructure" && sGiant?.model === "castle",
+    JSON.stringify(sGiant),
+  );
+
   // --- click-to-survey: deep veil, hover affordance, ceremony, census line ------
   const srcQ = quarters.find((q) => q.path === "src")!;
+  // pick the interior tile farthest from the town center: the citadel + Crown
+  // landmark reveals must never have touched it
   let deepTile: [number, number] | null = null;
-  for (let ty = srcQ.rect.y + 1; ty < srcQ.rect.y + srcQ.rect.h - 1 && !deepTile; ty++) {
-    for (let tx = srcQ.rect.x + 1; tx < srcQ.rect.x + srcQ.rect.w - 1 && !deepTile; tx++) {
-      if (!map.water.has(`${tx},${ty}`)) deepTile = [tx, ty];
+  let deepD = -1;
+  for (let ty = srcQ.rect.y + 1; ty < srcQ.rect.y + srcQ.rect.h - 1; ty++) {
+    for (let tx = srcQ.rect.x + 1; tx < srcQ.rect.x + srcQ.rect.w - 1; tx++) {
+      if (map.water.has(`${tx},${ty}`)) continue;
+      const d = Math.hypot(tx - map.townCenter.tx, ty - map.townCenter.ty);
+      if (d > deepD) {
+        deepD = d;
+        deepTile = [tx, ty];
+      }
     }
   }
   check(
@@ -308,7 +374,9 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     deepTile !== null && dbg().fogAlphaAt(deepTile[0], deepTile[1]) > 0.7,
     `alpha=${deepTile ? dbg().fogAlphaAt(deepTile[0], deepTile[1]).toFixed(3) : -1}`,
   );
-  const qc = dbg().projectWorld(srcQ.rect.x + srcQ.rect.w / 2, 0.05, srcQ.rect.y + srcQ.rect.h / 2);
+  const qcx = srcQ.rect.x + srcQ.rect.w / 2;
+  const qcz = srcQ.rect.y + srcQ.rect.h / 2;
+  const qc = dbg().projectWorld(qcx, dbg().heightAt(qcx, qcz) * ELEV + 0.05, qcz);
   firePointer("pointermove", qc.x, qc.y);
   await sleep(300);
   const surveyHover = (document.querySelector('[data-ae3d="action"]') as HTMLElement)?.textContent ?? "";
@@ -347,6 +415,8 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   ev({ type: "file_read", agentId: "w1", path: "src/core/parser/ast.ts", lines: 450 });
   ev({ type: "file_write", agentId: "w1", path: "src/core/parser/lexer.ts", created: false, linesAdded: 42, linesRemoved: 7, buildingKind: "house" });
   ev({ type: "file_write", agentId: "w2", path: "src/newfile.ts", created: true, linesAdded: 15, linesRemoved: 0, buildingKind: "house" });
+  // a config file born mid-match must rise as a silo (grain), by typology law
+  ev({ type: "file_write", agentId: "w2", path: "src/theme.yaml", created: true, linesAdded: 12, linesRemoved: 0, buildingKind: "house" });
   ev({ type: "message", fromId: "king", text: "To the walls! The parser must stand.", herald: "h" });
   ev({
     type: "command_result",
@@ -374,6 +444,8 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   check("fog-reveal", fogOk, `alpha=${dbg().fogAlphaAt(lexer.tx, lexer.ty).toFixed(3)}`);
   const raiders = (dbg() as unknown as { raiders(): Map<string, unknown> }).raiders();
   check("raiders-spawned", raiders.size === 2, `raiders=${raiders.size}`);
+  const sSilo = dbg().structureAt("src/theme.yaml");
+  check("typology-silo", sSilo?.kind === "silo" && sSilo?.model === "grain", JSON.stringify(sSilo));
 
   await sleep(1400);
 
@@ -439,7 +511,8 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   await sleep(1400);
 
   // --- hover action text --------------------------------------------------------
-  const lexPt = dbg().projectWorld(lexer.tx, 0.3, lexer.ty);
+  // aim inside the building volume: terrain level + plinth clearance
+  const lexPt = dbg().projectWorld(lexer.tx, dbg().heightAt(lexer.tx, lexer.ty) * ELEV + 0.7, lexer.ty);
   firePointer("pointermove", lexPt.x, lexPt.y);
   await sleep(300);
   const actionEl = document.querySelector('[data-ae3d="action"]') as HTMLElement;
@@ -475,11 +548,11 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     const u = dbg().agents().get("w1")!.unit;
     return Math.hypot(u.x - lexer.tx, u.z - lexer.ty) < 3;
   }, 15000);
-  for (let attempt = 0; attempt < 3 && !cbLog.some((c) => c === "speak:w1"); attempt++) {
+  for (let attempt = 0; attempt < 5 && !cbLog.some((c) => c === "speak:w1"); attempt++) {
     const w1 = dbg().agents().get("w1")!;
-    const uPt = dbg().projectWorld(w1.unit.x, 0.35, w1.unit.z);
+    const uPt = dbg().projectWorld(w1.unit.x, w1.unit.y + 0.35, w1.unit.z);
     firePointer("pointermove", uPt.x, uPt.y);
-    await sleep(150);
+    await sleep(80);
     firePointer("pointerdown", uPt.x, uPt.y, 0, 1);
     firePointer("pointerup", uPt.x, uPt.y, 0, 0);
     await sleep(250);
@@ -501,19 +574,52 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   const hooks = (dbg() as unknown as { hookTiles(): { tx: number; ty: number; path: string }[] }).hookTiles();
   if (hooks.length > 0) {
     const hk = hooks[0]!;
-    const hkPt = dbg().projectWorld(hk.tx, 0.4, hk.ty);
-    firePointer("pointermove", hkPt.x, hkPt.y);
-    await sleep(150);
-    firePointer("pointerdown", hkPt.x, hkPt.y, 2, 2);
-    firePointer("pointerup", hkPt.x, hkPt.y, 2, 0);
-    await sleep(250);
-    const hookRows = [...document.querySelectorAll("[data-ae3d-row]")] as HTMLElement[];
-    const readRow = hookRows.find((el) => (el.textContent ?? "").startsWith("Read "));
-    readRow?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
-    await sleep(250);
-    check("inspect-callback", cbLog.includes(`inspect:${hk.path}`), `hooks=${hooks.length} rows=${hookRows.map((r) => r.textContent).join(",")}`);
+    const hkBase = dbg().heightAt(hk.tx, hk.ty) * ELEV;
+    let lastRows = "";
+    // the obelisk is a thin pillar amid taller structures now: probe several
+    // heights along it until the ray finds a visible sliver
+    for (const dy of [1.15, 0.9, 0.6, 1.25, 0.35]) {
+      if (cbLog.includes(`inspect:${hk.path}`)) break;
+      const hkPt = dbg().projectWorld(hk.tx, hkBase + dy, hk.ty);
+      firePointer("pointermove", hkPt.x, hkPt.y);
+      await sleep(120);
+      firePointer("pointerdown", hkPt.x, hkPt.y, 2, 2);
+      firePointer("pointerup", hkPt.x, hkPt.y, 2, 0);
+      await sleep(250);
+      const hookRows = [...document.querySelectorAll("[data-ae3d-row]")] as HTMLElement[];
+      lastRows = hookRows.map((el) => el.textContent).join(",");
+      const readRow = hookRows.find((el) => (el.textContent ?? "").startsWith("Read "));
+      const cancelRow = hookRows.find((el) => el.textContent === "Cancel");
+      (readRow ?? cancelRow)?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+      await sleep(250);
+    }
+    check("inspect-callback", cbLog.includes(`inspect:${hk.path}`), `hooks=${hooks.length} rows=${lastRows}`);
   } else {
     check("inspect-callback", false, "no hook obelisk found after theme_patch");
+  }
+
+  // --- the Crown landmark: examine surfaces the census line verbatim -------------
+  if (lm) {
+    const lore = dbg().dna()!.landmark.line;
+    const lmBase = dbg().heightAt(lm.tx, lm.ty) * ELEV;
+    let lastHover = "";
+    for (const dy of [1.4, 0.9, 1.9, 0.5, 0.25]) {
+      if (cbLog.includes(`examine:${lore}`)) break;
+      const pt = dbg().projectWorld(lm.tx, lmBase + dy, lm.ty);
+      firePointer("pointermove", pt.x, pt.y);
+      await sleep(150);
+      lastHover = (document.querySelector('[data-ae3d="action"]') as HTMLElement)?.textContent ?? "";
+      firePointer("pointerdown", pt.x, pt.y, 0, 1);
+      firePointer("pointerup", pt.x, pt.y, 0, 0);
+      await sleep(300);
+    }
+    check(
+      "landmark-examine",
+      cbLog.includes(`examine:${lore}`),
+      `lore="${lore}" hover="${lastHover}" at=${lm.tx},${lm.ty}`,
+    );
+  } else {
+    check("landmark-examine", false, "no landmark to click");
   }
 
   // --- xp drops + level-up --------------------------------------------------------
@@ -552,6 +658,159 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   );
   // ≥50 on hardware; a software rasterizer (SwiftShader) passes with a caveat
   check("fps", fps >= 50 || software, `fps=${fps.toFixed(1)} software=${software}`);
+
+  // --- composition-law worlds: the four fixture repos from the logic battery ----
+  // (EXACT copies of scripts/logic-tests.mjs "Worlds Apart" fixtures, seed 7)
+  const monoTree = dir("", [
+    dir("packages", [
+      dir("packages/a", [file("packages/a/i.ts", 400), file("packages/a/j.ts", 300)]),
+      dir("packages/b", [file("packages/b/k.ts", 500)]),
+    ]),
+    file("README.md", 60),
+  ]);
+  const deepTree = dir("", [
+    dir("a", [
+      file("a/f1.ts", 200),
+      dir("a/b", [
+        file("a/b/f2.ts", 200),
+        dir("a/b/c", [file("a/b/c/f3.ts", 200), dir("a/b/c/d", [file("a/b/c/d/f4.ts", 200)])]),
+      ]),
+    ]),
+    dir("docs", [file("docs/d.md", 50)]),
+    file("main.ts", 80),
+  ]);
+  const coreTree = dir("", [
+    dir("src", [
+      file("src/a.c", 2000),
+      file("src/b.c", 2000),
+      file("src/c.c", 2000),
+      dir("src/sub", [file("src/sub/d.c", 2000)]),
+    ]),
+    dir("docs", [file("docs/x.md", 400)]),
+    file("Makefile", 80),
+  ]);
+  const flatTree = dir("", [
+    dir("alpha", [file("alpha/a.js", 900), file("alpha/b.js", 800)]),
+    dir("beta", [file("beta/c.js", 900), file("beta/d.js", 700)]),
+    dir("gamma", [file("gamma/e.js", 900)]),
+    file("index.js", 100),
+  ]);
+
+  const scenarios: {
+    name: string;
+    tree: FN;
+    depEdges?: { from: string; to: string }[];
+    verify: (d: Debug) => void;
+  }[] = [
+    {
+      name: "terrace",
+      tree: deepTree,
+      verify: (d) => {
+        const m = d.map()!;
+        check("terrace-composition", d.composition() === "terrace-mount", `composition=${d.composition()}`);
+        const q3 = m.quarters.find((q) => q.path === "a/b/c");
+        const q1 = m.quarters.find((q) => q.path === "a");
+        const lvl = (r: { x: number; y: number }) => d.heightAt(r.x + 1, r.y + 1);
+        check(
+          "terrace-altitude",
+          !!q3 && !!q1 && lvl(q3.rect) > lvl(q1.rect),
+          `deep=${q3 ? lvl(q3.rect) : -1} shallow=${q1 ? lvl(q1.rect) : -1}`,
+        );
+        check(
+          "terrace-plaza-low",
+          d.heightAt(m.townCenter.tx, m.townCenter.ty) === 0,
+          `plaza=${d.heightAt(m.townCenter.tx, m.townCenter.ty)}`,
+        );
+      },
+    },
+    {
+      name: "ring",
+      tree: coreTree,
+      verify: (d) => {
+        const m = d.map()!;
+        check("ring-composition", d.composition() === "ring-city", `composition=${d.composition()}`);
+        const core = m.quarters.find((q) => q.path === "src");
+        check(
+          "ring-core-raised",
+          !!core && d.heightAt(core.rect.x + 1, core.rect.y + 1) === 2,
+          `core=${core ? d.heightAt(core.rect.x + 1, core.rect.y + 1) : -1}`,
+        );
+        check(
+          "ring-road",
+          !!core &&
+            m.roads.has(`${core.rect.x - 1},${core.rect.y - 1}`) &&
+            m.roads.has(`${core.rect.x + core.rect.w},${core.rect.y + core.rect.h}`),
+          "corners of the ring road",
+        );
+        const g = d.structureAt("src/a.c");
+        check("ring-megastructure", g?.kind === "megastructure" && g?.model === "castle", JSON.stringify(g));
+        check("ring-landmark", d.landmark()?.kind === "colossus", JSON.stringify(d.landmark()));
+      },
+    },
+    {
+      name: "canyon",
+      tree: flatTree,
+      depEdges: [
+        { from: "alpha/a.js", to: "beta/c.js" },
+        { from: "gamma/e.js", to: "alpha/b.js" },
+      ],
+      verify: (d) => {
+        const m = d.map()!;
+        check("canyon-composition", d.composition() === "canyon-strata", `composition=${d.composition()}`);
+        check("canyon-stretched", m.cityRect.w >= m.cityRect.h * 1.8, `w=${m.cityRect.w} h=${m.cityRect.h}`);
+        const ry = m.cityRect.y + Math.floor(m.cityRect.h / 2);
+        let onRow = 0;
+        for (let tx = m.cityRect.x; tx < m.cityRect.x + m.cityRect.w; tx++)
+          if (m.roads.has(`${tx},${ry}`)) onRow++;
+        check("canyon-long-road", onRow >= Math.floor(m.cityRect.w * 0.5), `onRow=${onRow} w=${m.cityRect.w}`);
+        check(
+          "canyon-streets",
+          m.streets.size > 0 && d.streetTiles() === m.streets.size,
+          `streets=${m.streets.size} rendered=${d.streetTiles()}`,
+        );
+      },
+    },
+    {
+      name: "isles",
+      tree: monoTree,
+      verify: (d) => {
+        const m = d.map()!;
+        check("isles-composition", d.composition() === "archipelago", `composition=${d.composition()}`);
+        check(
+          "isles-water",
+          m.water.size > 0 && d.waterTilesRendered() === m.water.size,
+          `water=${m.water.size} rendered=${d.waterTilesRendered()}`,
+        );
+        check("isles-landmark", d.landmark()?.kind === "harbor-beacon", JSON.stringify(d.landmark()));
+      },
+    },
+  ];
+  for (const sc of scenarios) {
+    const div = document.createElement("div");
+    div.style.cssText = "position:fixed;left:0;top:0;width:640px;height:400px;opacity:0;pointer-events:none;";
+    document.body.appendChild(div);
+    const rr = attachGameRenderer(div);
+    rr.handleEvent(
+      {
+        seq: 0,
+        ts: Date.now(),
+        type: "match_started",
+        matchId: `smoke3d-${sc.name}`,
+        task: { id: sc.name, title: "S", description: "s", flavor: "s" },
+        mapSeed: 7,
+        repoTree: sc.tree,
+        ...(sc.depEdges ? { depEdges: sc.depEdges } : {}),
+      } as unknown as GameEvent,
+      false,
+    );
+    // each attach overwrites the __ae3d debug handle: read it fresh
+    const sd = () => (globalThis as Record<string, unknown>).__ae3d as Debug;
+    const okS = await until(() => Boolean(sd()?.worldReady()), 20000);
+    check(`${sc.name}-ready`, okS);
+    if (okS) sc.verify(sd());
+    rr.destroy();
+    div.remove();
+  }
 
   const pass = results.filter((x) => x.pass).length;
   const fail = results.length - pass;

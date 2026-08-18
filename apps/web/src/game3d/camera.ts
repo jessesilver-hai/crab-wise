@@ -7,6 +7,7 @@ const AZIMUTH = (45 * Math.PI) / 180;
 const ELEVATION = (35 * Math.PI) / 180;
 const MIN_VIEW_H = 6;
 const MAX_VIEW_H = 160;
+const MAX_VIEW_H_CAP = 200;
 const CAM_DIST = 220;
 
 /** True when the key press belongs to a text field (command bar, inputs). */
@@ -28,6 +29,8 @@ export class RtsCamera {
   private dir: THREE.Vector3;
   private keys = new Set<string>();
   private bounds: Rect | null = null;
+  /** Zoom-out ceiling from the world's scale tier (hamlets feel close). */
+  private maxViewH = MAX_VIEW_H;
   private detach: (() => void)[] = [];
   edgeScroll = true;
   /** Pointer position in mount px, updated by the renderer. */
@@ -68,10 +71,16 @@ export class RtsCamera {
     this.bounds = rect;
   }
 
+  /** Scale envelope: cap how far out this world lets the camera pull. */
+  setZoomEnvelope(maxViewH: number): void {
+    this.maxViewH = Math.min(MAX_VIEW_H_CAP, Math.max(MIN_VIEW_H + 4, maxViewH));
+    this.viewHGoal = Math.min(this.viewHGoal, this.maxViewH);
+  }
+
   /** Wheel zoom toward/away, clamped; smoothed in update(). */
   zoomBy(deltaY: number): void {
     const f = deltaY > 0 ? 1.18 : 1 / 1.18;
-    this.viewHGoal = Math.min(MAX_VIEW_H, Math.max(MIN_VIEW_H, this.viewHGoal * f));
+    this.viewHGoal = Math.min(this.maxViewH, Math.max(MIN_VIEW_H, this.viewHGoal * f));
   }
 
   panPx(dx: number, dy: number, w: number, h: number): void {
@@ -109,8 +118,8 @@ export class RtsCamera {
     this.targetGoal.z = Math.min(b.y + b.h + 4, Math.max(b.y - 4, this.targetGoal.z));
   }
 
-  /** Fit the city rect in view and center on it. */
-  frame(rect: Rect, aspect: number): void {
+  /** Fit the city rect in view and center on it (fit < 1 starts closer). */
+  frame(rect: Rect, aspect: number, fit = 1): void {
     const cx = rect.x + rect.w / 2;
     const cz = rect.y + rect.h / 2;
     this.target.set(cx, 0, cz);
@@ -134,8 +143,8 @@ export class RtsCamera {
       minY = Math.min(minY, v.y);
       maxY = Math.max(maxY, v.y);
     }
-    const needH = Math.max(maxY - minY, (maxX - minX) / Math.max(0.1, aspect)) * 1.12;
-    this.viewH = Math.min(MAX_VIEW_H, Math.max(MIN_VIEW_H, needH));
+    const needH = Math.max(maxY - minY, (maxX - minX) / Math.max(0.1, aspect)) * 1.12 * fit;
+    this.viewH = Math.min(this.maxViewH, Math.max(MIN_VIEW_H, needH));
     this.viewHGoal = this.viewH;
     this.apply(aspect, 1);
   }
@@ -180,14 +189,14 @@ export class RtsCamera {
     this.apply(w / Math.max(1, h), dt);
   }
 
-  /** Mount-px → ground-plane world point (y = 0). */
-  screenToGround(px: number, py: number, w: number, h: number): THREE.Vector3 {
+  /** Mount-px → ground-plane world point (plane y = planeY, default 0). */
+  screenToGround(px: number, py: number, w: number, h: number, planeY = 0): THREE.Vector3 {
     const ndc = new THREE.Vector2((px / w) * 2 - 1, -(py / h) * 2 + 1);
     const origin = new THREE.Vector3(ndc.x, ndc.y, -1).unproject(this.camera);
     const dir = new THREE.Vector3(0, 0, 1)
       .transformDirection(this.camera.matrixWorld)
       .negate();
-    const t = -origin.y / dir.y;
+    const t = (planeY - origin.y) / dir.y;
     return origin.clone().addScaledVector(dir, t);
   }
 

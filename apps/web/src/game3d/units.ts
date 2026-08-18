@@ -27,6 +27,8 @@ export class Unit3D {
   readonly pickMesh: THREE.Mesh;
   walkSpeed = 1.5; // tiles/sec
   dimmed = false;
+  /** Terrain sampler: units stand on the landform (renderer injects it). */
+  groundY: (x: number, z: number) => number = () => 0;
   private model: THREE.Object3D;
   private mixer: THREE.AnimationMixer;
   private actions = new Map<string, THREE.AnimationAction>();
@@ -113,6 +115,9 @@ export class Unit3D {
   get x(): number {
     return this.group.position.x;
   }
+  get y(): number {
+    return this.group.position.y;
+  }
   get z(): number {
     return this.group.position.z;
   }
@@ -124,7 +129,7 @@ export class Unit3D {
   }
 
   setPosition(x: number, z: number): void {
-    this.group.position.set(x, 0, z);
+    this.group.position.set(x, this.groundY(x, z), z);
   }
 
   setRing(on: boolean, color?: number): void {

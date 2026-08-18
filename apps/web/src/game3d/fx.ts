@@ -108,7 +108,7 @@ export class Fx {
   }
 
   /** Golden wonder obelisk rising at the citadel on victory. */
-  raiseWonder(x: number, z: number, accent: number): THREE.Group {
+  raiseWonder(x: number, z: number, accent: number, baseY = 0): THREE.Group {
     const g = new THREE.Group();
     const gold = new THREE.MeshStandardMaterial({
       color: 0xd8b354,
@@ -137,7 +137,7 @@ export class Fx {
     );
     orb.position.y = y + 0.3;
     g.add(orb);
-    g.position.set(x, 0, z);
+    g.position.set(x, baseY, z);
     g.scale.setScalar(0.01);
     this.group.add(g);
     this.wonder = { group: g, t: 0 };

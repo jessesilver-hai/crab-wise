@@ -2,7 +2,7 @@
 // "Choose Option" context menu, examine parchment toasts, and the minimap.
 // All styling is inline so the 3D renderer ships without stylesheet edits.
 import type { MapLayout } from "../game/map.js";
-import { cssHex } from "./util.js";
+import { cssHex, scaleColor } from "./util.js";
 
 export type MenuEntry = { label: string; cb: (() => void) | null };
 
@@ -178,9 +178,21 @@ export class Overlay {
     ctx.clearRect(0, 0, MINI_PX, MINI_PX);
     for (let ty = 0; ty < map.side; ty++) {
       for (let tx = 0; tx < map.side; tx++) {
-        ctx.fillStyle = cssHex(tileColors[ty * map.side + tx]!);
+        let c = tileColors[ty * map.side + tx]!;
+        // terrain altitude shading: higher ground reads brighter
+        const lvl = map.heights.get(`${tx},${ty}`) ?? 0;
+        if (lvl > 0) c = scaleColor(c, 1 + lvl * 0.1);
+        ctx.fillStyle = cssHex(c);
         ctx.fillRect(tx * px, ty * px, px + 0.5, px + 0.5);
       }
+    }
+    // streets: thin pale lines, visually distinct from the full-width roads
+    ctx.fillStyle = "rgba(226,217,192,0.75)";
+    for (const key of map.streets) {
+      const [tx, ty] = key.split(",").map(Number) as [number, number];
+      const horiz = map.streets.has(`${tx - 1},${ty}`) || map.streets.has(`${tx + 1},${ty}`);
+      if (horiz) ctx.fillRect(tx * px, (ty + 0.3) * px, px + 0.5, Math.max(0.8, px * 0.4));
+      else ctx.fillRect((tx + 0.3) * px, ty * px, Math.max(0.8, px * 0.4), px + 0.5);
     }
     ctx.strokeStyle = "rgba(240,230,200,0.35)";
     ctx.lineWidth = 1;
