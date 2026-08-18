@@ -556,6 +556,145 @@ console.log("Shroud (discovery law)");
   check("unknown quarter cannot be surveyed", s2.survey("phantom") === false);
 }
 
+// --- Worlds Apart: composition law, roles, heights, streets -------------------
+console.log("Worlds Apart (composition law)");
+{
+  const { layoutMap, layoutHash, pickComposition, LAYOUT_VERSION } = await import("../apps/web/src/game/map.ts");
+  const { analyzeCensus, classifyRole } = await import("../apps/web/src/game/census.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  check("layout law is v3", LAYOUT_VERSION === 3);
+
+  // role classifier: path-roles outrank content, entries stay shallow
+  check("test path is a watchtower", classifyRole("tests/x.py", "x.py", 50) === "test");
+  check("giant test file is still a test", classifyRole("src/foo.test.ts", "foo.test.ts", 2000) === "test");
+  check("docs are stelae", classifyRole("README.md", "README.md", 40) === "docs");
+  check("configs are silos", classifyRole("config/app.yaml", "app.yaml", 20) === "config");
+  check("assets are reliquaries", classifyRole("art/logo.png", "logo.png", 1) === "asset");
+  check("root index is a gate", classifyRole("index.ts", "index.ts", 90) === "entry");
+  check("nested index is plain source", classifyRole("src/a/b/index.ts", "index.ts", 90) === "source");
+  check("1000+ lines is a giant", classifyRole("src/engine.c", "engine.c", 1400) === "giant");
+  check("everything else is source", classifyRole("src/util.c", "util.c", 200) === "source");
+
+  // fixtures forcing each composition
+  const monoTree = dir("", [
+    dir("packages", [
+      dir("packages/a", [file("packages/a/i.ts", 400), file("packages/a/j.ts", 300)]),
+      dir("packages/b", [file("packages/b/k.ts", 500)]),
+    ]),
+    file("README.md", 60),
+  ]);
+  const deepTree = dir("", [
+    dir("a", [
+      file("a/f1.ts", 200),
+      dir("a/b", [
+        file("a/b/f2.ts", 200),
+        dir("a/b/c", [file("a/b/c/f3.ts", 200), dir("a/b/c/d", [file("a/b/c/d/f4.ts", 200)])]),
+      ]),
+    ]),
+    dir("docs", [file("docs/d.md", 50)]),
+    file("main.ts", 80),
+  ]);
+  const coreTree = dir("", [
+    dir("src", [
+      file("src/a.c", 2000),
+      file("src/b.c", 2000),
+      file("src/c.c", 2000),
+      dir("src/sub", [file("src/sub/d.c", 2000)]),
+    ]),
+    dir("docs", [file("docs/x.md", 400)]),
+    file("Makefile", 80),
+  ]);
+  const flatTree = dir("", [
+    dir("alpha", [file("alpha/a.js", 900), file("alpha/b.js", 800)]),
+    dir("beta", [file("beta/c.js", 900), file("beta/d.js", 700)]),
+    dir("gamma", [file("gamma/e.js", 900)]),
+    file("index.js", 100),
+  ]);
+
+  check("monorepo → archipelago", pickComposition(analyzeCensus(monoTree)) === "archipelago");
+  check("deep nesting → terrace mount", pickComposition(analyzeCensus(deepTree)) === "terrace-mount");
+  check("dominant core → ring city", pickComposition(analyzeCensus(coreTree)) === "ring-city");
+  check("flat and wide → canyon strata", pickComposition(analyzeCensus(flatTree)) === "canyon-strata");
+  check("coreShare measures the heaviest top dir", (() => {
+    const c = analyzeCensus(coreTree);
+    return c.coreDir === "src" && c.coreShare > 0.9;
+  })());
+
+  // terrace mount: altitude = depth, plaza at sea level
+  {
+    const m = layoutMap(deepTree, 7);
+    check("terrace layout says terrace", m.composition === "terrace-mount");
+    const q3 = m.quarters.find((q) => q.path === "a/b/c");
+    const q1 = m.quarters.find((q) => q.path === "a");
+    const at = (r) => m.heights.get(`${r.x + 1},${r.y + 1}`) ?? 0;
+    check("deeper quarters sit higher", !!q3 && !!q1 && at(q3.rect) > at(q1.rect));
+    check("plaza stays at ground level", !m.heights.has(`${m.townCenter.tx},${m.townCenter.ty}`));
+    check("the sea is never raised", [...m.water].every((k) => !m.heights.has(k)));
+    check("roles ride the layout", m.roles.get("a/b/c/d/f4.ts") === "source" && m.roles.get("docs/d.md") === "docs");
+  }
+
+  // ring city: centered core, raised, wrapped by the ring road
+  {
+    const m = layoutMap(coreTree, 7);
+    check("ring layout says ring", m.composition === "ring-city");
+    const core = m.quarters.find((q) => q.depth === 1 && q.path === "src");
+    check("core exists as a quarter", !!core);
+    if (core) {
+      const ccx = core.rect.x + core.rect.w / 2;
+      const ccy = core.rect.y + core.rect.h / 2;
+      const mcx = m.cityRect.x + m.cityRect.w / 2;
+      const mcy = m.cityRect.y + m.cityRect.h / 2;
+      check("core is centered", Math.abs(ccx - mcx) <= 2 && Math.abs(ccy - mcy) <= 2);
+      check("core is raised", m.heights.get(`${core.rect.x + 1},${core.rect.y + 1}`) === 2);
+      check(
+        "ring road wraps the core",
+        m.roads.has(`${core.rect.x - 1},${core.rect.y - 1}`) &&
+          m.roads.has(`${core.rect.x + core.rect.w},${core.rect.y + core.rect.h}`),
+      );
+    }
+  }
+
+  // canyon strata: stretched frame, the Long Road, alternating shelves
+  {
+    const m = layoutMap(flatTree, 7);
+    check("canyon layout says canyon", m.composition === "canyon-strata");
+    check("the gorge is stretched", m.cityRect.w >= m.cityRect.h * 1.8);
+    const ry = m.cityRect.y + Math.floor(m.cityRect.h / 2);
+    let onRow = 0;
+    for (let tx = m.cityRect.x; tx < m.cityRect.x + m.cityRect.w; tx++) if (m.roads.has(`${tx},${ry}`)) onRow++;
+    check("the Long Road runs the gorge", onRow >= Math.floor(m.cityRect.w * 0.5));
+    check("some strata rise", [...m.heights.values()].some((v) => v === 1));
+    check("road cuts stay at the floor", [...m.roads].every((k) => !m.heights.has(k)));
+  }
+
+  // streets: measured imports become circulation, deterministically
+  {
+    const edges = [
+      { from: "alpha/a.js", to: "beta/c.js" },
+      { from: "alpha/a.js", to: "beta/c.js" },
+      { from: "gamma/e.js", to: "alpha/b.js" },
+    ];
+    const m = layoutMap(flatTree, 7, edges);
+    check("edges route as streets", m.depEdgesRouted === 2 && m.streets.size > 0);
+    check("streets never overlap roads or plots", [...m.streets].every((k) => !m.roads.has(k) && !m.used.has(k)));
+    check("street layout is deterministic", layoutHash(m) === layoutHash(layoutMap(flatTree, 7, edges)));
+    check("edges change the hash", layoutHash(m) !== layoutHash(layoutMap(flatTree, 7)));
+    check("self and unknown edges are ignored", layoutMap(flatTree, 7, [{ from: "alpha/a.js", to: "alpha/a.js" }, { from: "ghost.js", to: "beta/c.js" }]).depEdgesRouted === 0);
+  }
+
+  // archipelago keeps its sea; streets across the channel become bridges
+  {
+    const edges = [{ from: "packages/a/i.ts", to: "packages/b/k.ts" }];
+    const m = layoutMap(monoTree, 7, edges);
+    check("archipelago layout says archipelago", m.composition === "archipelago");
+    check("the channels still flood", m.water.size > 0);
+    const wet = [...m.streets].filter((k) => m.water.has(k));
+    check("street bridges span the channel", wet.length === 0 || wet.every((k) => m.bridges.has(k)));
+  }
+}
+
 // --- Sandbox slot lifecycle ------------------------------------------------------
 console.log("Sandbox slot lifecycle");
 {

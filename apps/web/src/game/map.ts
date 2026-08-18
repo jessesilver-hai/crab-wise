@@ -1,20 +1,39 @@
 import { districtArchetype, type DistrictArchetype, type FileNode } from "@agent-empires/protocol";
-import { analyzeCensus } from "./census.js";
+import { analyzeCensus, classifyRole, type Census, type FileRole } from "./census.js";
 
 /**
- * Structural-isomorphism layout: the settlement is a recursive treemap of the
- * repository. Every directory is a rectangular quarter whose area is
- * proportional to its subtree weight (file LOC when FileNode.lines ships,
- * else file count); every file is a building plot; roads are exactly the
- * parent↔child tree edges. The layout is a pure function of
- * (repoTree, weights, mapSeed) — no unseeded randomness anywhere.
+ * Structural-isomorphism layout: the settlement derives from the repository.
+ * Every directory is a quarter whose area is proportional to its subtree
+ * weight (file LOC when FileNode.lines ships, else file count); every file is
+ * a building plot; roads are exactly the parent↔child tree edges. The layout
+ * is a pure function of (repoTree, weights, mapSeed, depEdges) — no unseeded
+ * randomness anywhere.
+ *
+ * Composition law (v3): the measured shape of the repo picks the world's
+ * macro-form before any rect is placed —
+ *   monorepo            → ARCHIPELAGO   (package isles in a real sea)
+ *   nesting ≥ 4         → TERRACE MOUNT (altitude = directory depth)
+ *   one dominant dir    → RING CITY     (raised core, ring road, bands)
+ *   flat & wide         → CANYON STRATA (stretched gorge, the Long Road)
+ * All compositions share one battle-tested allocator (treemap partition,
+ * gates, staircase roads, plots, hamlets); they differ in frame aspect,
+ * placement plan, terrain heights and sea structure — so silhouettes diverge
+ * while every invariant (connectivity, plots-on-land, determinism) holds.
  *
  * Landmass law (v2): the water is code-made too. The coastline is a seeded
  * scallop that never bites the city; a monorepo floods the corridors between
  * its top-level packages into sea channels (an archipelago, bridged where
  * the roads cross); nesting ≥ RIVER_MIN_DEPTH sends a river from the deepest
  * quarter's gate to the sea.
+ *
+ * Street law (v3): real import edges (scanned in the sandbox, shipped as
+ * depEdges) are routed as streets between the coupled plots — the repo's
+ * dependency graph becomes the visible circulation. No edges → tree roads
+ * only, honestly.
  */
+
+/** Bumped when the layout law changes shape: prior worlds re-derive. */
+export const LAYOUT_VERSION = 3;
 
 export const TILE_W = 64;
 export const TILE_H = 32;
@@ -27,10 +46,29 @@ export const AGGREGATE_THRESHOLD = 1500;
 
 /** Wilderness ring around the city plateau (coast + vegetation live here). */
 export const WILD_MARGIN = 9;
+/** Heaviest N deduped import edges become streets; the rest stay unbuilt. */
+export const MAX_STREET_EDGES = 180;
 /** Nesting depth at which a river is carved from the deepest quarter. */
 export const RIVER_MIN_DEPTH = 5;
 
 export type Rect = { x: number; y: number; w: number; h: number };
+
+/** The world's macro-form, picked from the measured census. */
+export type CompositionKind = "terrace-mount" | "archipelago" | "ring-city" | "canyon-strata";
+
+/** One measured import: `from` requires `to` (repo-relative file paths). */
+export type DepEdge = { from: string; to: string };
+
+/**
+ * Deterministic composition law. Priority order matters: a deeply nested
+ * monorepo is still an archipelago; a deep single-core repo is still a mount.
+ */
+export function pickComposition(census: Census): CompositionKind {
+  if (census.monorepo && census.packageDirs >= 2) return "archipelago";
+  if (census.maxDepth >= 4) return "terrace-mount";
+  if (census.coreShare >= 0.55 && census.topLevelDirs >= 2) return "ring-city";
+  return "canyon-strata";
+}
 
 /** LOC bucket → building size class (0 hut, 1 house, 2 large workshop). */
 export type SizeBucket = 0 | 1 | 2;
@@ -74,10 +112,20 @@ export type MapLayout = {
   rng: () => number;
   /** Tiles under water: coast, monorepo channels, rivers. Never city floor. */
   water: Set<string>;
-  /** Road tiles that cross water — rendered as bridges (subset of roads). */
+  /** Road/street tiles that cross water — rendered as bridges. */
   bridges: Set<string>;
   /** Land tiles orthogonally adjacent to water (shore tinting). */
   coast: Set<string>;
+  /** The measured macro-form this world took. */
+  composition: CompositionKind;
+  /** Terrain altitude per tile (absent = 0). Terraces, cores, strata. */
+  heights: Map<string, number>;
+  /** Structural role per file path — the building typology law. */
+  roles: Map<string, FileRole>;
+  /** Import-edge streets (disjoint from roads); empty when no edges ship. */
+  streets: Set<string>;
+  /** How many dep edges actually routed (hash + honesty in the chronicle). */
+  depEdgesRouted: number;
 };
 
 export function mulberry32(seed: number): () => number {
@@ -211,9 +259,11 @@ function partition(rect: Rect, items: Item[], assign: (item: Item, r: Rect) => v
   partition(rb, b, assign);
 }
 
-export function layoutMap(tree: FileNode, seed: number): MapLayout {
+export function layoutMap(tree: FileNode, seed: number, depEdges?: DepEdge[]): MapLayout {
   const rng = mulberry32(seed);
   const totalFiles = Math.max(1, countFiles(tree));
+  const census = analyzeCensus(tree);
+  const composition = pickComposition(census);
 
   // ---- aggregation set: which files render individually --------------------
   const allFiles: FileNode[] = [];
@@ -232,11 +282,26 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
     individual = new Set(allFiles.map((f) => f.path));
   }
 
-  // ---- map sizing -----------------------------------------------------------
+  // ---- map sizing: the frame aspect is the composition's first word --------
   const est = areaEstimate(tree, individual, 1);
-  const citySide = Math.max(22, Math.min(126, Math.ceil(Math.sqrt(est * 1.7)) + 4));
-  const side = citySide + WILD_MARGIN * 2;
-  const cityRect: Rect = { x: WILD_MARGIN, y: WILD_MARGIN, w: citySide, h: citySide };
+  let cityW: number;
+  let cityH: number;
+  if (composition === "canyon-strata") {
+    // stretched gorge: ~2.6:1, area-preserving, capped so the map stays sane
+    cityW = Math.max(30, Math.min(138, Math.ceil(Math.sqrt(est * 1.7 * 2.6)) + 6));
+    cityH = Math.max(14, Math.min(Math.floor(cityW / 2.2), Math.ceil((est * 1.7) / cityW) + 6));
+  } else {
+    const citySide = Math.max(22, Math.min(126, Math.ceil(Math.sqrt(est * 1.7)) + 4));
+    cityW = citySide;
+    cityH = citySide;
+  }
+  const side = Math.max(cityW, cityH) + WILD_MARGIN * 2;
+  const cityRect: Rect = {
+    x: Math.floor((side - cityW) / 2),
+    y: Math.floor((side - cityH) / 2),
+    w: cityW,
+    h: cityH,
+  };
 
   const quarters: Quarter[] = [];
   const blocks: Block[] = [];
@@ -246,6 +311,8 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
   const hamlets: Hamlet[] = [];
   const roads = new Set<string>();
   const used = new Set<string>();
+  const roles = new Map<string, FileRole>();
+  const streets = new Set<string>();
   const filesAreas: { dirPath: string; files: FileNode[]; rect: Rect }[] = [];
 
   // ---- recursive rect assignment -------------------------------------------
@@ -295,10 +362,66 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
         min: 2,
       });
     }
-    partition(interior, items, (item, r) => {
+    const place = (item: Item, r: Rect) => {
       if (item.kind === "dir") layoutDir(item.node, r, depth + 1);
       else filesAreas.push({ dirPath: node.path, files: item.files, rect: r });
-    });
+    };
+
+    // Ring city: the dominant core sits centered (raised by the height law),
+    // wrapped by a 1-tile ring road; everything else fills the four bands.
+    if (depth === 0 && composition === "ring-city") {
+      const coreIdx = items.findIndex((it) => it.kind === "dir" && it.node.path === census.coreDir);
+      if (coreIdx >= 0 && items.length >= 2) {
+        const core = items[coreIdx]!;
+        const rest = items.filter((_, i) => i !== coreIdx);
+        const total = items.reduce((n, i) => n + i.weight, 0);
+        let coreSide = Math.round(Math.sqrt(interior.w * interior.h * (core.weight / total)) * 0.95);
+        coreSide = Math.min(coreSide, Math.min(interior.w, interior.h) - 12);
+        if (coreSide >= 7) {
+          const cx0 = interior.x + Math.floor((interior.w - coreSide) / 2);
+          const cy0 = interior.y + Math.floor((interior.h - coreSide) / 2);
+          if (core.kind === "dir") layoutDir(core.node, { x: cx0, y: cy0, w: coreSide, h: coreSide }, 1);
+          for (let tx = cx0 - 1; tx <= cx0 + coreSide; tx++) {
+            roads.add(`${tx},${cy0 - 1}`);
+            roads.add(`${tx},${cy0 + coreSide}`);
+          }
+          for (let ty = cy0 - 1; ty <= cy0 + coreSide; ty++) {
+            roads.add(`${cx0 - 1},${ty}`);
+            roads.add(`${cx0 + coreSide},${ty}`);
+          }
+          const bands: Rect[] = [
+            { x: interior.x, y: interior.y, w: interior.w, h: cy0 - 2 - interior.y },
+            { x: interior.x, y: cy0 + coreSide + 2, w: interior.w, h: interior.y + interior.h - (cy0 + coreSide + 2) },
+            { x: interior.x, y: cy0 - 1, w: cx0 - 2 - interior.x, h: coreSide + 2 },
+            { x: cx0 + coreSide + 2, y: cy0 - 1, w: interior.x + interior.w - (cx0 + coreSide + 2), h: coreSide + 2 },
+          ].filter((r) => r.w >= 3 && r.h >= 3);
+          if (bands.length > 0) {
+            // deal heaviest-first into the band with the best area-per-load
+            const groups: Item[][] = bands.map(() => []);
+            const loads = bands.map(() => 0);
+            for (const it of rest) {
+              let best = 0;
+              let bestScore = -Infinity;
+              for (let i = 0; i < bands.length; i++) {
+                const score = bands[i]!.w * bands[i]!.h / (loads[i]! + it.weight);
+                if (score > bestScore + 1e-9) {
+                  bestScore = score;
+                  best = i;
+                }
+              }
+              groups[best]!.push(it);
+              loads[best]! += it.weight;
+            }
+            for (let i = 0; i < bands.length; i++) {
+              if (groups[i]!.length > 0) partition(bands[i]!, groups[i]!, place);
+            }
+            return;
+          }
+        }
+      }
+    }
+
+    partition(interior, items, place);
   }
   layoutDir(tree, cityRect, 0);
 
@@ -312,6 +435,21 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
   // the castle claims a 3x3 pad
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) used.add(`${townCenter.tx + dx},${townCenter.ty + dy}`);
+  }
+
+  // Canyon: the Long Road runs the gorge floor end to end. Quarter borders
+  // stay walled — the road pierces each stratum through a gate gap.
+  if (composition === "canyon-strata") {
+    const onBorder = (tx: number, ty: number) =>
+      quarters.some((q) => {
+        const { x, y, w, h } = q.rect;
+        if (tx < x || ty < y || tx >= x + w || ty >= y + h) return false;
+        return tx === x || ty === y || tx === x + w - 1 || ty === y + h - 1;
+      });
+    const ry = cityRect.y + Math.floor(cityRect.h / 2);
+    for (let tx = cityRect.x - 2; tx < cityRect.x + cityRect.w + 2; tx++) {
+      if (!onBorder(tx, ry) && !used.has(`${tx},${ry}`)) roads.add(`${tx},${ry}`);
+    }
   }
 
   // ---- gates + roads: exactly the parent↔child edges ------------------------
@@ -371,6 +509,7 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
   // ---- file plots ------------------------------------------------------------
   for (const area of filesAreas) {
     const rect = area.rect;
+    for (const f of area.files) roles.set(f.path, classifyRole(f.path, f.name, fileWeight(f)));
     const visible = area.files.filter((f) => individual.has(f.path));
     const overflow: FileNode[] = area.files.filter((f) => !individual.has(f.path));
     // candidate cells: prefer breathing room, densify when crowded
@@ -420,8 +559,49 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
     }
   }
 
+  // ---- streets: measured imports become the visible circulation -------------
+  let depEdgesRouted = 0;
+  if (depEdges && depEdges.length > 0) {
+    const counts = new Map<string, number>();
+    for (const e of depEdges) {
+      if (!e || !e.from || !e.to || e.from === e.to) continue;
+      const k = `${e.from}\u0000${e.to}`;
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    const ranked = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+      .slice(0, MAX_STREET_EDGES);
+    for (const [k] of ranked) {
+      const [from, to] = k.split("\u0000") as [string, string];
+      const a = plots.get(from);
+      const b = plots.get(to);
+      if (!a || !b) continue;
+      // a tile is permitted unless it lies inside a quarter foreign to both ends
+      const own = (qp: string) =>
+        from === qp || from.startsWith(qp + "/") || to === qp || to.startsWith(qp + "/");
+      const permitted = (tx: number, ty: number) =>
+        !quarters.some(
+          (q) =>
+            !own(q.path) &&
+            tx >= q.rect.x &&
+            ty >= q.rect.y &&
+            tx < q.rect.x + q.rect.w &&
+            ty < q.rect.y + q.rect.h,
+        );
+      let px = a.tx;
+      let py = a.ty;
+      let guard = side * 4;
+      while ((px !== b.tx || py !== b.ty) && guard-- > 0) {
+        if (px !== b.tx && (py === b.ty || (px + py) % 2 === 0)) px += Math.sign(b.tx - px);
+        else if (py !== b.ty) py += Math.sign(b.ty - py);
+        const key = `${px},${py}`;
+        if (permitted(px, py) && !roads.has(key) && !used.has(key)) streets.add(key);
+      }
+      if (guard > 0) depEdgesRouted++;
+    }
+  }
+
   // ---- water: the landmass is code-made too ---------------------------------
-  const census = analyzeCensus(tree);
   const water = new Set<string>();
   const inRect = (tx: number, ty: number, r: Rect) => tx >= r.x && ty >= r.y && tx < r.x + r.w && ty < r.y + r.h;
   const inAnyQuarter = (tx: number, ty: number) => quarters.some((q) => inRect(tx, ty, q.rect));
@@ -445,7 +625,7 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
         const u = tx - cx;
         const v = ty - cy;
         const rad = Math.max(Math.abs(u), Math.abs(v));
-        if (rad <= citySide / 2 + 1) continue; // never near the city
+        if (Math.abs(u) <= cityW / 2 + 1 && Math.abs(v) <= cityH / 2 + 1) continue; // never near the city
         const theta = Math.atan2(v, u);
         let a = 0;
         for (const h of harmonics) a += h.amp * (1 + Math.sin(h.k * theta + h.phase)) * 0.5;
@@ -554,10 +734,11 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
     }
   }
 
-  // Bridges are exactly the roads that cross water; the roads themselves are
-  // untouched so tree-edge connectivity is preserved by construction.
+  // Bridges are exactly the roads and streets that cross water; the paths
+  // themselves are untouched so connectivity is preserved by construction.
   const bridges = new Set<string>();
   for (const r of roads) if (water.has(r)) bridges.add(r);
+  for (const s of streets) if (water.has(s)) bridges.add(s);
   const coast = new Set<string>();
   for (const key of water) {
     const [wtx, wty] = key.split(",").map(Number) as [number, number];
@@ -569,6 +750,34 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
       if (!water.has(nk)) coast.add(nk);
     }
   }
+
+  // ---- terrain heights: the composition's third dimension --------------------
+  const heights = new Map<string, number>();
+  const raiseRect = (r: Rect, lvl: number) => {
+    for (let ty = r.y; ty < r.y + r.h; ty++) {
+      for (let tx = r.x; tx < r.x + r.w; tx++) heights.set(`${tx},${ty}`, lvl);
+    }
+  };
+  if (composition === "terrace-mount") {
+    // altitude = directory depth; deepest writes last so summits win
+    for (const q of [...quarters].sort((a, b) => a.depth - b.depth)) raiseRect(q.rect, Math.min(q.depth, 4));
+    for (const b of blocks) raiseRect(b.rect, Math.min(b.depth, 5));
+  } else if (composition === "ring-city") {
+    const core = quarters.find((q) => q.depth === 1 && q.path === census.coreDir);
+    if (core) raiseRect(core.rect, 2);
+  } else if (composition === "canyon-strata") {
+    // alternating shelves along the gorge; the Long Road row stays at floor 0
+    const bandsQ = quarters
+      .filter((q) => q.depth === 1)
+      .sort((a, b) => a.rect.x - b.rect.x || a.rect.y - b.rect.y);
+    bandsQ.forEach((q, i) => {
+      if (i % 2 === 1) raiseRect(q.rect, 1);
+    });
+  }
+  for (const key of water) heights.delete(key);
+  // the canyon's roads are cuts through the shelves; elsewhere roads ride
+  // the terrain and the renderer ramps them between levels
+  if (composition === "canyon-strata") for (const key of roads) heights.delete(key);
 
   return {
     side,
@@ -586,6 +795,11 @@ export function layoutMap(tree: FileNode, seed: number): MapLayout {
     water,
     bridges,
     coast,
+    composition,
+    heights,
+    roles,
+    streets,
+    depEdgesRouted,
   };
 }
 
@@ -611,11 +825,13 @@ export function assignPlot(map: MapLayout, path: string): { tx: number; ty: numb
         const ty = cy + dy;
         if (tx < 1 || ty < 1 || tx >= map.side - 1 || ty >= map.side - 1) continue;
         const key = `${tx},${ty}`;
-        if (map.used.has(key) || map.roads.has(key) || map.water.has(key)) continue;
+        if (map.used.has(key) || map.roads.has(key) || map.streets.has(key) || map.water.has(key)) continue;
         map.used.add(key);
         const cell = { tx, ty };
         map.plots.set(path, cell);
         map.buckets.set(path, 1);
+        const name = path.split("/").pop() ?? path;
+        map.roles.set(path, classifyRole(path, name, 1));
         return cell;
       }
     }
@@ -642,6 +858,7 @@ export function layoutHash(map: MapLayout): string {
   const mix = (s: string) => {
     for (let i = 0; i < s.length; i++) h = (Math.imul(h, 33) ^ s.charCodeAt(i)) >>> 0;
   };
+  mix(`v:${LAYOUT_VERSION};c:${map.composition};d:${map.depEdgesRouted};`);
   mix(`side:${map.side};tc:${map.townCenter.tx},${map.townCenter.ty};`);
   for (const q of map.quarters) mix(`q:${q.path}:${q.rect.x},${q.rect.y},${q.rect.w},${q.rect.h},${q.gate.tx},${q.gate.ty};`);
   for (const b of map.blocks) mix(`b:${b.path}:${b.rect.x},${b.rect.y},${b.rect.w},${b.rect.h};`);
@@ -657,5 +874,9 @@ export function layoutHash(map: MapLayout): string {
   for (const w of waterKeys) mix(`w:${w};`);
   const bridgeKeys = [...map.bridges].sort();
   for (const b of bridgeKeys) mix(`g:${b};`);
+  const heightKeys = [...map.heights.entries()].map(([k, v]) => `${k}=${v}`).sort();
+  for (const t of heightKeys) mix(`t:${t};`);
+  const streetKeys = [...map.streets].sort();
+  for (const s of streetKeys) mix(`s:${s};`);
   return h.toString(16).padStart(8, "0");
 }

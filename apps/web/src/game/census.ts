@@ -42,6 +42,26 @@ const ASSET_EXT = /\.(png|jpe?g|gif|svg|webp|ico|bmp|mp[34]|wav|ogg|woff2?|ttf|o
 /** Top-level dirs that mark a many-packages workshop when they hold ≥2 dirs. */
 const MONOREPO_DIRS = /^(packages|apps|crates|services|libs|modules|projects|workspaces|plugins)$/i;
 
+/**
+ * What a file IS, structurally — the building typology law. Path-role tests
+ * (test/docs/config/asset) outrank content roles (entry/giant): a giant test
+ * file is still a watchtower.
+ */
+export type FileRole = "test" | "docs" | "config" | "asset" | "entry" | "giant" | "source";
+
+const ENTRY_NAME = /^(index|main|app|cli|server|mod|lib|__init__|__main__)\.[a-z]+$/i;
+
+export function classifyRole(path: string, name: string, lines: number): FileRole {
+  if (TEST_PATH.test(path)) return "test";
+  if (DOC_PATH.test(path)) return "docs";
+  if (CONFIG_PATH.test(path)) return "config";
+  if (ASSET_EXT.test(name)) return "asset";
+  // entry points only near the surface: nested index files are routine
+  if (ENTRY_NAME.test(name) && path.split("/").length <= 2) return "entry";
+  if (lines >= 1000) return "giant";
+  return "source";
+}
+
 export type Census = {
   /** Language families ranked by share of total lines (0..1), desc. */
   languages: { family: LangFamily; share: number }[];
@@ -64,6 +84,10 @@ export type Census = {
   /** Dir children across monorepo containers — the islet count. */
   packageDirs: number;
   topLevelDirs: number;
+  /** Share of all lines held by the heaviest top-level dir (0..1). */
+  coreShare: number;
+  /** That heaviest top-level dir's path ("" when none). */
+  coreDir: string;
 };
 
 function extOf(name: string): string {
@@ -85,6 +109,8 @@ export function analyzeCensus(tree: FileNode): Census {
   let monorepo = false;
   let packageDirs = 0;
   let topLevelDirs = 0;
+
+  const topDirLines = new Map<string, number>();
 
   const walk = (node: FileNode, depth: number) => {
     if (node.kind === "dir") {
@@ -108,6 +134,8 @@ export function analyzeCensus(tree: FileNode): Census {
     const lines = typeof (node as FileNode & { lines?: number }).lines === "number"
       ? Math.max(1, (node as FileNode & { lines?: number }).lines!)
       : 1;
+    const topSeg = node.path.includes("/") ? node.path.split("/")[0]! : "";
+    if (topSeg) topDirLines.set(topSeg, (topDirLines.get(topSeg) ?? 0) + lines);
     totalLines += lines;
     const fam = EXT_FAMILY[extOf(node.name)] ?? "other";
     langLines.set(fam, (langLines.get(fam) ?? 0) + lines);
@@ -123,6 +151,7 @@ export function analyzeCensus(tree: FileNode): Census {
   const languages = [...langLines.entries()]
     .map(([family, n]) => ({ family, share: n / denom }))
     .sort((a, b) => b.share - a.share || (a.family < b.family ? -1 : 1));
+  const core = [...topDirLines.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0];
 
   return {
     languages,
@@ -139,6 +168,8 @@ export function analyzeCensus(tree: FileNode): Census {
     monorepo,
     packageDirs,
     topLevelDirs,
+    coreShare: core ? core[1] / denom : 0,
+    coreDir: core?.[0] ?? "",
   };
 }
 
