@@ -82,8 +82,14 @@ export function buildTerrain(map: MapLayout, seed: number): TerrainInfo {
     map.used.add(key);
   }
 
+  // composition heights (terraces, ring cores, canyon shelves) stack on the
+  // city plateau's base level; carved water always wins back to sea level
   const heightAt = (tx: number, ty: number) =>
-    inBounds(tx, ty) && carved[ty * side + tx] === 1 ? 0 : inCity(tx, ty) ? 1 : 0;
+    inBounds(tx, ty) && carved[ty * side + tx] === 1
+      ? 0
+      : inCity(tx, ty)
+        ? 1 + (map.heights.get(`${tx},${ty}`) ?? 0)
+        : 0;
 
   return {
     side,
@@ -108,7 +114,16 @@ export type PaintedTerrain = {
   miniColors: Uint32Array;
 };
 
-const MINI = { grass: 0x44603a, city: 0x5a7042, water: 0x33608f, cliff: 0x6f6a58, road: 0x9a8258 };
+const MINI = { grass: 0x44603a, city: 0x5a7042, water: 0x33608f, cliff: 0x6f6a58, road: 0x9a8258, street: 0xb8a878 };
+
+/** Lighten a 0xRRGGBB toward white by t (0..1) — minimap altitude shading. */
+function shade(color: number, t: number): number {
+  const k = Math.max(0, Math.min(1, t));
+  const r = Math.min(255, Math.round(((color >> 16) & 0xff) * (1 - k) + 255 * k));
+  const g = Math.min(255, Math.round(((color >> 8) & 0xff) * (1 - k) + 255 * k));
+  const b = Math.min(255, Math.round((color & 0xff) * (1 - k) + 255 * k));
+  return (r << 16) | (g << 8) | b;
+}
 
 export function paintTerrain(
   scene: Phaser.Scene,
@@ -135,7 +150,7 @@ export function paintTerrain(
       const y1 = Math.min(side, y0 + CHUNK) - 1;
       const left = isoX(x0, y1) - TILE_W / 2;
       const right = isoX(x1, y0) + TILE_W / 2;
-      const top = isoY(x0, y0) - TILE_H / 2 - 2 * LIFT;
+      const top = isoY(x0, y0) - TILE_H / 2 - 7 * LIFT;
       const bottom = isoY(x1, y1) + TILE_H / 2 + 4;
       const rt = scene.add
         .renderTexture(left, top, Math.ceil(right - left), Math.ceil(bottom - top))
@@ -183,22 +198,32 @@ export function paintTerrain(
         continue;
       }
       const h = t.heightAt(tx, ty);
-      // plateau rim: cliff block where a front neighbor sits lower
-      const frontLower = h > 0 && (t.heightAt(tx + 1, ty) < h || t.heightAt(tx, ty + 1) < h);
-      if (frontLower) {
-        // block's top diamond center sits 16px below the frame top
-        stamp(pick(T.cliff), tx, ty, 16 / 64, h * LIFT);
-        miniColors[i] = MINI.cliff;
+      // terrace rim: stack cliff blocks from the lowest front neighbor up, so
+      // multi-level drops (mounts, ring cores, canyon shelves) read as walls
+      const minFront = Math.min(
+        tx + 1 < side ? t.heightAt(tx + 1, ty) : h,
+        ty + 1 < side ? t.heightAt(tx, ty + 1) : h,
+      );
+      if (h > 0 && minFront < h) {
+        for (let lv = Math.max(1, minFront + 1); lv <= h; lv++) {
+          // block's top diamond center sits 16px below the frame top
+          stamp(pick(T.cliff), tx, ty, 16 / 64, lv * LIFT);
+        }
+        miniColors[i] = shade(MINI.cliff, (h - 1) * 0.1);
         continue;
       }
       let frame: string;
       if (t.isRoad(tx, ty)) {
         frame = pick(T.dirt);
         miniColors[i] = MINI.road;
+      } else if (map.streets.has(`${tx},${ty}`)) {
+        // dependency streets: worn paths, quieter than the tree roads
+        frame = pick(T.dirt);
+        miniColors[i] = MINI.street;
       } else {
         const decor = fbm2(tx * 0.5, ty * 0.5, seed ^ 0x1b) > 0.62 && rng() < 0.5;
         frame = decor ? pick(T.grassDecor) : pick(T.grass);
-        miniColors[i] = h > 0 ? MINI.city : MINI.grass;
+        miniColors[i] = h > 0 ? shade(MINI.city, (h - 1) * 0.1) : MINI.grass;
       }
       stamp(frame, tx, ty, FLOOR_ORIGIN_Y, h * LIFT);
     }
@@ -221,7 +246,7 @@ export function floraSpots(map: MapLayout, t: TerrainInfo, seed: number, max = 6
   for (let ty = 0; ty < side && out.length < max; ty++) {
     for (let tx = 0; tx < side && out.length < max; tx++) {
       const key = `${tx},${ty}`;
-      if (map.used.has(key) || map.roads.has(key)) continue;
+      if (map.used.has(key) || map.roads.has(key) || map.streets.has(key)) continue;
       if (t.isWater(tx, ty)) continue;
       const city = t.inCity(tx, ty);
       const edge = Math.min(tx, ty, side - 1 - tx, side - 1 - ty);

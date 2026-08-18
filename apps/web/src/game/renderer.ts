@@ -69,7 +69,8 @@ import {
 import { Minimap, MiniDot } from "./minimap.js";
 import { Archetype, ParticleKind, resolveArchetype } from "./archetypes.js";
 import { createShroud, Shroud } from "./shroud.js";
-import { districtCensus, surveyLine } from "./census.js";
+import { analyzeCensus, districtCensus, surveyLine } from "./census.js";
+import { deriveWorldDNA, type WorldDNA } from "./worlddna.js";
 
 const FOG_REVEAL_RADIUS = 2;
 const CONSTRUCTION_MS = 1400;
@@ -337,9 +338,11 @@ class MainScene extends Phaser.Scene {
 
   private map: MapLayout | null = null;
   private terrain: TerrainInfo | null = null;
+  private dna: WorldDNA | null = null;
   private groundImgs: Phaser.GameObjects.RenderTexture[] = [];
   private miniColors: Uint32Array | null = null;
   private floraImgs: Phaser.GameObjects.Image[] = [];
+  private landmarkObjs: (Phaser.GameObjects.Container | Phaser.GameObjects.Zone)[] = [];
   private blockTintImgs: Phaser.GameObjects.Image[] = [];
   private dressings: Dressing[] = [];
   private citadel = { x: 0, y: 0, tx: 0, ty: 0 };
@@ -660,7 +663,7 @@ class MainScene extends Phaser.Scene {
     const c = map.cityRect;
     const left = isoX(c.x, c.y + c.h - 1) - TILE_W;
     const right = isoX(c.x + c.w - 1, c.y) + TILE_W;
-    const top = isoY(c.x, c.y) - LIFT - 3 * TILE_H;
+    const top = isoY(c.x, c.y) - 6 * LIFT - 3 * TILE_H;
     const bottom = isoY(c.x + c.w - 1, c.y + c.h - 1) + 2 * TILE_H;
     const vw = this.scale.width || 800;
     const vh = this.scale.height || 600;
@@ -1785,10 +1788,76 @@ class MainScene extends Phaser.Scene {
     return this.terrain ? this.terrain.groundY(tx, ty) : isoY(tx, ty);
   }
 
+  /** Typology law: role → structure kind; dwellings keep legacy variety. */
+  private kindFor(path: string, fallback?: string): string {
+    const role = this.map?.roles.get(path);
+    const structure = role && this.dna ? this.dna.structures[role] : undefined;
+    if (structure && structure !== "dwelling" && structure !== "workshop") return structure;
+    return fallback ?? buildingKindFor(path);
+  }
+
+  /** One census-cited monument per world, Crown property, never shrouded. */
+  private placeLandmark(): void {
+    const map = this.map;
+    const dna = this.dna;
+    if (!map || !dna) return;
+    const inQuarter = (tx: number, ty: number) =>
+      map.quarters.some(
+        (q) => tx >= q.rect.x && ty >= q.rect.y && tx < q.rect.x + q.rect.w && ty < q.rect.y + q.rect.h,
+      );
+    const free = (tx: number, ty: number) => {
+      const key = `${tx},${ty}`;
+      return (
+        !map.used.has(key) &&
+        !map.roads.has(key) &&
+        !map.streets.has(key) &&
+        !map.water.has(key) &&
+        !inQuarter(tx, ty) &&
+        (this.terrain?.inCity(tx, ty) ?? false)
+      );
+    };
+    let spot: { tx: number; ty: number } | null = null;
+    outer: for (let radius = 2; radius <= 14 && !spot; radius++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+          const tx = map.townCenter.tx + dx;
+          const ty = map.townCenter.ty + dy;
+          if (free(tx, ty)) {
+            spot = { tx, ty };
+            break outer;
+          }
+        }
+      }
+    }
+    if (!spot) return;
+    map.used.add(`${spot.tx},${spot.ty}`);
+    const KIND: Record<WorldDNA["landmark"]["kind"], { kind: string; scale: number }> = {
+      "colossus": { kind: "megastructure", scale: 1.35 },
+      "harbor-beacon": { kind: "watchtower", scale: 1.5 },
+      "great-library": { kind: "stela", scale: 1.45 },
+      "garrison-keep": { kind: "barracks", scale: 1.35 },
+      "crown-spire": { kind: "watchtower", scale: 1.6 },
+    };
+    const pick = KIND[dna.landmark.kind];
+    const composed = composeBuilding(this, pick.kind, "quarter", 2, hashStr(dna.landmark.kind));
+    const x = isoX(spot.tx, spot.ty);
+    const y = this.groundYAt(spot.tx, spot.ty);
+    composed.root.setPosition(x, y).setScale(pick.scale);
+    composed.root.setDepth(y);
+    const line = dna.landmark.line;
+    const zone = this.add
+      .zone(x, y - 30 * pick.scale, 70 * pick.scale, 70 * pick.scale)
+      .setInteractive({ useHandCursor: true });
+    zone.on("pointerdown", () => this.examine(null, "", line, x, y - 60));
+    this.landmarkObjs.push(composed.root, zone);
+  }
+
   private buildWorld(event: Extract<GameEvent, { type: "match_started" }>): void {
     this.mapSeed = event.mapSeed;
     const map = layoutMap(event.repoTree, event.mapSeed, event.depEdges);
     this.map = map;
+    this.dna = deriveWorldDNA(analyzeCensus(event.repoTree), event.mapSeed, this.theme?.biome.archetype);
     const hash = layoutHash(map);
     const terrain = buildTerrain(map, event.mapSeed);
     this.terrain = terrain;
@@ -1845,10 +1914,13 @@ class MainScene extends Phaser.Scene {
     const tc = map.townCenter;
     this.citadel = { x: isoX(tc.tx, tc.ty), y: this.groundYAt(tc.tx, tc.ty), tx: tc.tx, ty: tc.ty };
     this.placeCitadel();
+    for (const o of this.landmarkObjs) o.destroy();
+    this.landmarkObjs = [];
+    this.placeLandmark();
 
     // EVERY file stands as a building from the first frame (fog hides it)
     for (const [path, cell] of map.plots) {
-      this.placeBuilding(path, buildingKindFor(path), cell.tx, cell.ty, true, false);
+      this.placeBuilding(path, this.kindFor(path), cell.tx, cell.ty, true, false);
     }
     for (const hm of map.hamlets) {
       this.placeHamlet(hm);
@@ -2401,7 +2473,7 @@ class MainScene extends Phaser.Scene {
         const pos = this.posForPath(e.path);
         this.uncoverByPath(e.path, historical);
         this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
-        const rec = this.placeBuilding(e.path, e.buildingKind, pos.tx, pos.ty, historical, isNew);
+        const rec = this.placeBuilding(e.path, this.kindFor(e.path, e.buildingKind), pos.tx, pos.ty, historical, isNew);
         rec.writes++;
         rec.linesAdded += e.linesAdded;
         rec.linesRemoved += e.linesRemoved;

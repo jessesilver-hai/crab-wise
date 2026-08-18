@@ -33,8 +33,11 @@ function pickN<T>(arr: T[], n: number): T {
  * plot tile's ground point; wall cells hold content in the lower 48px of
  * their 64px cell, roofs stack ~30px above.
  */
+/** Structure typologies keep their silhouette even at hut size. */
+const TYPOLOGY_KINDS = new Set(["watchtower", "stela", "silo", "reliquary", "gatehouse", "megastructure"]);
+
 function recipe(kind: string, arch: DistrictArchetype, bucket: SizeBucket, h: number): PartSpec[] {
-  if (bucket === 0 && kind !== "towncenter") {
+  if (bucket === 0 && kind !== "towncenter" && !TYPOLOGY_KINDS.has(kind)) {
     // hut: a single low cell with a small awning cap
     return [
       { frame: pickN([P.wallDark, P.wallDoorA, P.wallDoorB, P.wallWindow], h), dx: 0, dy: 16, role: "wall" },
@@ -43,6 +46,60 @@ function recipe(kind: string, arch: DistrictArchetype, bucket: SizeBucket, h: nu
   }
   const large = bucket === 2;
   switch (kind) {
+    case "watchtower": {
+      // tests stand guard: a stacked stone tower, unmistakable at any size
+      const parts: PartSpec[] = [{ frame: P.keepBlock, dx: 0, dy: 16, role: "wall" }];
+      if (bucket >= 1) parts.push({ frame: P.keepBlock, dx: 0, dy: -30, role: "wall" });
+      parts.push({ frame: P.pyramid, dx: 0, dy: bucket >= 1 ? -76 : -30, role: "roof" });
+      if (large) parts.push({ frame: P.pillarTall, dx: -26, dy: 24, role: "deco" });
+      return parts;
+    }
+    case "stela": {
+      // docs are monuments: slab, pillar, and for the great ones a spire
+      const parts: PartSpec[] = [
+        { frame: P.stoneSlab, dx: 0, dy: 16, role: "wall" },
+        { frame: large ? P.spire : P.pillarTall, dx: 0, dy: large ? -20 : -14, role: "roof" },
+      ];
+      if (bucket >= 1) parts.push({ frame: P.pillarSmall, dx: 22, dy: 20, role: "deco" });
+      return parts;
+    }
+    case "silo": {
+      // configs feed the realm: a granary tower under a pyramid cap
+      const parts: PartSpec[] = [
+        { frame: P.keepDoor, dx: 0, dy: 16, role: "wall" },
+        { frame: P.pyramid, dx: 0, dy: -30, role: "roof" },
+      ];
+      if (bucket >= 1) parts.push({ frame: P.awning, dx: -20, dy: 8, role: "deco" });
+      return parts;
+    }
+    case "reliquary": {
+      // assets rest in low vaults, not homes
+      return [
+        { frame: P.stonePlatform, dx: 0, dy: 16, role: "wall" },
+        { frame: P.stoneSlab, dx: 0, dy: -6, role: "roof" },
+        { frame: P.awning, dx: 14, dy: 2, role: "deco" },
+      ];
+    }
+    case "gatehouse": {
+      // entry points are gates: an arch flanked by pillars
+      const parts: PartSpec[] = [
+        { frame: P.keepArch, dx: 0, dy: 16, role: "wall" },
+        { frame: P.roofSmall, dx: 0, dy: -40, role: "roof" },
+        { frame: P.pillarSmall, dx: -28, dy: 24, role: "deco" },
+      ];
+      if (bucket >= 1) parts.push({ frame: P.pillarSmall, dx: 28, dy: 24, role: "deco" });
+      return parts;
+    }
+    case "megastructure": {
+      // giant files dwarf the streets: joined keeps under a spire
+      return [
+        { frame: P.keepBlock, dx: 32, dy: 32, role: "wall" },
+        { frame: P.keepArch, dx: 0, dy: 16, role: "wall" },
+        { frame: P.spire, dx: 32, dy: -16, role: "roof" },
+        { frame: P.roofSlopeA, dx: 0, dy: -32, role: "roof" },
+        { frame: P.chimneyOpen, dx: -16, dy: -28, role: "deco" },
+      ];
+    }
     case "towncenter": // sub-package hearts: a small stone keep
       return [
         { frame: P.keepArch, dx: 0, dy: 16, role: "wall" },
