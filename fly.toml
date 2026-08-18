@@ -10,6 +10,8 @@ primary_region = "iad"
   PORT = "8080"
   MAX_SANDBOXES = "6"
   HALL_PATH = "/data/hall.json"
+  CASTLES_PATH = "/data/castles.json"
+  CASTLE_BUNDLES_DIR = "/data/castles"
   # Set via `fly secrets`: FLY_API_TOKEN, SANDBOX_APP, SANDBOX_IMAGE
 
 [mounts]
