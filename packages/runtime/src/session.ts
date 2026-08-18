@@ -5,10 +5,12 @@ import {
   VILLAGER_NAMES,
   type FileNode,
   type GameEvent,
+  type ProbeHit,
   type ThemePack,
 } from "@agent-empires/protocol";
 import { Agent, type Inbox } from "./agent.js";
 import { collectFilePaths, DEP_SCAN_COMMAND, parseDepHits, resolveDepEdges } from "./depscan.js";
+import { FACT_SCAN_COMMAND, factScanFileCommand, groupHitsByPath, hitsEqual, parseFactHits } from "./factscan.js";
 import { Emitter } from "./emitter.js";
 import { heraldCharge, heraldMessage, type HeraldLexicon } from "./herald.js";
 import type { Executor } from "./executor.js";
@@ -201,6 +203,11 @@ export class Settlement {
   private wsNamings: string[] = [];
   private wsChatCalls = 0;
   private censusBriefText: string | null = null;
+  // Castle Era fact survey: last-known probe hits per path, re-taken on writes.
+  private factsByPath = new Map<string, ProbeHit[]>();
+  private reprobeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private reprobeBusy = new Set<string>();
+  private reprobeCalls = 0;
 
   constructor(private opts: SettlementOptions) {
     this.emitter = new Emitter((event) => {
@@ -307,6 +314,19 @@ export class Settlement {
       // the surveyors came home empty-handed; tree roads only
     }
 
+    // Founding-time fact survey: colors, routes, tables. Failure = plain walls.
+    let probeHits: ProbeHit[] | undefined;
+    try {
+      const res = await executor.exec(FACT_SCAN_COMMAND, 20_000);
+      const hits = parseFactHits(res.output.split("\n"));
+      if (hits.length > 0) {
+        probeHits = hits;
+        for (const [p, list] of groupHitsByPath(hits)) this.factsByPath.set(p, list);
+      }
+    } catch {
+      // no facts surveyed; the castle keeps its default dress
+    }
+
     this.emitter.emit("match_started", {
       matchId: "",
       task: {
@@ -318,6 +338,7 @@ export class Settlement {
       mapSeed: hashString(repoUrl),
       repoTree: tree,
       depEdges,
+      probeHits,
     });
     if (this.theme) this.emitter.emit("theme_ready", { theme: this.theme });
 
@@ -721,11 +742,53 @@ If work remains or something failed, dispatch another round with ASSIGN lines. R
 
   private observe(event: GameEvent): void {
     if (event.type !== "file_read" && event.type !== "file_write" && event.type !== "list_dir") return;
+    if (event.type === "file_write") this.scheduleReprobe(event.path, event.created);
     const district = districtOf(event.path, event.type === "list_dir");
     if (district === null || this.seenDistricts.has(district)) return;
     this.seenDistricts.add(district);
     this.wsQueue.push(district);
     this.scheduleWorldsmith();
+  }
+
+  // -------------------------------------------------------------------------
+  // Castle Era: every write re-takes the file's fact probes; changed facts
+  // ship as component_facts and the castle repaints live. Failures vanish.
+  // -------------------------------------------------------------------------
+
+  private scheduleReprobe(path: string, created: boolean): void {
+    if (this.reprobeCalls >= 400 || this.opts.signal?.aborted) return;
+    const prior = this.reprobeTimers.get(path);
+    if (prior) clearTimeout(prior);
+    // new files probe fast so they enter the world correctly classified;
+    // edits debounce so a burst of writes costs one survey
+    const delay = created ? 250 : 1200;
+    this.reprobeTimers.set(
+      path,
+      setTimeout(() => {
+        this.reprobeTimers.delete(path);
+        void this.runReprobe(path);
+      }, delay),
+    );
+  }
+
+  private async runReprobe(path: string): Promise<void> {
+    if (this.reprobeBusy.has(path) || this.reprobeCalls >= 400) return;
+    this.reprobeBusy.add(path);
+    this.reprobeCalls++;
+    try {
+      const res = await this.opts.executor.exec(factScanFileCommand(path), 8_000);
+      const hits = parseFactHits(res.output.split("\n")).filter((h) => h.path === path);
+      const before = this.factsByPath.get(path) ?? [];
+      if (!hitsEqual(before, hits)) {
+        if (hits.length === 0) this.factsByPath.delete(path);
+        else this.factsByPath.set(path, hits);
+        this.emitter.emit("component_facts", { path, hits: hits.slice(0, 64) });
+      }
+    } catch {
+      // the surveyor tripped on the stairs; the old facts stand
+    } finally {
+      this.reprobeBusy.delete(path);
+    }
   }
 
   private scheduleWorldsmith(): void {
@@ -843,6 +906,9 @@ ${todos.length ? `Real TODO/FIXME inscriptions (path:line: text):\n${todos.join(
     if (this.wsTimer) clearTimeout(this.wsTimer);
     this.wsTimer = null;
     this.wsCalls = 8; // the Worldsmith rests
+    for (const t of this.reprobeTimers.values()) clearTimeout(t);
+    this.reprobeTimers.clear();
+    this.reprobeCalls = 400; // the surveyors rest
     this.emitter.emit("match_ended", {
       result: this.stats.filesWritten.size > 0 && this.stats.lastTestGreen ? "victory" : "abandoned",
       stats: {

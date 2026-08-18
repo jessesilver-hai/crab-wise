@@ -1031,5 +1031,49 @@ console.log("Castle Era (live loop)");
   check("the keep stays the keep", r5.plan.sockets.find((s) => s.componentId === keepId).form === "keep");
 }
 
+console.log("Castle Era (fact survey)");
+{
+  const { parseFactHits, factScanFileCommand, hitsEqual, FACT_SCAN_COMMAND } = await import(
+    "../packages/runtime/src/factscan.ts"
+  );
+  const lines = [
+    "./styles.css:3:  --brand: #E86A33;",
+    "styles.css:9:body { background: #e86a33; color: #222831 }",
+    "app.ts:4:// fixes #123456 properly",
+    "theme.ts:2:export const brandColor = '#AABBCC';",
+    "server.js:12:app.get('/menu', handler)",
+    "server.js:13:app.post( \"/order\", h)",
+    "server.js:14:cache.get('key')",
+    "api.py:8:@app.route('/health')",
+    "api.py:9:@router.get('/users')",
+    "db/schema.sql:1:CREATE TABLE IF NOT EXISTS orders (",
+    "db/schema.sql:7:create table items(",
+    "models.py:3:    __tablename__ = 'customers'",
+    "schema.prisma:5:model Invoice {",
+    "notes.ts:5:model Invoice {",
+  ];
+  const hits = parseFactHits(lines);
+  const vals = (probe) => hits.filter((h) => h.probe === probe).map((h) => `${h.path}|${h.value}`);
+  check("colors dedupe and lowercase", vals("color").includes("styles.css|#e86a33") && vals("color").filter((v) => v === "styles.css|#e86a33").length === 1);
+  check("secondary color counted", vals("color").includes("styles.css|#222831"));
+  check("issue refs are not colors", !vals("color").some((v) => v.includes("#123456")));
+  check("color-flavored code lines count", vals("color").includes("theme.ts|#aabbcc"));
+  check("routes read method and path", vals("route").includes("server.js|GET /menu") && vals("route").includes("server.js|POST /order"));
+  check("map.get is not a route", !vals("route").some((v) => v.includes("key")));
+  check("python decorators are routes", vals("route").includes("api.py|ROUTE /health") && vals("route").includes("api.py|GET /users"));
+  check("create table reads the name", vals("table").includes("db/schema.sql|orders") && vals("table").includes("db/schema.sql|items"));
+  check("orm table names count", vals("table").includes("models.py|customers"));
+  check("prisma models only in .prisma", vals("table").includes("schema.prisma|invoice") && !vals("table").some((v) => v.startsWith("notes.ts")));
+  check("caps hold", parseFactHits(Array.from({ length: 3000 }, (_, i) => `f${i}.css:1:a{color:#a1b2c3}`), 100).length === 100);
+  check("per-path cap holds", parseFactHits(Array.from({ length: 200 }, (_, i) => `one.css:${i}:a{color:#${String(100000 + i).slice(0, 6)}}`)).length <= 64);
+  check("single-file command quotes the path", factScanFileCommand("a b'c.css").includes(`'a b'\\''c.css'`));
+  check("survey command is bounded and pathed", FACT_SCAN_COMMAND.includes("-rInHE") && FACT_SCAN_COMMAND.includes("head -n 6000"));
+  check("hitsEqual ignores order", hitsEqual(
+    [{ path: "x", probe: "color", value: "#aaaaaa" }, { path: "x", probe: "color", value: "#bbbbbb" }],
+    [{ path: "x", probe: "color", value: "#bbbbbb" }, { path: "x", probe: "color", value: "#aaaaaa" }],
+  ));
+  check("hitsEqual sees change", !hitsEqual([{ path: "x", probe: "color", value: "#aaaaaa" }], [{ path: "x", probe: "color", value: "#cccccc" }]));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
