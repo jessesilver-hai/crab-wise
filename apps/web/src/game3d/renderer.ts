@@ -29,6 +29,7 @@ import { resolveArchetype, type Archetype } from "../game/archetypes.js";
 import { analyzeCensus, districtCensus, surveyLine, type Census } from "../game/census.js";
 import { createShroud, type Shroud } from "../game/shroud.js";
 import { deriveWorldDNA, type ScaleTier, type TimeOfDay, type WorldDNA } from "../game/worlddna.js";
+import { Accents } from "./accents.js";
 import { Assets } from "./assets.js";
 import { heightAt, levelAt } from "./terrain3d.js";
 import { RtsCamera, isTypingTarget } from "./camera.js";
@@ -157,6 +158,7 @@ class Game3D {
   private assets = new Assets();
   private ground = new Ground();
   private city: City;
+  private accents = new Accents();
   private fx = new Fx();
   private overlay: Overlay;
   private raycaster = new THREE.Raycaster();
@@ -252,7 +254,7 @@ class Game3D {
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.bias = -0.0004;
     this.scene.add(this.hemi, this.ambient, this.sun, this.sun.target);
-    this.scene.add(this.ground.group, this.city.group, this.fx.group);
+    this.scene.add(this.ground.group, this.city.group, this.accents.group, this.fx.group);
 
     this.overlay = new Overlay(mount, (tx, ty) => this.cam.jumpTo(tx, ty));
     this.cam.attachKeys();
@@ -300,6 +302,8 @@ class Game3D {
       structureAt: (path: string) => this.city.structureAt(path),
       landmark: () => this.city.landmarkInfo(),
       composition: () => this.map?.composition ?? null,
+      accentCount: () => this.accents.placedCount(),
+      accents: () => this.accents.stats(),
       buildings: () => this.city.buildings,
       instanceCount: () => this.city.buildingInstanceCount(),
       drawCalls: () => this.renderer.info.render.calls,
@@ -357,6 +361,7 @@ class Game3D {
     this.fx.dispose();
     for (const l of this.districtLabels) l.dispose();
     this.city.dispose();
+    this.accents.dispose();
     this.ground.dispose();
     this.assets.dispose();
     this.renderer.dispose();
@@ -830,6 +835,10 @@ class Game3D {
     // the Crown landmark: one census-cited monument, lit from frame one
     const lm = this.city.placeLandmark(map, dna);
     if (lm) this.ground.reveal(lm.tx, lm.ty, 2, true);
+
+    // kit-per-world-form accents: lazy per-form/per-composition model scatter
+    // (after placeLandmark so the monument's claimed tile is respected)
+    this.accents.build(map, event.mapSeed, dna);
 
     // sun from DNA, shadow frustum covering the whole city
     this.applySun(dna);
@@ -1322,6 +1331,8 @@ class Game3D {
       this.ground.setDna(this.dna.ground);
       this.city.buildDecor(this.map, this.mapSeed, this.dna, this.degraded);
       this.city.retintBuildings(this.dna.buildingTint.roof, this.dna.buildingTint.trim);
+      // the Worldsmith may have re-seen the form: accents follow the new kit
+      this.accents.build(this.map, this.mapSeed, this.dna);
       this.applySun(this.dna);
     }
     const themeAccent = hexColor(theme.biome.accentColor);

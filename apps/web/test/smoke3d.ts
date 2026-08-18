@@ -101,6 +101,15 @@ type Debug = {
   structureAt(path: string): { kind: string; model: string } | null;
   landmark(): { kind: string; tx: number; ty: number } | null;
   composition(): string | null;
+  accentCount(): number;
+  accents(): {
+    placed: number;
+    family: number;
+    composition: number;
+    bridge: number;
+    pending: number;
+    errors: number;
+  };
   waterTilesRendered(): number;
   bridgesRendered(): number;
   decorStats(): { wallSegments: number; props: number; trees: number; rocks: number };
@@ -237,6 +246,13 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   console.info(
     `[smoke3d] decor walls=${decor.wallSegments} props=${decor.props} trees=${decor.trees} rocks=${decor.rocks}`,
   );
+
+  // kit accents are lazy-loaded from public/: the static server must serve them
+  const kitUrl = "/assets/3d/kits/hexagon/building_bridge_A.gltf";
+  const kitStatus = await fetch(kitUrl)
+    .then((res) => res.status)
+    .catch(() => 0);
+  check("kit-assets-served", kitStatus === 200, `status=${kitStatus} url=${kitUrl}`);
 
   // --- Worlds Apart: composition, streets, the Crown landmark -------------------
   const composition = dbg().composition();
@@ -513,10 +529,15 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   // --- hover action text --------------------------------------------------------
   // aim inside the building volume: terrain level + plinth clearance
   const lexPt = dbg().projectWorld(lexer.tx, dbg().heightAt(lexer.tx, lexer.ty) * ELEV + 0.7, lexer.ty);
-  firePointer("pointermove", lexPt.x, lexPt.y);
-  await sleep(300);
-  const actionEl = document.querySelector('[data-ae3d="action"]') as HTMLElement;
-  const hoverText = actionEl?.textContent ?? "";
+  // hover picks run inside the render loop: under a software rasterizer a
+  // single 300ms window may not contain a frame — re-aim until one lands
+  // (same assertion, hardened aim, like speak-callback below)
+  let hoverText = "";
+  for (let attempt = 0; attempt < 8 && !hoverText.includes("Attend house of lexer.ts"); attempt++) {
+    firePointer("pointermove", lexPt.x, lexPt.y);
+    await sleep(400);
+    hoverText = (document.querySelector('[data-ae3d="action"]') as HTMLElement)?.textContent ?? "";
+  }
   check("hover-action", hoverText.includes("Attend house of lexer.ts"), `text="${hoverText}"`);
 
   // --- context menu on right-click ----------------------------------------------
@@ -659,6 +680,10 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   // ≥50 on hardware; a software rasterizer (SwiftShader) passes with a caveat
   check("fps", fps >= 50 || software, `fps=${fps.toFixed(1)} software=${software}`);
 
+  // release the main world before the scenario worlds: its render loop (under
+  // SwiftShader, seconds per frame) starves the scenarios' lazy accent loads
+  r.destroy();
+
   // --- composition-law worlds: the four fixture repos from the logic battery ----
   // (EXACT copies of scripts/logic-tests.mjs "Worlds Apart" fixtures, seed 7)
   const monoTree = dir("", [
@@ -700,12 +725,12 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     name: string;
     tree: FN;
     depEdges?: { from: string; to: string }[];
-    verify: (d: Debug) => void;
+    verify: (d: Debug) => void | Promise<void>;
   }[] = [
     {
       name: "terrace",
       tree: deepTree,
-      verify: (d) => {
+      verify: async (d) => {
         const m = d.map()!;
         check("terrace-composition", d.composition() === "terrace-mount", `composition=${d.composition()}`);
         const q3 = m.quarters.find((q) => q.path === "a/b/c");
@@ -721,12 +746,20 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
           d.heightAt(m.townCenter.tx, m.townCenter.ty) === 0,
           `plaza=${d.heightAt(m.townCenter.tx, m.townCenter.ty)}`,
         );
+        // terrace kit accents: background mountains in the wilderness margin
+        const settled = await until(() => d.accents().pending === 0, 30000);
+        const st = d.accents();
+        check(
+          "accent-mountains",
+          settled && st.composition >= 3,
+          `mountains=${st.composition} pending=${st.pending} errors=${st.errors}`,
+        );
       },
     },
     {
       name: "ring",
       tree: coreTree,
-      verify: (d) => {
+      verify: async (d) => {
         const m = d.map()!;
         check("ring-composition", d.composition() === "ring-city", `composition=${d.composition()}`);
         const core = m.quarters.find((q) => q.path === "src");
@@ -745,6 +778,14 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
         const g = d.structureAt("src/a.c");
         check("ring-megastructure", g?.kind === "megastructure" && g?.model === "castle", JSON.stringify(g));
         check("ring-landmark", d.landmark()?.kind === "colossus", JSON.stringify(d.landmark()));
+        // family kit accents scattered in the ring's wilderness + wall skirts
+        const settled = await until(() => d.accents().pending === 0, 30000);
+        const st = d.accents();
+        check(
+          "accents-family",
+          settled && st.family >= 8,
+          `family=${st.family} total=${d.accentCount()} pending=${st.pending} errors=${st.errors}`,
+        );
       },
     },
     {
@@ -773,7 +814,7 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     {
       name: "isles",
       tree: monoTree,
-      verify: (d) => {
+      verify: async (d) => {
         const m = d.map()!;
         check("isles-composition", d.composition() === "archipelago", `composition=${d.composition()}`);
         check(
@@ -782,6 +823,14 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
           `water=${m.water.size} rendered=${d.waterTilesRendered()}`,
         );
         check("isles-landmark", d.landmark()?.kind === "harbor-beacon", JSON.stringify(d.landmark()));
+        // harbor bridge models load clean AND the plank law's count is untouched
+        const settled = await until(() => d.accents().pending === 0, 30000);
+        const st = d.accents();
+        check(
+          "bridge-models",
+          settled && st.errors === 0 && d.bridgesRendered() === m.bridges.size,
+          `errors=${st.errors} bridges=${m.bridges.size} rendered=${d.bridgesRendered()} spans=${st.bridge}`,
+        );
       },
     },
   ];
@@ -807,7 +856,7 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     const sd = () => (globalThis as Record<string, unknown>).__ae3d as Debug;
     const okS = await until(() => Boolean(sd()?.worldReady()), 20000);
     check(`${sc.name}-ready`, okS);
-    if (okS) sc.verify(sd());
+    if (okS) await sc.verify(sd());
     rr.destroy();
     div.remove();
   }

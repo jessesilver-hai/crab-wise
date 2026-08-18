@@ -117,7 +117,7 @@ function toFloat(att: THREE.BufferAttribute | THREE.InterleavedBufferAttribute):
  * grounded at y=0, centered in x/z, uniformly scaled so the larger of the
  * x/z footprint equals 1 world unit (= 1 tile).
  */
-function bakeStatic(root: THREE.Object3D): StaticModel {
+export function bakeStatic(root: THREE.Object3D): StaticModel {
   root.updateMatrixWorld(true);
   const byMat = new Map<THREE.Material, THREE.BufferGeometry[]>();
   root.traverse((obj) => {
@@ -130,6 +130,9 @@ function bakeStatic(root: THREE.Object3D): StaticModel {
     if (normal) geo.setAttribute("normal", toFloat(normal));
     const uv = src.getAttribute("uv");
     if (uv) geo.setAttribute("uv", toFloat(uv));
+    // vertex-colored kits (Tiny Treats) would bake black without this
+    const color = src.getAttribute("color");
+    if (color) geo.setAttribute("color", toFloat(color));
     if (src.index) geo.setIndex(src.index.clone());
     geo.applyMatrix4(mesh.matrixWorld);
     const mat = Array.isArray(mesh.material) ? mesh.material[0]! : mesh.material;
