@@ -68,6 +68,8 @@ import {
 } from "./buildings.js";
 import { Minimap, MiniDot } from "./minimap.js";
 import { Archetype, ParticleKind, resolveArchetype } from "./archetypes.js";
+import { createShroud, Shroud } from "./shroud.js";
+import { districtCensus, surveyLine } from "./census.js";
 
 const FOG_REVEAL_RADIUS = 2;
 const CONSTRUCTION_MS = 1400;
@@ -347,6 +349,13 @@ class MainScene extends Phaser.Scene {
   private hamletByPath = new Map<string, Hamlet>();
   private raiders = new Map<string, RaiderRec>();
   private fogTiles = new Map<string, FogRec>();
+  // Discovery law (game/shroud.ts): quarters start unsurveyed; clicks and
+  // agent activity survey them. Locked fog never clears until surveyed.
+  private shroud: Shroud | null = null;
+  private repoTree: Extract<GameEvent, { type: "match_started" }>["repoTree"] | null = null;
+  private shroudTiles = new Map<string, string[]>(); // quarter path -> fog keys
+  private lockedKeys = new Set<string>();
+  private shroudHidden = new Set<string>(); // plot/hamlet paths currently hidden
   private props: { img: Phaser.GameObjects.Image; tx: number; ty: number; pulse: Phaser.Tweens.Tween | null }[] = [];
   private patchRecs = new Map<string, PatchRec>();
   private regionLabels: Phaser.GameObjects.Text[] = [];
@@ -603,6 +612,8 @@ class MainScene extends Phaser.Scene {
     );
 
     this.input.keyboard?.on("keydown-M", () => {
+      const a = document.activeElement as HTMLElement | null;
+      if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT" || a.isContentEditable)) return;
       this.minimap?.setShown(!this.minimap.shown);
     });
 
@@ -1236,6 +1247,7 @@ class MainScene extends Phaser.Scene {
       if (target) break;
     }
     if (target) this.select(target);
+    else if (this.trySurveyAt(p)) return;
     else this.clearSelection();
   }
 
@@ -1858,6 +1870,39 @@ class MainScene extends Phaser.Scene {
         this.fogTiles.set(`${tx},${ty}`, { img: fog, cleared: false });
       }
     }
+    // The shroud: quarters begin unsurveyed — deep veil, hidden works.
+    this.shroud = createShroud(map.quarters);
+    this.repoTree = event.repoTree;
+    this.shroudTiles.clear();
+    this.lockedKeys.clear();
+    this.shroudHidden.clear();
+    const owner = new Map<string, string>(); // fog key -> deepest owning quarter
+    for (const q of [...map.quarters].sort((a, b) => a.depth - b.depth)) {
+      for (let ty = q.rect.y; ty < q.rect.y + q.rect.h; ty++) {
+        for (let tx = q.rect.x; tx < q.rect.x + q.rect.w; tx++) owner.set(`${tx},${ty}`, q.path);
+      }
+    }
+    for (const [key, qPath] of owner) {
+      const fog = this.fogTiles.get(key);
+      if (!fog) continue;
+      fog.img.setAlpha(0.82);
+      this.lockedKeys.add(key);
+      const list = this.shroudTiles.get(qPath);
+      if (list) list.push(key);
+      else this.shroudTiles.set(qPath, [key]);
+    }
+    for (const [path, rec] of this.buildings) {
+      if (!this.shroud.plotVisible(path)) {
+        rec.root.setVisible(false);
+        this.shroudHidden.add(path);
+      }
+    }
+    for (const { rec, root } of this.hamletObjs) {
+      if (!this.shroud.plotVisible(rec.dirPath)) {
+        root.setVisible(false);
+        this.shroudHidden.add(rec.dirPath);
+      }
+    }
     this.reveal(tc.tx, tc.ty, 4, true);
 
     // minimap: terrain underlay + treemap silhouette
@@ -2076,6 +2121,7 @@ class MainScene extends Phaser.Scene {
         const dist = Math.abs(dx) + Math.abs(dy);
         if (dist > radius + 2) continue;
         const key = `${tx + dx},${ty + dy}`;
+        if (this.lockedKeys.has(key)) continue; // unsurveyed ground keeps its veil
         const rec = this.fogTiles.get(key);
         if (!rec) continue;
         if (dist <= radius) {
@@ -2105,6 +2151,75 @@ class MainScene extends Phaser.Scene {
     const rec = this.fogTiles.get(`${tx},${ty}`);
     return rec ? rec.img.alpha : 0;
   };
+
+  // --- discovery: surveying quarters -----------------------------------------
+
+  /** Agent activity at a path uncovers every quarter on its chain, for everyone. */
+  private uncoverByPath(path: string, historical: boolean): void {
+    if (!this.shroud) return;
+    for (const q of this.shroud.revealForPath(path)) this.applySurvey(q, historical);
+  }
+
+  /** Lift the veil of one surveyed quarter: fog, works, and the chronicle line. */
+  private applySurvey(qPath: string, historical: boolean): void {
+    const map = this.map;
+    if (!map) return;
+    for (const key of this.shroudTiles.get(qPath) ?? []) {
+      this.lockedKeys.delete(key);
+      const fog = this.fogTiles.get(key);
+      if (!fog) continue;
+      if (historical) fog.img.setAlpha(0.55);
+      else this.tweens.add({ targets: fog.img, alpha: 0.55, duration: 500 });
+    }
+    // works whose whole chain is now surveyed step out of the dark
+    let stagger = 0;
+    for (const path of [...this.shroudHidden].sort()) {
+      if (!this.shroud!.plotVisible(path)) continue;
+      this.shroudHidden.delete(path);
+      const obj = this.buildings.get(path)?.root ?? this.hamletObjs.find((h) => h.rec.dirPath === path)?.root;
+      if (!obj) continue;
+      obj.setVisible(true);
+      if (!historical) {
+        obj.setScale(0.001);
+        this.tweens.add({ targets: obj, scale: 1, duration: 300, delay: stagger, ease: "Back.easeOut" });
+        stagger += 28;
+      }
+    }
+    if (!historical && this.repoTree) {
+      const q = map.quarters.find((r) => r.path === qPath);
+      const c = districtCensus(this.repoTree, qPath);
+      if (q && c) this.onExamine?.(surveyLine(q.label, c));
+    }
+    this.fogDirty = true;
+  }
+
+  /** A visitor clicks a darkened quarter: survey it. Viewer-local and free. */
+  private trySurveyAt(p: Phaser.Input.Pointer): boolean {
+    const shroud = this.shroud;
+    const map = this.map;
+    if (!shroud || !map) return false;
+    const bx = p.worldX / (TILE_W / 2);
+    // Terrain lift shifts the picked row; try each lift step and take the
+    // first tile that actually lies inside a surveyable quarter.
+    for (let dy = 0; dy <= 3; dy++) {
+      const by = (p.worldY + dy * LIFT) / (TILE_H / 2);
+      const tx = Math.round((by + bx) / 2);
+      const ty = Math.round((by - bx) / 2);
+      if (tx < 0 || ty < 0 || tx >= map.side || ty >= map.side) continue;
+      const inRect = (r: Rect) => tx >= r.x && ty >= r.y && tx < r.x + r.w && ty < r.y + r.h;
+      const candidates = map.quarters
+        .filter((q) => inRect(q.rect) && !shroud.isSurveyed(q.path))
+        .sort((a, b) => b.depth - a.depth);
+      for (const q of candidates) {
+        if (shroud.survey(q.path)) {
+          this.float(`⚑ ${q.label} surveyed`, isoX(tx, ty), this.groundYAt(tx, ty), 0xe3b264);
+          this.applySurvey(q.path, false);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
 
   // --- positions -------------------------------------------------------------
 
@@ -2251,11 +2366,13 @@ class MainScene extends Phaser.Scene {
       case "agent_moved": {
         const pos = this.posForPath(e.path);
         this.setSite(e.agentId, e.path, historical);
+        this.uncoverByPath(e.path, historical);
         this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
         break;
       }
       case "file_read": {
         const pos = this.posForPath(e.path);
+        this.uncoverByPath(e.path, historical);
         this.reveal(pos.tx, pos.ty, 1, historical);
         if (!historical) this.ping(pos.x, pos.y);
         this.setSite(e.agentId, e.path, historical);
@@ -2263,6 +2380,7 @@ class MainScene extends Phaser.Scene {
       }
       case "list_dir": {
         const pos = this.posForPath(e.path);
+        this.uncoverByPath(e.path, historical);
         this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS + 1, historical);
         this.setSite(e.agentId, e.path, historical);
         break;
@@ -2270,6 +2388,7 @@ class MainScene extends Phaser.Scene {
       case "search": {
         for (const path of e.paths.slice(0, 10)) {
           const pos = this.posForPath(path);
+          this.uncoverByPath(path, historical);
           this.reveal(pos.tx, pos.ty, 1, historical);
           if (!historical) this.ping(pos.x, pos.y);
         }
@@ -2280,6 +2399,7 @@ class MainScene extends Phaser.Scene {
       case "file_write": {
         const isNew = !this.map.plots.has(e.path) && !this.buildings.has(e.path);
         const pos = this.posForPath(e.path);
+        this.uncoverByPath(e.path, historical);
         this.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
         const rec = this.placeBuilding(e.path, e.buildingKind, pos.tx, pos.ty, historical, isNew);
         rec.writes++;

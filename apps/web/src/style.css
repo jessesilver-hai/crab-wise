@@ -278,7 +278,13 @@ details.advanced summary:hover { color: var(--gold); }
 .dlg-input input { flex: 1; }
 .dlg-note { color: var(--dim); font-size: 0.75rem; font-style: italic; padding: 0.5rem 0.7rem; }
 
-#status-strip { border-top: 1px solid var(--border); padding: 0.3rem 0.6rem; min-height: 0; }
+#status-strip {
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, #14100a, #0e0b07);
+  box-shadow: 0 -6px 10px -8px #000;
+  padding: 0.3rem 0.6rem;
+  min-height: 0;
+}
 .status-line { font-size: 0.75rem; color: var(--dim); padding: 0.1rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-line .who { color: var(--gold); }
 .status-line .pulse { display: inline-block; animation: pulse-flicker 1.6s ease-in-out infinite; color: var(--gold); }
@@ -303,6 +309,16 @@ body:has(.match-view) { overflow: hidden; min-height: 0; }
   font-size: 0.65rem;
   padding: 0 0.35rem;
   margin-left: 0.25rem;
+}
+/* Inside the codex tabs the badge is a wax seal at the corner. */
+.sidebar-tabs .works-badge {
+  position: absolute;
+  top: 2px;
+  right: 8%;
+  margin: 0;
+  font-style: normal;
+  font-family: "IBM Plex Mono", monospace;
+  box-shadow: 0 0 6px rgba(201, 143, 74, 0.5);
 }
 .work-row {
   display: flex;
@@ -502,39 +518,90 @@ pre.diff .dl-hunk { color: var(--dim); display: inline; }
 
 .match-body {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  /* minmax(0,1fr) + min-width:0 below: the canvas must never force the grid
+     past the viewport — the body clips instead of scrolling during a match. */
+  grid-template-columns: minmax(0, 1fr) clamp(300px, 26vw, 380px);
   min-height: 0;
 }
 @media (max-width: 900px) { .match-body { grid-template-columns: 1fr; } }
 
-.game-area { position: relative; min-height: 0; background: #0d0a06; }
+.game-area { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: #0d0a06; }
 .game-area canvas { display: block; }
+
+/* ---------- The Chronicle (sidebar) — a carved codex, not a box ---------- */
 
 .sidebar {
   display: grid;
-  grid-template-rows: auto 1fr;
-  border-left: 2px solid var(--border);
-  background: var(--panel);
+  grid-template-rows: auto 1fr auto;
+  position: relative;
+  border-left: 1px solid #000;
+  background:
+    radial-gradient(120% 70px at 50% 0%, rgba(201, 143, 74, 0.07), transparent),
+    repeating-linear-gradient(0deg, rgba(216, 208, 191, 0.015) 0 1px, transparent 1px 7px),
+    linear-gradient(200deg, #171209 0%, #100d08 55%, #0b0906 100%);
+  box-shadow: inset 10px 0 18px -14px #000;
   min-height: 0;
   min-width: 0;
 }
-.sidebar-tabs { display: flex; border-bottom: 1px solid var(--border); }
-.sidebar-tabs button {
-  flex: 1; border: none; border-radius: 0; background: var(--panel);
-  font-size: 0.8rem; padding: 0.5rem 0.2rem;
-  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+/* gold seam where the codex meets the world */
+.sidebar::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0; width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(201,143,74,0.5) 10%, rgba(201,143,74,0.16) 50%, rgba(201,143,74,0.5) 90%, transparent);
+  pointer-events: none;
+  z-index: 1;
 }
-.sidebar-tabs button.active { background: var(--panel-2); color: var(--gold-bright); }
+
+.sidebar-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #1c1610, #14110d);
+}
+.sidebar-tabs button {
+  position: relative;
+  display: grid; justify-items: center; gap: 0.16rem;
+  border: none; border-radius: 0; background: transparent;
+  padding: 0.44rem 0.05rem 0.36rem;
+  min-width: 0; color: var(--dim);
+}
+.sidebar-tabs button i { font-style: normal; font-size: 0.95rem; line-height: 1; }
+.sidebar-tabs button span { font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.13em; white-space: nowrap; }
+.sidebar-tabs button:hover { color: var(--parchment); background: rgba(201, 143, 74, 0.06); border-color: transparent; box-shadow: none; }
+.sidebar-tabs button.active {
+  color: var(--gold-bright);
+  background: linear-gradient(180deg, rgba(201, 143, 74, 0.13), transparent);
+}
+.sidebar-tabs button.active::after {
+  content: "";
+  position: absolute; left: 16%; right: 16%; bottom: -1px; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--gold-bright), transparent);
+}
 
 .feed {
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 0.7rem;
+  padding: 0.65rem 0.6rem 0.85rem;
   font-size: 0.85rem;
   line-height: 1.5;
   min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: #342b1d transparent;
 }
-.feed .entry { margin-bottom: 0.55rem; overflow-wrap: anywhere; }
+.feed::-webkit-scrollbar { width: 8px; }
+.feed::-webkit-scrollbar-track { background: transparent; }
+.feed::-webkit-scrollbar-thumb { background: #2c2417; border-radius: 4px; border: 2px solid #100d08; }
+.feed::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+
+.feed .entry {
+  position: relative;
+  margin-bottom: 0.45rem;
+  padding: 0.16rem 0.4rem 0.16rem 0.6rem;
+  border-left: 2px solid #262013;
+  overflow-wrap: anywhere;
+  animation: entry-in 220ms ease-out;
+}
+@keyframes entry-in { from { opacity: 0; transform: translateY(5px); } }
 .feed .entry.clamp > span {
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -544,13 +611,58 @@ pre.diff .dl-hunk { color: var(--dim); display: inline; }
 }
 .feed .entry.clamp.expanded > span { -webkit-line-clamp: unset; }
 .feed .entry .who { color: var(--gold); font-weight: bold; }
-.feed .entry.herald-msg { color: var(--parchment); }
-.feed .entry.system { color: var(--dim); font-style: italic; }
-.feed .entry.battle { color: var(--red); }
-.feed .entry.triumph { color: var(--green); }
+.feed .entry.herald-msg { border-left-color: #3d3426; color: var(--parchment); }
+.feed .entry.system { border-left-color: #1d1810; color: var(--dim); font-style: italic; }
+.feed .entry.battle {
+  border-left-color: var(--red); color: var(--red);
+  background: linear-gradient(90deg, rgba(165, 60, 49, 0.1), transparent 72%);
+  border-radius: 0 3px 3px 0;
+}
+.feed .entry.triumph {
+  border-left-color: var(--green); color: var(--green);
+  background: linear-gradient(90deg, rgba(122, 158, 92, 0.09), transparent 72%);
+  border-radius: 0 3px 3px 0;
+}
+.feed .entry.dim { border-left-color: #1d1810; color: var(--dim); }
 .feed .entry.raw { font-family: "IBM Plex Mono", monospace; font-size: 0.75rem; color: #9a9080; }
 .feed .entry.raw.error { color: var(--red); }
-.feed .entry.decree { color: var(--gold-bright); border-left: 2px solid var(--gold); padding-left: 0.5rem; }
+.feed .entry.decree {
+  color: var(--gold-bright);
+  border-left: 2px solid var(--gold);
+  background: linear-gradient(90deg, rgba(201, 143, 74, 0.12), rgba(201, 143, 74, 0.02) 80%);
+  border-radius: 0 3px 3px 0;
+  box-shadow: inset 0 0 0 1px rgba(201, 143, 74, 0.12);
+  padding: 0.34rem 0.5rem 0.34rem 0.6rem;
+  margin: 0.6rem 0;
+}
+
+/* Spoken words: a nameplate above the utterance, colored by the speaker. */
+.feed .entry.dialogue {
+  border-radius: 0 3px 3px 0;
+  padding: 0.34rem 0.5rem 0.3rem 0.6rem;
+  margin: 0.6rem 0;
+}
+.feed .entry.dialogue .plate {
+  display: block;
+  font-family: "Cinzel", Georgia, serif;
+  font-weight: 400;
+  font-size: 0.64rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  margin-bottom: 0.14rem;
+}
+.feed .entry.dialogue.crown {
+  border-left-color: var(--gold);
+  background: linear-gradient(90deg, rgba(201, 143, 74, 0.1), transparent 78%);
+  color: var(--parchment);
+}
+.feed .entry.dialogue.crown .plate { color: var(--gold-bright); }
+.feed .entry.dialogue.agent {
+  border-left-color: var(--blue);
+  background: linear-gradient(90deg, rgba(125, 162, 168, 0.1), transparent 78%);
+  color: var(--parchment);
+}
+.feed .entry.dialogue.agent .plate { color: var(--blue); }
 
 /* ---------- First steps (host onboarding) ---------- */
 

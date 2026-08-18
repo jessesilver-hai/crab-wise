@@ -146,6 +146,24 @@ TODO/FIXME inscriptions provided (echo their true path/line/text); omit the arra
 if none were provided. Tints should suit the world's mood and differ subtly from
 neighbors. Never invent file paths.`;
 
+const WORLDSMITH_CHAT_SYSTEM = (faction: string, tagline: string, enemy: string, grounding: string) =>
+  `You are The Worldsmith of "${faction}" (${tagline}; the enemy is ${enemy}) —
+the one who names the land as it is revealed. You speak to The Crown, the human ruler.
+
+This world is a real code repository made visible, and you keep its Law of
+Isomorphism: every hill, sea, wall, and quarter derives from a measured fact of
+the code. When The Crown asks why the land looks as it does, answer with the
+real numbers and files behind it. When asked about a district, speak of what
+its code truly is. You may only reshape districts as they are first walked;
+promise no more than that.
+
+THE MEASURED RECORD (cite these facts, never invent others):
+${grounding}
+
+Answer in character — a patient carver of meaning, ancient of register but
+concrete of fact — in at most 130 words. Plain prose, no JSON, no lists unless
+asked. If the record does not hold the answer, say what the record lacks.`;
+
 export class Settlement {
   private emitter: Emitter;
   private client: Anthropic;
@@ -179,6 +197,9 @@ export class Settlement {
   private wsCalls = 0;
   private wsSpawned = false;
   private todoHits: string[] | null = null;
+  private wsNamings: string[] = [];
+  private wsChatCalls = 0;
+  private censusBriefText: string | null = null;
 
   constructor(private opts: SettlementOptions) {
     this.emitter = new Emitter((event) => {
@@ -203,6 +224,11 @@ export class Settlement {
   setTheme(theme: ThemePack): void {
     this.theme = theme;
     this.emitter.emit("theme_ready", { theme });
+  }
+
+  /** The measured facts of the land, for the Worldsmith's tongue. */
+  setCensusBrief(brief: string): void {
+    this.censusBriefText = brief.slice(0, 2000);
   }
 
   private lexicon(): HeraldLexicon | undefined {
@@ -358,6 +384,10 @@ Do NOT emit ASSIGN lines yet.`,
   /** The Crown speaks. Targeted chat goes to inboxes; realm-wide speech becomes an order. */
   speak(text: string, toName?: string): void {
     this.emitter.emit("decree", { text, toId: toName });
+    if (toName === "The Worldsmith") {
+      void this.worldsmithReply(text);
+      return;
+    }
     if (toName && toName !== this.kingName) {
       const resolved = this.bus.resolve(toName);
       if (resolved && this.activeWorkers.has(resolved)) {
@@ -393,6 +423,11 @@ Do NOT emit ASSIGN lines yet.`,
 
   /** The Crown addresses one agent face to face (clicked in the world). */
   speakTo(agentId: string, text: string): void {
+    if (agentId === "worldsmith") {
+      this.emitter.emit("dialogue", { agentId, agentName: "The Worldsmith", from: "crown", text: text.slice(0, 2000) });
+      void this.worldsmithReply(text);
+      return;
+    }
     const name = agentId === "king" ? this.kingName : this.agentsById.get(agentId);
     if (!name) return;
     const clipped = text.slice(0, 2000);
@@ -461,6 +496,68 @@ under 120 words. If you do not know, say so and name who might.`,
       });
     } finally {
       this.emitter.emit("agent_status", { agentId, status: "done" });
+    }
+  }
+
+  /** The Worldsmith answers The Crown — one-shot, grounded in the measured record. */
+  private async worldsmithReply(question: string): Promise<void> {
+    const say = (text: string) =>
+      this.emitter.emit("dialogue", { agentId: "worldsmith", agentName: "The Worldsmith", from: "agent", text: text.slice(0, 2000) });
+    if (this.wsChatCalls >= 8) {
+      say("(the Worldsmith has spoken his fill this session — the stone keeps the rest)");
+      return;
+    }
+    this.wsChatCalls++;
+    // Addressing him summons him: he must exist in the roster to be clicked again.
+    if (!this.wsSpawned) {
+      this.wsSpawned = true;
+      this.agentsById.set("worldsmith", "The Worldsmith");
+      this.emitter.emit("agent_spawned", {
+        agentId: "worldsmith",
+        role: "worker",
+        name: "The Worldsmith",
+        model: this.opts.model,
+        charge: "names the land as it is revealed",
+      });
+    }
+    this.emitter.emit("agent_status", { agentId: "worldsmith", status: "thinking", detail: "reads the deep record" });
+    try {
+      const faction = this.theme?.factionName ?? "the Realm";
+      const tagline = this.theme?.tagline ?? "a settlement upon uncharted code";
+      const enemy = this.theme?.enemyName ?? "the specters";
+      const loreLines = (this.theme?.world?.worldLore ?? [])
+        .map((l) => `- ${l.subject}: ${l.line}`)
+        .join("\n");
+      const grounding = [
+        this.censusBriefText ? `Census of the code:\n${this.censusBriefText}` : "",
+        loreLines ? `Lore of the land (already spoken, cite freely):\n${loreLines}` : "",
+        this.wsNamings.length ? `Districts you have already named:\n${this.wsNamings.join("\n")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n") || "(the record is still being unearthed — speak in general truths of this settlement)";
+      const res = await this.client.messages.create({
+        model: this.opts.model,
+        max_tokens: 350,
+        system: WORLDSMITH_CHAT_SYSTEM(faction, tagline, enemy, grounding),
+        messages: [{ role: "user", content: question.slice(0, 2000) }],
+      });
+      this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+      this.emitter.emit("tokens", {
+        agentId: "worldsmith",
+        inputTokens: res.usage.input_tokens,
+        outputTokens: res.usage.output_tokens,
+        matchTotalTokens: this.matchTokens.total,
+      });
+      const reply = res.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("\n")
+        .trim();
+      say(reply || "…the Worldsmith turns a stone in his hand, and says nothing.");
+    } catch (err) {
+      say(`(the stone hums but gives no word — ${String(err).slice(0, 120)})`);
+    } finally {
+      this.emitter.emit("agent_status", { agentId: "worldsmith", status: "idle" });
     }
   }
 
@@ -649,6 +746,7 @@ If work remains or something failed, dispatch another round with ASSIGN lines. R
     const { executor } = this.opts;
     if (!this.wsSpawned) {
       this.wsSpawned = true;
+      this.agentsById.set("worldsmith", "The Worldsmith");
       this.emitter.emit("agent_spawned", {
         agentId: "worldsmith",
         role: "worker",
@@ -715,6 +813,8 @@ ${todos.length ? `Real TODO/FIXME inscriptions (path:line: text):\n${todos.join(
       return;
     }
     this.emitter.emit("theme_patch", { patch: parsed.data });
+    this.wsNamings.push(`${district || "the heartlands"} → ${parsed.data.name} — ${parsed.data.epithet}`);
+    if (this.wsNamings.length > 12) this.wsNamings.shift();
     this.emitter.emit("log", {
       agentId: "worldsmith",
       level: "info",

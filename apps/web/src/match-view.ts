@@ -99,7 +99,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
           <div id="game-mount" style="position:absolute;inset:0;"></div>
           ${isHost ? `
           <div id="first-steps">
-            <div class="fs-hint">⟡ Your realm awaits orders. Drag to pan · scroll to zoom · right-click anything to act — or decree:</div>
+            <div class="fs-hint">⟡ Your realm awaits. Click a darkened quarter to survey it · drag to pan · scroll to zoom · right-click anything to act — or decree:</div>
             <div class="fs-row">
               <button class="fs-btn" data-decree="Run the test suite and slay every failure you find.">⚔ Run the tests</button>
               <button class="fs-btn" data-decree="Survey the realm and report the three riskiest files.">⌕ Survey the risks</button>
@@ -115,11 +115,11 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         </div>
         <div class="sidebar">
           <div class="sidebar-tabs">
-            <button id="tab-herald" class="active">◈ Herald</button>
-            <button id="tab-works">⚒ Works <span id="works-badge" class="works-badge" style="display:none">0</span></button>
-            <button id="tab-bounties">☨ Bounties <span id="bounty-badge" class="works-badge" style="display:none">0</span></button>
-            <button id="tab-satchel">❧ Satchel <span id="satchel-badge" class="works-badge" style="display:none">0</span></button>
-            <button id="tab-scribe">⌘ Scribe</button>
+            <button id="tab-herald" class="active" title="The Herald — the realm's chronicle"><i>◈</i><span>Herald</span></button>
+            <button id="tab-works" title="Works — every stone laid"><i>⚒</i><span>Works</span><b id="works-badge" class="works-badge" style="display:none">0</b></button>
+            <button id="tab-bounties" title="Bounties — specters with a price"><i>☨</i><span>Bounties</span><b id="bounty-badge" class="works-badge" style="display:none">0</b></button>
+            <button id="tab-satchel" title="The Satchel — scrolls and charts"><i>❧</i><span>Satchel</span><b id="satchel-badge" class="works-badge" style="display:none">0</b></button>
+            <button id="tab-scribe" title="The Scribe — the raw record"><i>⌘</i><span>Scribe</span></button>
           </div>
           <div class="feed" id="feed-herald"></div>
           <div class="feed" id="feed-satchel" style="display:none">
@@ -717,13 +717,16 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
           html: `❧ ${escapeHtml(e.authorName)} inscribes a scroll — <strong class="scroll-open" data-scroll="${escapeHtml(e.scrollId)}">“${escapeHtml(e.title)}”</strong> <span class="dim">(kept in the ❧ Satchel)</span>`,
         };
       case "dialogue":
-        return {
-          cls: "decree",
-          html:
-            e.from === "crown"
-              ? `🗨 The Crown, to ${escapeHtml(e.agentName)}: “${escapeHtml(e.text)}”`
-              : `🗨 ${escapeHtml(e.agentName)}, to The Crown: “${escapeHtml(e.text)}”`,
-        };
+        // The plate is a <b> so the clamp rule (.clamp > span) never folds it.
+        return e.from === "crown"
+          ? {
+              cls: "dialogue crown",
+              html: `<b class="plate">♛ The Crown → ${escapeHtml(e.agentName)}</b><span>“${escapeHtml(e.text)}”</span>`,
+            }
+          : {
+              cls: "dialogue agent clamp",
+              html: `<b class="plate">❝ ${escapeHtml(e.agentName)}</b><span>“${escapeHtml(e.text)}”</span>`,
+            };
       case "theme_patch": {
         const hooks = e.patch.questHooks?.length
           ? ` <span class="dim">· ${e.patch.questHooks.length} old inscription${e.patch.questHooks.length === 1 ? "" : "s"} unearthed</span>`

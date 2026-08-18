@@ -4,7 +4,7 @@
 // the census-derived world DNA — no unseeded randomness.
 import * as THREE from "three";
 import type { DistrictArchetype, DistrictPatch } from "@agent-empires/protocol";
-import { mulberry32, quarterOf, type MapLayout } from "../game/map.js";
+import { mulberry32, quarterOf, type MapLayout, type Rect } from "../game/map.js";
 import { visibleFloor } from "../game/palette.js";
 import type { WorldDNA } from "../game/worlddna.js";
 import { ARCH_TINT, mixColor, scaleColor, soften } from "./util.js";
@@ -18,6 +18,10 @@ const WATER = 0x2a4a5e;
 const BRIDGE_PLANK = 0x8a6b46;
 /** Water surface sits below the land plane; the bed dips beneath it. */
 const WATER_Y = -0.06;
+/** Unsurveyed quarters sit under a veil notably deeper than exploration fog
+ * (0.55 unexplored / 0.34 fringe); footsteps cannot clear it — only a survey. */
+const SHROUD_ALPHA = 0.82;
+const SHROUD_LIFTED = 0.34;
 
 type GroundColors = WorldDNA["ground"];
 
@@ -63,6 +67,8 @@ export class Ground {
   private fogCur: Float32Array = new Float32Array(0);
   private fogTarget: Float32Array = new Float32Array(0);
   private fogCleared: Uint8Array = new Uint8Array(0);
+  /** Tiles under an unsurveyed quarter's deep veil (reveal() skips them). */
+  private shrouded: Uint8Array = new Uint8Array(0);
   private fogAnimating = false;
   /** Called when a tile's veil target changes (city dims/lights buildings). */
   onFogTile: ((tx: number, ty: number, alpha: number) => void) | null = null;
@@ -381,6 +387,7 @@ export class Ground {
     this.fogCur = new Float32Array(r.w * r.h).fill(0.55);
     this.fogTarget = new Float32Array(r.w * r.h).fill(0.55);
     this.fogCleared = new Uint8Array(r.w * r.h);
+    this.shrouded = new Uint8Array(r.w * r.h);
     // the sea is not unexplored code: bays and channels show through the veil
     // so the archipelago silhouette reads from the first frame
     for (let iz = 0; iz < r.h; iz++) {
@@ -414,6 +421,10 @@ export class Ground {
     this.pushVeilAlphas();
   }
 
+  get fogIsAnimating(): boolean {
+    return this.fogAnimating;
+  }
+
   fogAlphaAt = (tx: number, ty: number): number => {
     const r = this.veilRect;
     const ix = tx - r.x;
@@ -433,6 +444,7 @@ export class Ground {
         const iz = ty + dy - r.y;
         if (ix < 0 || iz < 0 || ix >= r.w || iz >= r.h) continue;
         const i = iz * r.w + ix;
+        if (this.shrouded[i]) continue; // the shroud outranks fog: a survey lifts it, not footsteps
         if (dist <= radius) {
           if (this.fogTarget[i]! !== 0) {
             this.fogTarget[i] = 0;
@@ -448,6 +460,56 @@ export class Ground {
       }
     }
     this.fogAnimating = true;
+  }
+
+  /**
+   * Terra incognita: sink the veil over an unsurveyed quarter's rect to a
+   * depth only a survey can lift. Water tiles are exempt — the sea is not
+   * unexplored code. Idempotent per tile; also used to re-veil inner wards
+   * after their parent's veil lifts.
+   */
+  veilQuarterRect(rect: Rect): void {
+    const map = this.map;
+    if (!map) return;
+    const r = this.veilRect;
+    let touched = false;
+    for (let ty = rect.y; ty < rect.y + rect.h; ty++) {
+      for (let tx = rect.x; tx < rect.x + rect.w; tx++) {
+        const ix = tx - r.x;
+        const iz = ty - r.y;
+        if (ix < 0 || iz < 0 || ix >= r.w || iz >= r.h) continue;
+        if (map.water.has(`${tx},${ty}`)) continue;
+        const i = iz * r.w + ix;
+        if (this.shrouded[i]) continue;
+        this.shrouded[i] = 1;
+        this.fogCur[i] = SHROUD_ALPHA;
+        this.fogTarget[i] = SHROUD_ALPHA;
+        this.onFogTile?.(tx, ty, SHROUD_ALPHA);
+        touched = true;
+      }
+    }
+    if (touched) this.pushVeilAlphas();
+  }
+
+  /** Survey: the deep veil animates up to the seen-fringe level and stays lifted. */
+  liftQuarterRect(rect: Rect, historical: boolean): void {
+    const r = this.veilRect;
+    for (let ty = rect.y; ty < rect.y + rect.h; ty++) {
+      for (let tx = rect.x; tx < rect.x + rect.w; tx++) {
+        const ix = tx - r.x;
+        const iz = ty - r.y;
+        if (ix < 0 || iz < 0 || ix >= r.w || iz >= r.h) continue;
+        const i = iz * r.w + ix;
+        if (!this.shrouded[i]) continue;
+        this.shrouded[i] = 0;
+        this.fogCleared[i] = 1;
+        this.fogTarget[i] = SHROUD_LIFTED;
+        if (historical) this.fogCur[i] = SHROUD_LIFTED;
+        this.onFogTile?.(tx, ty, SHROUD_LIFTED);
+      }
+    }
+    this.fogAnimating = true;
+    if (historical) this.pushVeilAlphas();
   }
 
   private pushVeilAlphas(): void {

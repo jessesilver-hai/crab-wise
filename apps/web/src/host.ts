@@ -160,6 +160,8 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   try {
     const { readme, treeSummary, tree } = await settlement.start();
     view.hideOverlay();
+    const brief = censusBrief(analyzeCensus(tree));
+    settlement.setCensusBrief(brief); // the Worldsmith cites the measured record
     if (opts.firstOrder && !abort.signal.aborted) settlement.speak(opts.firstOrder);
 
     // No cached theme: divine one in the background while the session runs.
@@ -167,8 +169,14 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
       const narrate = (text: string) =>
         onEvent({ seq: 0, ts: Date.now(), type: "log", level: "info", text });
       narrate(`⟡ The chroniclers read the record of ${repoLabel}…`);
-      const brief = censusBrief(analyzeCensus(tree));
-      void generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary, censusBrief: brief }).then(async (theme) => {
+      // Theme divination is stochastic; one clouded vision earns one re-read.
+      const divine = async () => {
+        const first = await generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary, censusBrief: brief });
+        if (first || abort.signal.aborted) return first;
+        narrate("⟡ The vision blurred — the chroniclers read the record once more…");
+        return generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary, censusBrief: brief });
+      };
+      void divine().then(async (theme) => {
         if (abort.signal.aborted) return;
         if (theme) {
           // Fake-stream the world's own loading narration while it morphs in.
@@ -184,13 +192,17 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
             body: JSON.stringify(theme),
           }).catch(() => {});
         } else {
-          // Surface the failure instead of silently keeping the default skin.
+          // Surface the failure instead of failing silently. The land already
+          // wears its census-derived form; only the bespoke dressing is lost.
           onEvent({
             seq: 0,
             ts: Date.now(),
             type: "log",
             level: "error",
-            text: "The chroniclers' vision failed — this realm keeps the ashen guise. (Theme generation did not validate.)",
+            text:
+              "⚠ The chroniclers could not divine this realm's bespoke theme (twice the model's answer failed validation). " +
+              "The land still wears its true form — terrain, walls, and coasts are drawn from the measured code — " +
+              "but custom names, liturgy, and sprites are absent. Leaving and refounding the realm rolls the bones again.",
           } as Parameters<typeof view.onEvent>[0]);
         }
       });

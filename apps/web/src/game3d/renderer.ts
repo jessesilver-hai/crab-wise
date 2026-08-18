@@ -9,6 +9,7 @@ import {
   type AgentStatus,
   type DistrictArchetype,
   type DistrictPatch,
+  type FileNode,
   type GameEvent,
   type ThemePack,
   type WorldSpec,
@@ -25,10 +26,11 @@ import {
 } from "../game/map.js";
 import { visibleFloor } from "../game/palette.js";
 import { resolveArchetype, type Archetype } from "../game/archetypes.js";
-import { analyzeCensus, type Census } from "../game/census.js";
+import { analyzeCensus, districtCensus, surveyLine, type Census } from "../game/census.js";
+import { createShroud, type Shroud } from "../game/shroud.js";
 import { deriveWorldDNA, type TimeOfDay, type WorldDNA } from "../game/worlddna.js";
 import { Assets } from "./assets.js";
-import { RtsCamera } from "./camera.js";
+import { RtsCamera, isTypingTarget } from "./camera.js";
 import { City, type BuildingRec3D, type PickInfo } from "./city.js";
 import { Ground } from "./ground.js";
 import { Unit3D } from "./units.js";
@@ -39,6 +41,9 @@ import { makeBillboard } from "./billboards.js";
 
 const FOG_REVEAL_RADIUS = 2;
 const MAX_RAIDERS = 8;
+/** The survey chronicle line speaks once the rise (~1.2s + props) settles. */
+const SURVEY_SPEAK_MS = 1500;
+const SURVEY_HINT = "⟡ The land lies unsurveyed — click a darkened quarter to chart it.";
 const CONSTRUCTION_MS = 1400;
 const IDLE_STATUSES: ReadonlySet<AgentStatus> = new Set(["idle", "resting", "done"]);
 
@@ -185,6 +190,10 @@ class Game3D {
   private xpTimers = new Set<number>();
   private skillStats = new Map<string, { total: number; top: [string, number][] }>();
   private layoutHashValue = "";
+  private shroud: Shroud | null = null;
+  private repoTree: FileNode | null = null;
+  private surveyTimers = new Set<number>();
+  private hintShown = false;
 
   // pointer state
   private lastPointer = { x: 0, y: 0 };
@@ -252,7 +261,7 @@ class Game3D {
     this.detachers.push(() => ro.disconnect());
 
     const keyM = (e: KeyboardEvent) => {
-      if (e.code === "KeyM") this.overlay.toggleMinimap();
+      if (e.code === "KeyM" && !isTypingTarget(e)) this.overlay.toggleMinimap();
     };
     window.addEventListener("keydown", keyM);
     this.detachers.push(() => window.removeEventListener("keydown", keyM));
@@ -287,6 +296,17 @@ class Game3D {
       fps: () => this.fpsNow,
       degraded: () => this.degraded,
       fogAlphaAt: (tx: number, ty: number) => this.ground.fogAlphaAt(tx, ty),
+      shroud: () => ({
+        surveyed: this.shroud ? [...this.shroud.surveyed] : [],
+        unsurveyed: this.shroud
+          ? this.shroud.quarterPaths.filter((p) => !this.shroud!.isSurveyed(p)).length
+          : 0,
+      }),
+      survey: (path: string) => this.surveyQuarter(path),
+      hiddenPlotCount: () => this.city.hiddenCount(),
+      plotScale: (path: string) => this.city.plotScale(path),
+      risingCount: () => this.city.risingCount(),
+      fogAnimating: () => this.ground.fogIsAnimating,
       agents: () => this.agents,
       raiders: () => this.raiders,
       menuEntries: () => this.overlay.currentMenuEntries().map((e) => e.label),
@@ -318,6 +338,7 @@ class Game3D {
     this.destroyed = true;
     cancelAnimationFrame(this.raf);
     for (const t of this.xpTimers) window.clearTimeout(t);
+    for (const t of this.surveyTimers) window.clearTimeout(t);
     for (const d of this.detachers) d();
     this.cam.dispose();
     this.overlay.destroy();
@@ -448,12 +469,14 @@ class Game3D {
       const obj = hit.object;
       const direct = obj.userData.pick as PickInfo | undefined;
       if (direct) {
-        found.push(direct);
+        if (this.pickVisible(direct)) found.push(direct);
         continue;
       }
       if ((obj as THREE.InstancedMesh).isInstancedMesh && hit.instanceId !== undefined) {
         const path = this.city.pathForInstance(obj as THREE.InstancedMesh, hit.instanceId);
-        if (path) found.push({ kind: "building", path });
+        if (path && (!this.shroud || this.shroud.plotVisible(path))) {
+          found.push({ kind: "building", path });
+        }
       }
     }
     const pri = ["unit", "raider", "building", "hamlet", "hook", "landmark", "prop"] as const;
@@ -532,6 +555,15 @@ class Game3D {
       const fallback = target.lore || "A curiosity of the realm.";
       entries.push({ label: `Examine ${name}`, cb: () => this.examine(null, name, fallback, sx, sy) });
     } else {
+      const surveyPath = this.surveyableQuarterAt(wx, wz);
+      if (surveyPath) {
+        entries.push({
+          label: "⚑ Survey the quarter",
+          cb: () => {
+            this.surveyQuarter(surveyPath, sx, sy);
+          },
+        });
+      }
       entries.push({ label: "Walk here", cb: () => this.walkHere(wx, wz) });
       entries.push({ label: "Examine the land", cb: () => this.examineLand(wx, wz, sx, sy) });
     }
@@ -556,6 +588,92 @@ class Game3D {
       : "The living ground of the realm.";
     const line = lines.length > 0 ? lines[this.landLoreIdx++ % lines.length]!.line : fallback;
     this.examine(null, "the land", line, sx, sy);
+  }
+
+  // --- the shroud: click-to-survey discovery -----------------------------------
+
+  /** Shroud-hidden things must not be pickable (their names would leak). */
+  private pickVisible(p: PickInfo): boolean {
+    const sh = this.shroud;
+    if (!sh) return true;
+    switch (p.kind) {
+      case "building":
+        return p.path === "__towncenter__" || sh.plotVisible(p.path);
+      case "hamlet":
+        return sh.plotVisible(p.dir);
+      case "hook":
+        return sh.plotVisible(p.path);
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Outermost unsurveyed quarter under a ground point — exactly the one the
+   * shroud law lets a visitor survey next (inner wards wait for their parent).
+   */
+  private surveyableQuarterAt(wx: number, wz: number): string | null {
+    const map = this.map;
+    const shroud = this.shroud;
+    if (!map || !shroud) return null;
+    const tx = Math.round(wx);
+    const ty = Math.round(wz);
+    const containing = map.quarters
+      .filter((q) => tx >= q.rect.x && ty >= q.rect.y && tx < q.rect.x + q.rect.w && ty < q.rect.y + q.rect.h)
+      .sort((a, b) => a.depth - b.depth);
+    const first = containing.find((q) => !shroud.isSurveyed(q.path));
+    return first && shroud.canSurvey(first.path) ? first.path : null;
+  }
+
+  /** Viewer-local and free (spectators too): click → survey → ceremony. */
+  private surveyQuarter(path: string, sx?: number, sy?: number): boolean {
+    if (!this.shroud?.survey(path)) return false;
+    this.revealCeremony([path], false, sx, sy);
+    return true;
+  }
+
+  /** Agent activity at a path uncovers its quarter chain for everyone. */
+  private autoRevealAt(path: string, historical: boolean): void {
+    if (!this.shroud) return;
+    const chain = this.shroud.revealForPath(path);
+    if (chain.length > 0) this.revealCeremony(chain, historical);
+  }
+
+  /**
+   * The reveal ceremony: the veil lifts over each quarter's rect (inner wards
+   * still unsurveyed get their deep veil back), the district's works rise
+   * smallest-first, and once the rise settles the census speaks one
+   * surveyLine per quarter through the examine sink. Historical replay snaps
+   * silently — same convention as fog and fx everywhere else.
+   */
+  private revealCeremony(chain: string[], historical: boolean, sx?: number, sy?: number): void {
+    const map = this.map;
+    const shroud = this.shroud;
+    if (!map || !shroud) return;
+    for (const path of chain) {
+      const q = map.quarters.find((qq) => qq.path === path);
+      if (q) this.ground.liftQuarterRect(q.rect, historical);
+    }
+    for (const q of map.quarters) {
+      if (shroud.isSurveyed(q.path)) continue;
+      if (chain.some((p) => q.path.startsWith(p + "/"))) this.ground.veilQuarterRect(q.rect);
+    }
+    this.city.riseNewlyVisible(historical, performance.now());
+    if (historical) return;
+    chain.forEach((path, i) => {
+      const q = map.quarters.find((qq) => qq.path === path);
+      const census = this.repoTree ? districtCensus(this.repoTree, path) : null;
+      if (!q || !census) return;
+      const line = surveyLine(q.label, census);
+      const t = window.setTimeout(() => {
+        this.surveyTimers.delete(t);
+        if (this.destroyed) return;
+        if (i === 0 && sx !== undefined && sy !== undefined) this.overlay.showExamine(line, sx, sy);
+        this.onExamine?.(line);
+        console.info(`EXAMINE:${line}`);
+      }, SURVEY_SPEAK_MS + i * 400);
+      this.surveyTimers.add(t);
+    });
   }
 
   private openMenuAt(px: number, py: number): void {
@@ -655,11 +773,17 @@ class Game3D {
 
   private buildWorld(event: Extract<GameEvent, { type: "match_started" }>): void {
     this.mapSeed = event.mapSeed;
+    this.repoTree = event.repoTree;
     this.archetype = resolveArchetype(this.theme?.biome.archetype, event.mapSeed);
     const map = layoutMap(event.repoTree, event.mapSeed);
     this.map = map;
     const hash = layoutHash(map);
     this.layoutHashValue = hash;
+
+    // terra incognita: quarters begin unsurveyed; the law hides their works
+    const shroud = createShroud(map.quarters);
+    this.shroud = shroud;
+    this.city.setVisibilityLaw((p) => shroud.plotVisible(p));
 
     // world DNA: measured code facts → render directives (theme may override)
     this.census = analyzeCensus(event.repoTree);
@@ -669,6 +793,8 @@ class Game3D {
     this.dna = dna;
 
     this.ground.build(map, event.mapSeed, dna);
+    // deep veil before the city builds: instances bake their dimmed light
+    for (const q of map.quarters) this.ground.veilQuarterRect(q.rect);
     this.ground.onFogTile = (tx, ty, alpha) => this.city.setTileLight(tx, ty, alpha);
     this.city.buildWorld(map, event.mapSeed, this.archetypeAt, this.ground.fogAlphaAt, dna, this.degraded);
     this.city.retintFlags(dna.buildingTint.trim);
@@ -703,6 +829,12 @@ class Game3D {
       `[world] layout-hash=${hash} side=${map.side} quarters=${map.quarters.length} ` +
         `blocks=${map.blocks.length} buildings=${map.plots.size} hamlets=${map.hamlets.length}`,
     );
+
+    if (map.quarters.length > 0 && !this.hintShown) {
+      this.hintShown = true;
+      this.onExamine?.(SURVEY_HINT);
+      console.info(`EXAMINE:${SURVEY_HINT}`);
+    }
   }
 
   /** Directory names floated over their quarters: the map explains the repo. */
@@ -874,12 +1006,14 @@ class Game3D {
         break;
       }
       case "agent_moved": {
+        this.autoRevealAt(e.path, historical);
         const pos = this.posForPath(e.path);
         this.setSite(e.agentId, e.path, historical);
         this.ground.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
         break;
       }
       case "file_read": {
+        this.autoRevealAt(e.path, historical);
         const pos = this.posForPath(e.path);
         this.ground.reveal(pos.tx, pos.ty, 1, historical);
         if (!historical) this.fx.float("✦", pos.x, pos.z, 0.6, this.accent, 18);
@@ -887,6 +1021,7 @@ class Game3D {
         break;
       }
       case "list_dir": {
+        this.autoRevealAt(e.path, historical);
         const pos = this.posForPath(e.path);
         this.ground.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS + 1, historical);
         this.setSite(e.agentId, e.path, historical);
@@ -894,6 +1029,7 @@ class Game3D {
       }
       case "search": {
         for (const path of e.paths.slice(0, 10)) {
+          this.autoRevealAt(path, historical);
           const pos = this.posForPath(path);
           this.ground.reveal(pos.tx, pos.ty, 1, historical);
           if (!historical) this.fx.float("✦", pos.x, pos.z, 0.6, this.accent, 16);
@@ -903,6 +1039,8 @@ class Game3D {
         break;
       }
       case "file_write": {
+        // reveal before raising: a building must never appear under the veil
+        this.autoRevealAt(e.path, historical);
         const isNew = !this.map.plots.has(e.path) && !this.city.buildings.has(e.path);
         const pos = this.posForPath(e.path);
         this.ground.reveal(pos.tx, pos.ty, FOG_REVEAL_RADIUS, historical);
@@ -1384,6 +1522,7 @@ class Game3D {
     this.cam.edgeScroll = !this.overlay.menuOpen;
     this.cam.update(dt, w, h);
     this.ground.tick(dt);
+    this.city.tick(now);
     this.fx.tick(dt);
 
     // agents: ambient life (movement timing may use randomness; layout may not)

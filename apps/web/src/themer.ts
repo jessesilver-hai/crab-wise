@@ -273,18 +273,26 @@ Deliver the theme via set_theme.`,
     const call = response.content.find((b) => b.type === "tool_use");
     if (!call || call.type !== "tool_use") return null;
     const candidate = normalizeCandidate(call.input as Record<string, unknown>);
-    const parsed = ThemePack.safeParse(candidate);
-    if (parsed.success) return parsed.data;
-    // Never fail the whole theme because the worldSpec was bad: strip it and retry.
-    if ("worldSpec" in candidate) {
-      const { worldSpec: _dropped, ...rest } = candidate;
-      const retry = ThemePack.safeParse(rest);
-      if (retry.success) {
-        console.warn("worldSpec validation failed; keeping theme without it", parsed.error.issues.slice(0, 5));
-        return retry.data;
+    // Never fail the whole theme over optional garnish: strip world, then
+    // worldSpec, then both, keeping the first shape that validates.
+    const drop = (obj: Record<string, unknown>, keys: string[]) =>
+      Object.fromEntries(Object.entries(obj).filter(([k]) => !keys.includes(k)));
+    const attempts: [string, Record<string, unknown>][] = [
+      ["full", candidate],
+      ["world", drop(candidate, ["world"])],
+      ["worldSpec", drop(candidate, ["worldSpec"])],
+      ["world+worldSpec", drop(candidate, ["world", "worldSpec"])],
+    ];
+    let firstIssues: unknown = null;
+    for (const [dropped, shape] of attempts) {
+      const parsed = ThemePack.safeParse(shape);
+      if (parsed.success) {
+        if (dropped !== "full") console.warn(`theme validated after dropping ${dropped}`, firstIssues);
+        return parsed.data;
       }
+      if (firstIssues === null) firstIssues = parsed.error.issues.slice(0, 5);
     }
-    console.warn("theme validation failed", parsed.error.issues.slice(0, 5));
+    console.warn("theme validation failed", firstIssues);
     return null;
   } catch (err) {
     console.warn("theme generation failed", err);
@@ -292,9 +300,45 @@ Deliver the theme via set_theme.`,
   }
 }
 
+const ARCHETYPE_VALUES = ["ash-steppe", "harbor-citadel", "oracle-forge", "glacier-vault", "verdant-ruin", "dune-monolith"];
+
 /** Repair common LLM slop before strict validation. */
 function normalizeCandidate(input: Record<string, unknown>): Record<string, unknown> {
   const out = { ...input };
+  // biome.archetype is load-bearing (it steers the world form): coerce close
+  // misses ("Ash Steppe", "harbor_citadel") and drop inventions entirely.
+  if (out.biome && typeof out.biome === "object") {
+    const b = { ...(out.biome as Record<string, unknown>) };
+    if (typeof b.archetype === "string") {
+      const norm = b.archetype.toLowerCase().trim().replace(/[\s_]+/g, "-");
+      if (ARCHETYPE_VALUES.includes(norm)) b.archetype = norm;
+      else delete b.archetype;
+    } else if (b.archetype !== undefined) delete b.archetype;
+    out.biome = b;
+  }
+  // world block: keep only what validates; a hopeless block is dropped, never fatal.
+  if (out.world && typeof out.world === "object" && !Array.isArray(out.world)) {
+    const w = { ...(out.world as Record<string, unknown>) };
+    if (!["dawn", "noon", "dusk", "night"].includes(w.timeOfDay as string)) delete w.timeOfDay;
+    if (!["barren", "sparse", "wooded", "lush"].includes(w.vegetation as string)) delete w.vegetation;
+    if (Array.isArray(w.worldLore)) {
+      const lore = (w.worldLore as unknown[])
+        .map((item) => {
+          const o = (item ?? {}) as Record<string, unknown>;
+          return { subject: String(o.subject ?? "").slice(0, 40), line: String(o.line ?? "").slice(0, 200) };
+        })
+        .filter((l) => l.subject.length > 0 && l.line.length > 0)
+        .slice(0, 10);
+      if (lore.length > 0) w.worldLore = lore;
+      else delete w.worldLore;
+    } else if (w.worldLore !== undefined) delete w.worldLore;
+    for (const k of Object.keys(w)) {
+      if (!["timeOfDay", "vegetation", "worldLore"].includes(k)) delete w[k];
+    }
+    out.world = w;
+  } else if (out.world !== undefined) {
+    delete out.world;
+  }
   if (Array.isArray(out.sprites)) {
     out.sprites = (out.sprites as Record<string, unknown>[])
       .map((s) => {

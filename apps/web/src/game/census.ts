@@ -142,6 +142,45 @@ export function analyzeCensus(tree: FileNode): Census {
   };
 }
 
+/** Find the directory node at dirPath ("" → the root). */
+export function findDir(tree: FileNode, dirPath: string): FileNode | null {
+  if (dirPath === "" || dirPath === ".") return tree;
+  let node: FileNode | null = tree;
+  for (const part of dirPath.split("/")) {
+    if (!node || node.kind !== "dir") return null;
+    node = (node.children ?? []).find((c) => c.kind === "dir" && c.name === part) ?? null;
+  }
+  return node && node.kind === "dir" ? node : null;
+}
+
+/** Census of one district's subtree — the facts a survey reveals. */
+export function districtCensus(tree: FileNode, dirPath: string): Census | null {
+  const dir = findDir(tree, dirPath);
+  return dir ? analyzeCensus(dir) : null;
+}
+
+/**
+ * The chronicle line a survey speaks: measured facts only, deterministic.
+ * One headline plus the district's single strongest trait (fixed priority).
+ */
+export function surveyLine(label: string, c: Census): string {
+  if (c.fileCount === 0) return `⚑ ${label} surveyed: bare ground — nothing dwells here yet.`;
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const top = c.languages[0];
+  const head =
+    `⚑ ${label} surveyed: ${c.fileCount} works, ${c.totalLines.toLocaleString()} lines` +
+    (top && top.family !== "other" ? ` — ${top.family} holds ${pct(top.share)}` : "") +
+    ".";
+  let trait = "";
+  if (c.giantShare >= 0.4) trait = ` Megaliths brood here: ${pct(c.giantShare)} of its lines dwell in giant files.`;
+  else if (c.testRatio >= 0.3) trait = ` A proving ground — ${pct(c.testRatio)} of its lines stand as trials.`;
+  else if (c.docsRatio >= 0.5) trait = ` A scriptorium — ${pct(c.docsRatio)} of its lines are chronicle.`;
+  else if (c.assetRatio >= 0.5) trait = ` A reliquary — ${pct(c.assetRatio)} of its works are bound relics.`;
+  else if (c.configRatio >= 0.5) trait = ` A granary of decrees — ${pct(c.configRatio)} of its lines are provision.`;
+  else if (c.maxDepth >= 3) trait = ` Passages run ${c.maxDepth} halls deep.`;
+  return head + trait;
+}
+
 /** Compact census table for the Worldsmith's prompt — facts it must express. */
 export function censusBrief(c: Census): string {
   const langs = c.languages.slice(0, 4).map((l) => `${l.family} ${(l.share * 100).toFixed(0)}%`).join(", ");

@@ -19,6 +19,13 @@ const MAX_FORT_SEGMENTS = 600;
 const MAX_PROPS = 180;
 /** How far the whole building instance leans toward the DNA roof color. */
 const BUILDING_TINT_MIX = 0.35;
+/** Shroud-hidden instances: epsilon (not zero) keeps the instance matrix
+ * invertible so raycasts stay NaN-free; visually indistinguishable from gone. */
+const HIDDEN_SCALE = 1e-4;
+/** Survey rise: buildings stagger over ~1.2s, props pop in after. */
+const RISE_STAGGER_MS = 900;
+const RISE_MS = 300;
+const PROP_POP_MS = 180;
 
 export type PickInfo =
   | { kind: "ground" }
@@ -40,6 +47,11 @@ type Placement = {
   tileKey: string | null;
   /** Per-instance color multiplier (uint24); undefined = untinted. */
   tint?: number;
+  /** Path whose shroud visibility governs this instance (file, hamlet dir,
+   * or quarter path for district props); undefined = always visible. */
+  vis?: string;
+  /** Currently scaled to ~0 under the shroud (record itself stays intact). */
+  hidden?: boolean;
 };
 
 type InstSet = {
@@ -121,6 +133,10 @@ export class City {
   private flagMats: THREE.MeshStandardMaterial[] = [];
   private fallbackGroup = new THREE.Group();
   private litAt: (tx: number, ty: number) => number = () => 1;
+  /** Shroud law: instances whose vis path fails it are scaled to ~0. */
+  private visLaw: (path: string) => boolean = () => true;
+  private hamletMarkers: { dirPath: string; objects: THREE.Object3D[] }[] = [];
+  private rising: { setKey: string; decor: boolean; index: number; start: number; dur: number }[] = [];
   private scratch = new THREE.Matrix4();
   private scratchColor = new THREE.Color();
 
@@ -142,6 +158,33 @@ export class City {
 
   decorStats(): { wallSegments: number; props: number; trees: number; rocks: number } {
     return { ...this.decorStatsRec };
+  }
+
+  setVisibilityLaw(law: (path: string) => boolean): void {
+    this.visLaw = law;
+  }
+
+  /** Rise animations still in flight (smoke/perf introspection). */
+  risingCount(): number {
+    return this.rising.length;
+  }
+
+  /** Instances currently scaled away under the shroud (records intact). */
+  hiddenCount(): number {
+    let n = 0;
+    for (const list of this.placements.values()) for (const p of list) if (p.hidden) n++;
+    for (const list of this.decorPlacements.values()) for (const p of list) if (p.hidden) n++;
+    return n;
+  }
+
+  /** Effective scale of a file building's instance (0 while shroud-hidden). */
+  plotScale(path: string): number {
+    const rec = this.buildings.get(path);
+    if (!rec) return 0;
+    if (rec.index < 0) return 1; // plain-mesh fallback, never shrouded
+    const p = this.placements.get(rec.setKey)?.[rec.index];
+    if (!p) return 0;
+    return p.hidden ? 0 : p.scale;
   }
 
   buildWorld(
@@ -178,6 +221,7 @@ export class City {
         path,
         tileKey: `${cell.tx},${cell.ty}`,
         tint: this.buildingTintColor,
+        vis: path,
       });
       this.buildings.set(path, {
         path,
@@ -210,6 +254,7 @@ export class City {
           path: null,
           tileKey: `${hm.tx},${hm.ty}`,
           tint: this.buildingTintColor,
+          vis: hm.dirPath,
         });
       });
       const box = new THREE.Mesh(
@@ -235,6 +280,10 @@ export class City {
       badge.sprite.position.set(hm.tx, 0.62, hm.ty);
       this.group.add(badge.sprite);
       this.badges.push(badge);
+      const shown = this.visLaw(hm.dirPath);
+      box.visible = shown;
+      badge.sprite.visible = shown;
+      this.hamletMarkers.push({ dirPath: hm.dirPath, objects: [box, badge.sprite] });
     }
 
     // --- realize sets --------------------------------------------------------
@@ -263,6 +312,9 @@ export class City {
     }
     this.decorSets.clear();
     this.decorPlacements.clear();
+    // decor placements are re-derived below; stale decor rise records would
+    // point at reshuffled indices
+    this.rising = this.rising.filter((r) => !r.decor);
     for (const m of this.decorFlagMats) m.dispose();
     this.decorFlagMats = [];
     this.decorStatsRec = { wallSegments: 0, props: 0, trees: 0, rocks: 0 };
@@ -467,6 +519,7 @@ export class City {
           scale: 0.42 + rng() * 0.2,
           path: null,
           tileKey: null,
+          vis: best.path,
         });
         this.decorStatsRec.props++;
         placed++;
@@ -566,8 +619,10 @@ export class City {
     const i = set.used;
     if (i >= set.capacity) return;
     set.used = i + 1;
+    p.hidden = p.vis !== undefined && !this.visLaw(p.vis);
+    const s = p.hidden ? HIDDEN_SCALE : p.scale;
     this.scratch.makeRotationY(p.rotY);
-    this.scratch.scale(new THREE.Vector3(p.scale, p.scale, p.scale));
+    this.scratch.scale(new THREE.Vector3(s, s, s));
     this.scratch.setPosition(p.x, 0, p.z);
     const lit = p.tileKey ? 1 - this.litFromTileKey(p.tileKey) * 0.85 : 1;
     if (p.tint !== undefined) this.scratchColor.set(p.tint).multiplyScalar(lit);
@@ -589,6 +644,86 @@ export class City {
   private litFromTileKey(tileKey: string): number {
     const [a, b] = tileKey.split(",");
     return this.litAt(Number(a), Number(b));
+  }
+
+  /** Recompose one instance's matrix at an arbitrary scale (rise animation). */
+  private writeInstanceMatrix(setKey: string, decor: boolean, index: number, p: Placement, scale: number): void {
+    const set = (decor ? this.decorSets : this.sets).get(setKey);
+    if (!set || index >= set.used) return;
+    this.scratch.makeRotationY(p.rotY);
+    this.scratch.scale(new THREE.Vector3(scale, scale, scale));
+    this.scratch.setPosition(p.x, 0, p.z);
+    for (const mesh of set.meshes) {
+      mesh.setMatrixAt(index, this.scratch);
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  /**
+   * Survey ceremony: everything the shroud law newly permits rises from the
+   * ground — buildings smallest-first staggered over ~1.2s, then district
+   * props pop in. Order is a pure sort of placement data (scale, governing
+   * path, position); only the clock is wall time. instant=true (historical
+   * replay) snaps everything to full scale with no animation.
+   */
+  riseNewlyVisible(instant: boolean, now: number): { buildings: number; props: number } {
+    const collect = (decor: boolean) => {
+      const out: { setKey: string; index: number; p: Placement }[] = [];
+      for (const [key, list] of decor ? this.decorPlacements : this.placements) {
+        list.forEach((p, i) => {
+          if (p.vis === undefined || !p.hidden || !this.visLaw(p.vis)) return;
+          out.push({ setKey: key, index: i, p });
+        });
+      }
+      out.sort((a, b) => {
+        if (a.p.scale !== b.p.scale) return a.p.scale - b.p.scale;
+        const ka = a.p.path ?? a.p.vis!;
+        const kb = b.p.path ?? b.p.vis!;
+        if (ka !== kb) return ka < kb ? -1 : 1;
+        return a.p.x - b.p.x || a.p.z - b.p.z;
+      });
+      return out;
+    };
+    const buildings = collect(false);
+    const props = collect(true);
+    const start = (e: { setKey: string; index: number; p: Placement }, at: number, dur: number, decor: boolean) => {
+      e.p.hidden = false;
+      if (instant) this.writeInstanceMatrix(e.setKey, decor, e.index, e.p, e.p.scale);
+      else this.rising.push({ setKey: e.setKey, decor, index: e.index, start: at, dur });
+    };
+    buildings.forEach((e, i) =>
+      start(e, now + (i / Math.max(1, buildings.length - 1)) * RISE_STAGGER_MS, RISE_MS, false),
+    );
+    props.forEach((e, i) => start(e, now + RISE_STAGGER_MS + RISE_MS + i * 40, PROP_POP_MS, true));
+    for (const hm of this.hamletMarkers) {
+      if (!this.visLaw(hm.dirPath)) continue;
+      for (const o of hm.objects) o.visible = true;
+    }
+    return { buildings: buildings.length, props: props.length };
+  }
+
+  /** Advance rise animations (no-op unless a survey ceremony is running). */
+  tick(now: number): void {
+    if (this.rising.length === 0) return;
+    for (let i = this.rising.length - 1; i >= 0; i--) {
+      const r = this.rising[i]!;
+      const p = (r.decor ? this.decorPlacements : this.placements).get(r.setKey)?.[r.index];
+      if (!p) {
+        this.rising.splice(i, 1);
+        continue;
+      }
+      const t = (now - r.start) / r.dur;
+      if (t < 0) continue;
+      if (t >= 1) {
+        this.writeInstanceMatrix(r.setKey, r.decor, r.index, p, p.scale);
+        this.rising.splice(i, 1);
+        continue;
+      }
+      // easeOutBack: a touch of overshoot sells "rising out of the ground"
+      const u = t - 1;
+      const k = 1 + 2.70158 * u * u * u + 1.70158 * u * u;
+      this.writeInstanceMatrix(r.setKey, r.decor, r.index, p, Math.max(HIDDEN_SCALE, p.scale * k));
+    }
   }
 
   /** Look up the file path for an instanced-mesh raycast hit. */
@@ -614,6 +749,7 @@ export class City {
       path,
       tileKey: `${tx},${ty}`,
       tint: this.buildingTintColor,
+      vis: path,
     };
     const list = this.placements.get(key) ?? [];
     const set = this.sets.get(key);

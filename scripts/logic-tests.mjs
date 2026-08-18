@@ -502,6 +502,60 @@ console.log("Landmass v2 (coast, archipelago, rivers)");
   check("mid-match plots stay dry", !m1.water.has(`${spot.tx},${spot.ty}`));
 }
 
+// --- Discovery: district census + survey lines --------------------------------
+console.log("District census & survey lines");
+{
+  const { districtCensus, surveyLine, findDir } = await import("../apps/web/src/game/census.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+  const tree = dir("", [
+    dir("src", [file("src/a.py", 700), file("src/b.py", 200), dir("src/deep", [file("src/deep/c.md", 100)])]),
+    dir("tests", [file("tests/t.py", 400)]),
+    file("README.md", 50),
+  ]);
+  check("findDir walks nested paths", findDir(tree, "src/deep")?.path === "src/deep");
+  check("findDir misses honestly", findDir(tree, "src/nope") === null);
+  const src = districtCensus(tree, "src");
+  check("district census scoped to subtree", src.totalLines === 1000 && src.fileCount === 3);
+  check("district census dominant lang", src.dominant === "python");
+  const line = surveyLine("The Src Quarter", src);
+  check("survey line cites measured facts", line.includes("3 works") && line.includes("1,000 lines") && line.includes("python"));
+  check("survey line deterministic", line === surveyLine("The Src Quarter", districtCensus(tree, "src")));
+  const t = districtCensus(tree, "tests");
+  check("proving-ground trait fires on test dirs", surveyLine("The Trials", t).includes("trials"));
+  check("empty district is bare ground", surveyLine("X", districtCensus(dir("", [dir("e", [])]), "e")).includes("bare ground"));
+}
+
+// --- Discovery: the shroud ---------------------------------------------------
+console.log("Shroud (discovery law)");
+{
+  const { layoutMap } = await import("../apps/web/src/game/map.ts");
+  const { createShroud } = await import("../apps/web/src/game/shroud.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+  const tree = dir("", [
+    dir("src", [file("src/a.ts", 300), dir("src/engine", [file("src/engine/e.ts", 400)])]),
+    dir("docs", [file("docs/d.md", 100)]),
+    file("README.md", 20),
+  ]);
+  const layout = layoutMap(tree, 5);
+  const s = createShroud(layout.quarters);
+  check("all quarters start unsurveyed", s.surveyed.size === 0 && s.quarterPaths.length >= 2);
+  check("root plaza plots visible from frame one", s.plotVisible("README.md"));
+  check("plots inside quarters start hidden", !s.plotVisible("src/a.ts"));
+  check("outer quarter may be surveyed first", s.canSurvey("src") && !s.canSurvey("src/engine"));
+  check("survey reveals the quarter", s.survey("src") === true && s.isSurveyed("src"));
+  check("surveying twice is refused", s.survey("src") === false);
+  check("direct plots visible after survey, inner still veiled", s.plotVisible("src/a.ts") && !s.plotVisible("src/engine/e.ts"));
+  check("inner ward unlocks after the outer", s.canSurvey("src/engine") && s.survey("src/engine") && s.plotVisible("src/engine/e.ts"));
+  const s2 = createShroud(layout.quarters);
+  const chain = s2.revealForPath("src/engine/e.ts");
+  check("agent activity uncovers the whole chain, outermost first", chain.join("|") === "src|src/engine");
+  check("agent reveal makes plots visible", s2.plotVisible("src/engine/e.ts"));
+  check("repeat activity reveals nothing new", s2.revealForPath("src/engine/e.ts").length === 0);
+  check("unknown quarter cannot be surveyed", s2.survey("phantom") === false);
+}
+
 // --- Sandbox slot lifecycle ------------------------------------------------------
 console.log("Sandbox slot lifecycle");
 {

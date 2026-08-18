@@ -9,6 +9,13 @@ const MIN_VIEW_H = 6;
 const MAX_VIEW_H = 160;
 const CAM_DIST = 220;
 
+/** True when the key press belongs to a text field (command bar, inputs). */
+export function isTypingTarget(e: KeyboardEvent): boolean {
+  const t = (e.target as HTMLElement | null) ?? (document.activeElement as HTMLElement | null);
+  if (!t) return false;
+  return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable;
+}
+
 export class RtsCamera {
   readonly camera: THREE.OrthographicCamera;
   /** World-space look-at point on the ground plane. */
@@ -38,6 +45,7 @@ export class RtsCamera {
 
   attachKeys(): void {
     const down = (e: KeyboardEvent) => {
+      if (isTypingTarget(e)) return; // the Crown at the command bar must not pan the realm
       if (["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
         this.keys.add(e.code);
       }

@@ -77,6 +77,7 @@ type Debug = {
   layoutHash(): string;
   map(): {
     plots: Map<string, { tx: number; ty: number }>;
+    quarters: { path: string; rect: { x: number; y: number; w: number; h: number } }[];
     hamlets: { count: number }[];
     water: Set<string>;
     bridges: Set<string>;
@@ -91,6 +92,10 @@ type Debug = {
   fps(): number;
   degraded(): boolean;
   fogAlphaAt(tx: number, ty: number): number;
+  shroud(): { surveyed: string[]; unsurveyed: number };
+  survey(path: string): boolean;
+  hiddenPlotCount(): number;
+  plotScale(path: string): number;
   fxActive(): number;
   menuEntries(): string[];
   projectWorld(x: number, y: number, z: number): { x: number; y: number };
@@ -215,7 +220,40 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     `[smoke3d] decor walls=${decor.wallSegments} props=${decor.props} trees=${decor.trees} rocks=${decor.rocks}`,
   );
 
+  // --- the shroud: terra incognita at first frame -------------------------------
+  const quarters = map.quarters;
+  const sh0 = dbg().shroud();
+  check(
+    "shroud-initial",
+    quarters.length > 0 && sh0.surveyed.length === 0 && sh0.unsurveyed === quarters.length,
+    `unsurveyed=${sh0.unsurveyed} quarters=${quarters.length}`,
+  );
+  const hidden0 = dbg().hiddenPlotCount();
+  check("shroud-hidden-plots", hidden0 > 0, `hidden=${hidden0}`);
+  const HINT = "⟡ The land lies unsurveyed — click a darkened quarter to chart it.";
+  check(
+    "survey-hint-once",
+    cbLog.filter((c) => c === `examine:${HINT}`).length === 1,
+    `hints=${cbLog.filter((c) => c.startsWith("examine:⟡")).length}`,
+  );
+
   if (BIG) {
+    // archipelago discovery: islets are charted one at a time, parent first
+    const isletQs = quarters
+      .filter((q) => q.path.startsWith("packages/"))
+      .map((q) => q.path)
+      .sort();
+    check("shroud-islet-parent", dbg().survey("packages"), "survey packages");
+    check("shroud-islet-survey", isletQs.length >= 2 && dbg().survey(isletQs[0]!), `islets=${isletQs.length}`);
+    const shBig = dbg().shroud();
+    check(
+      "shroud-islet-isolation",
+      shBig.surveyed.includes(isletQs[0]!) &&
+        !shBig.surveyed.includes(isletQs[1]!) &&
+        shBig.unsurveyed === quarters.length - 2,
+      `surveyed=${shBig.surveyed.length} unsurveyed=${shBig.unsurveyed}`,
+    );
+
     // perf probe: 40 units + raiders over ~1200 instanced buildings
     for (let i = 0; i < 40; i++) {
       ev({
@@ -244,6 +282,8 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     await sleep(4000);
     stage("mid");
     await sleep(5000);
+    const d2 = dbg() as unknown as { risingCount(): number; fogAnimating(): boolean };
+    console.info(`[smoke3d] BIG rising=${d2.risingCount()} fogAnimating=${d2.fogAnimating()}`);
     const fpsBig = dbg().fps();
     console.info(
       `[smoke3d] BIG fps=${fpsBig.toFixed(1)} degraded=${dbg().degraded()} draw-calls=${dbg().drawCalls()} gl=${glInfo}`,
@@ -254,6 +294,44 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
     stage("done");
     return;
   }
+
+  // --- click-to-survey: deep veil, hover affordance, ceremony, census line ------
+  const srcQ = quarters.find((q) => q.path === "src")!;
+  let deepTile: [number, number] | null = null;
+  for (let ty = srcQ.rect.y + 1; ty < srcQ.rect.y + srcQ.rect.h - 1 && !deepTile; ty++) {
+    for (let tx = srcQ.rect.x + 1; tx < srcQ.rect.x + srcQ.rect.w - 1 && !deepTile; tx++) {
+      if (!map.water.has(`${tx},${ty}`)) deepTile = [tx, ty];
+    }
+  }
+  check(
+    "shroud-deep-veil",
+    deepTile !== null && dbg().fogAlphaAt(deepTile[0], deepTile[1]) > 0.7,
+    `alpha=${deepTile ? dbg().fogAlphaAt(deepTile[0], deepTile[1]).toFixed(3) : -1}`,
+  );
+  const qc = dbg().projectWorld(srcQ.rect.x + srcQ.rect.w / 2, 0.05, srcQ.rect.y + srcQ.rect.h / 2);
+  firePointer("pointermove", qc.x, qc.y);
+  await sleep(300);
+  const surveyHover = (document.querySelector('[data-ae3d="action"]') as HTMLElement)?.textContent ?? "";
+  check("survey-hover", surveyHover.includes("Survey the quarter"), `text="${surveyHover}"`);
+  firePointer("pointerdown", qc.x, qc.y, 0, 1);
+  firePointer("pointerup", qc.x, qc.y, 0, 0);
+  // the quarter label is the dir name with a trailing slash ("src/")
+  const surveyLineOk = await until(() => cbLog.some((c) => c.startsWith("examine:⚑ src/ surveyed:")), 8000);
+  check("survey-line", surveyLineOk, cbLog.filter((c) => c.includes("surveyed")).join(" | "));
+  const srcPlot = [...map.plots.keys()].find((p) => p.startsWith("src/") && p.split("/").length === 2);
+  const risen = await until(
+    () => dbg().hiddenPlotCount() < hidden0 && (!srcPlot || dbg().plotScale(srcPlot) > 0),
+    4000,
+  );
+  check(
+    "survey-rise",
+    risen && dbg().shroud().surveyed.includes("src"),
+    `plot=${srcPlot} scale=${srcPlot ? dbg().plotScale(srcPlot) : -1} hidden=${dbg().hiddenPlotCount()}`,
+  );
+  // agent activity charts quarters for everyone through the normal event path
+  ev({ type: "file_read", agentId: "scout", path: "docs/guide.md", lines: 80 });
+  const autoRevealOk = await until(() => dbg().shroud().surveyed.includes("docs"), 4000);
+  check("shroud-autoreveal", autoRevealOk, `surveyed=${dbg().shroud().surveyed.join(",")}`);
 
   await sleep(2000);
 
@@ -390,14 +468,22 @@ function firePointer(type: string, x: number, y: number, button = 0, buttons = 0
   await sleep(250);
   check("order-callback", cbLog.includes("order:attend:src/core/parser/lexer.ts"), cbLog.join(" | "));
 
-  // Talk-to on a unit → speak callback (left-click = first entry)
-  const w1 = dbg().agents().get("w1")!;
-  const uPt = dbg().projectWorld(w1.unit.x, 0.35, w1.unit.z);
-  firePointer("pointermove", uPt.x, uPt.y);
-  await sleep(150);
-  firePointer("pointerdown", uPt.x, uPt.y, 0, 1);
-  firePointer("pointerup", uPt.x, uPt.y, 0, 0);
-  await sleep(250);
+  // Talk-to on a unit → speak callback (left-click = first entry). Units
+  // wander; wait for w1 to settle near its site, then retry the click while
+  // it keeps strolling (same assertion, hardened aim).
+  await until(() => {
+    const u = dbg().agents().get("w1")!.unit;
+    return Math.hypot(u.x - lexer.tx, u.z - lexer.ty) < 3;
+  }, 15000);
+  for (let attempt = 0; attempt < 3 && !cbLog.some((c) => c === "speak:w1"); attempt++) {
+    const w1 = dbg().agents().get("w1")!;
+    const uPt = dbg().projectWorld(w1.unit.x, 0.35, w1.unit.z);
+    firePointer("pointermove", uPt.x, uPt.y);
+    await sleep(150);
+    firePointer("pointerdown", uPt.x, uPt.y, 0, 1);
+    firePointer("pointerup", uPt.x, uPt.y, 0, 0);
+    await sleep(250);
+  }
   check("speak-callback", cbLog.some((c) => c === "speak:w1"), cbLog.filter((c) => c.startsWith("speak")).join(","));
 
   // Examine via menu → examine callback + toast
