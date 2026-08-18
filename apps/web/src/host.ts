@@ -5,6 +5,8 @@ import { createMatchView } from "./match-view.js";
 import { selectRenderer } from "./renderer-select.js";
 import { getCachedTheme, generateTheme, repoKey } from "./themer.js";
 import { analyzeCensus, censusBrief } from "./game/census.js";
+import { buildComponentGraph } from "./game/components.js";
+import { generateRepresentation } from "./reprloop.js";
 
 export type SettlementStart = {
   repoUrl: string;
@@ -137,10 +139,55 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   const onEvent = (event: Parameters<typeof view.onEvent>[0]) => {
     publish(event);
     view.onEvent(event, false);
+    if (event.type === "match_started") {
+      // The Master Builder studies the measured ledger and may re-dress
+      // components — lawfully, with citations. The castle never waits on it.
+      void runMasterBuilder(event);
+    }
     if (event.type === "match_ended") {
       // Completed runs are already interred by the relay; exits stop prompting.
       matchOver = true;
       window.removeEventListener("beforeunload", warnUnload);
+    }
+  };
+
+  const runMasterBuilder = async (started: { repoTree: unknown; depEdges?: unknown; probeHits?: unknown }) => {
+    try {
+      const graph = buildComponentGraph(
+        started.repoTree as Parameters<typeof buildComponentGraph>[0],
+        (started.depEdges as { from: string; to: string }[] | undefined) ?? [],
+        (started.probeHits as Parameters<typeof buildComponentGraph>[2] | undefined) ?? [],
+      );
+      if (graph.components.length === 0 || abort.signal.aborted) return;
+      // one clouded reading earns one re-read; [] is lawful silence
+      let choices = await generateRepresentation({ apiKey, model, llm, graph });
+      if (choices === null && !abort.signal.aborted) {
+        choices = await generateRepresentation({ apiKey, model, llm, graph });
+      }
+      if (!choices || abort.signal.aborted) return;
+      const labelOf = new Map(graph.components.map((c) => [c.id, c.label]));
+      choices.forEach((choice, i) => {
+        window.setTimeout(() => {
+          if (abort.signal.aborted) return;
+          onEvent({
+            seq: 0,
+            ts: Date.now(),
+            type: "castle_repr",
+            componentId: choice.componentId,
+            form: choice.form,
+            cited: choice.cited,
+          } as Parameters<typeof view.onEvent>[0]);
+          onEvent({
+            seq: 0,
+            ts: Date.now(),
+            type: "log",
+            level: "info",
+            text: `⟡ The Master Builder decrees: ${labelOf.get(choice.componentId) ?? choice.componentId} shall stand as ${choice.form} — ${choice.cited}`,
+          } as Parameters<typeof view.onEvent>[0]);
+        }, 2500 + i * 1500);
+      });
+    } catch {
+      // the Builder kept his silence; lawful defaults stand
     }
   };
 

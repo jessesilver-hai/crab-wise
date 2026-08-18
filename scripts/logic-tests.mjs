@@ -1075,5 +1075,40 @@ console.log("Castle Era (fact survey)");
   check("hitsEqual sees change", !hitsEqual([{ path: "x", probe: "color", value: "#aaaaaa" }], [{ path: "x", probe: "color", value: "#cccccc" }]));
 }
 
+console.log("Castle Era (master builder law)");
+{
+  const { buildComponentGraph } = await import("../apps/web/src/game/components.ts");
+  const { lawfulChoices } = await import("../apps/web/src/reprloop.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+  const g = buildComponentGraph(
+    dir("", [
+      file("server.js", 240),
+      dir("lib", [file("lib/util.js", 100)]),
+      dir("docs", [file("docs/guide.md", 60)]),
+    ]),
+    [],
+    [{ path: "server.js", probe: "route", value: "GET /" }],
+  );
+  const picks = lawfulChoices(
+    [
+      { componentId: "lib:library", form: "well", cited: "one small spring of helpers" },
+      { componentId: "docs:docs", form: "chapel", cited: "the guide reads like liturgy" },
+      { componentId: "lib:library", form: "smithy", cited: "duplicate must drop" },
+      { componentId: "docs:docs", form: "ore-mine", cited: "unlawful form must drop" },
+      { componentId: "ghost:library", form: "well", cited: "unknown component must drop" },
+      { componentId: "root:app-server", form: "gatehouse", cited: "" },
+    ],
+    g,
+  );
+  check("lawful creative choices pass", picks.some((p) => p.componentId === "lib:library" && p.form === "well"));
+  check("chapel is lawful for docs", picks.some((p) => p.componentId === "docs:docs" && p.form === "chapel"));
+  check("one choice per component", picks.filter((p) => p.componentId === "lib:library").length === 1);
+  check("unlawful forms are discarded", !picks.some((p) => p.form === "ore-mine"));
+  check("unknown components are discarded", !picks.some((p) => p.componentId === "ghost:library"));
+  check("citations are mandatory", !picks.some((p) => p.componentId === "root:app-server"));
+  check("garbage input yields silence", lawfulChoices("nonsense", g).length === 0 && lawfulChoices(null, g).length === 0);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
