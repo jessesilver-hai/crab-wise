@@ -44,6 +44,9 @@ type Match = {
 };
 
 const matches = new Map<string, Match>();
+// Matches whose end-message flow (archive → destroy) is still settling; the
+// socket-close handler must not destroy the sandbox out from under it.
+const endSettling = new Set<string>();
 const sandboxes = new SandboxManager(driverFromEnv());
 // Reap machines stranded by prior relay processes, at boot and on a slow beat.
 void sandboxes.sweepOrphans();
@@ -399,6 +402,7 @@ wss.on("connection", (ws, req) => {
           // archive must land before the machine is freed.
           const target = match;
           const castle = msg.save ? msg.castle : undefined;
+          endSettling.add(target.matchId);
           void (async () => {
             if (castle && CASTLE_ID_RE.test(castle.id)) {
               let hasBundle = castles.hasBundle(castle.id);
@@ -424,7 +428,7 @@ wss.on("connection", (ws, req) => {
               }
             }
             // Free the visitor's sandbox slot now, not when the socket closes.
-            await sandboxes.destroy(target.matchId);
+            await sandboxes.destroy(target.matchId).finally(() => endSettling.delete(target.matchId));
           })();
           return;
         }
@@ -459,7 +463,7 @@ wss.on("connection", (ws, req) => {
       // Host vanished without choosing to save: the world is not recorded.
       discardMatch(match);
       sandboxes.hostDisconnected(match.matchId);
-    } else if (role === "host") {
+    } else if (role === "host" && !endSettling.has(match.matchId)) {
       void sandboxes.destroy(match.matchId);
     }
   });
