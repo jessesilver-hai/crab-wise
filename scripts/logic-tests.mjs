@@ -814,5 +814,222 @@ console.log("Sandbox slot lifecycle");
   check("sweep is a no-op for drivers without fleets", (await noSweepMgr.sweepOrphans()) === 0);
 }
 
+// --- Castle Era: component law, plan law, growth stability, isomorphism ------
+console.log("Castle Era (component law)");
+{
+  const { buildComponentGraph, classifyComponentFile, componentBrief } = await import(
+    "../apps/web/src/game/components.ts"
+  );
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  // classifier law: probes outrank names, names outrank extensions
+  const noProbes = { routes: new Set(), tables: new Set() };
+  check("sql is the ore mine", classifyComponentFile("db/schema.sql", noProbes) === "database");
+  check("route probe outranks plain name", classifyComponentFile("main.js", { routes: new Set(["main.js"]), tables: new Set() }) === "app-server");
+  check("table probe outranks web ext", classifyComponentFile("models.html", { routes: new Set(), tables: new Set(["models.html"]) }) === "database");
+  check("tests outrank probes", classifyComponentFile("tests/api.test.js", { routes: new Set(["tests/api.test.js"]), tables: new Set() }) === "tests");
+  check("css is the web front", classifyComponentFile("styles.css", noProbes) === "app-web");
+  check("etl dir is the pipeline", classifyComponentFile("etl/import.js", noProbes) === "pipeline");
+  check("markdown is the chronicle", classifyComponentFile("README.md", noProbes) === "docs");
+  check("plain source is the foundry", classifyComponentFile("util.js", noProbes) === "library");
+
+  // the bakery commission: one small website with a server, a db, a pipeline
+  const bakery = dir("", [
+    file("index.html", 120),
+    file("styles.css", 260),
+    file("app.js", 180),
+    file("server.js", 240),
+    dir("db", [file("db/schema.sql", 60)]),
+    dir("etl", [file("etl/import.js", 90)]),
+    dir("tests", [file("tests/app.test.js", 110)]),
+    file("README.md", 40),
+  ]);
+  const probes = [
+    { path: "styles.css", probe: "color", value: "#E86A33" },
+    { path: "styles.css", probe: "color", value: "#e86a33" },
+    { path: "styles.css", probe: "color", value: "#e86a33" },
+    { path: "styles.css", probe: "color", value: "#222831" },
+    { path: "server.js", probe: "route", value: "GET /" },
+    { path: "server.js", probe: "route", value: "GET /menu" },
+    { path: "server.js", probe: "route", value: "POST /order" },
+    { path: "db/schema.sql", probe: "table", value: "orders" },
+    { path: "db/schema.sql", probe: "table", value: "items" },
+  ];
+  const edges = [
+    { from: "app.js", to: "server.js" },
+    { from: "etl/import.js", to: "db/schema.sql" },
+    { from: "tests/app.test.js", to: "server.js" },
+  ];
+  const g = buildComponentGraph(bakery, edges, probes);
+  const ids = g.components.map((c) => c.id);
+  check("bakery groups into six components", g.components.length === 6, ids.join(","));
+  check("library sliver folds into the web front", ids.includes("root:app-web") && !ids.includes("root:library"));
+  const web = g.components.find((c) => c.id === "root:app-web");
+  check("palette is measured, deduped, frequency-ordered", web.facts.palette[0] === "#e86a33" && web.facts.palette[1] === "#222831");
+  check("web front owns the folded client script", web.paths.includes("app.js"));
+  const server = g.components.find((c) => c.id === "root:app-server");
+  check("routes are counted on the server", server.facts.routes === 3);
+  const db = g.components.find((c) => c.id === "db:database");
+  check("tables are counted on the mine", db.facts.tables === 2);
+  check("the keep is the server", g.rootId === "root:app-server");
+  check("edges aggregate to component edges", g.edges.length === 3);
+  check("pipeline feeds the database", g.edges.some((e) => e.from === "etl:pipeline" && e.to === "db:database"));
+  const brief = componentBrief(g);
+  check("brief cites the keep and the palette", brief.includes("[the keep]") && brief.includes("#e86a33"));
+  check("graph derivation is deterministic", JSON.stringify(buildComponentGraph(bakery, edges, probes)) === JSON.stringify(g));
+}
+
+console.log("Castle Era (plan law)");
+{
+  const { buildComponentGraph } = await import("../apps/web/src/game/components.ts");
+  const { planCastle, defaultFormFor, ALLOWED_FORMS, traitsFor } = await import("../apps/web/src/game/castle.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  const mk = (withDb, cssColor = "#e86a33") => {
+    const kids = [
+      file("index.html", 120),
+      file("styles.css", 260),
+      file("server.js", 240),
+      dir("etl", [file("etl/import.js", 90)]),
+      dir("tests", [file("tests/app.test.js", 110)]),
+      file("README.md", 40),
+    ];
+    if (withDb) kids.splice(3, 0, dir("db", [file("db/schema.sql", 60)]));
+    const probes = [
+      { path: "styles.css", probe: "color", value: cssColor },
+      { path: "server.js", probe: "route", value: "GET /" },
+      { path: "server.js", probe: "route", value: "GET /menu" },
+      { path: "server.js", probe: "route", value: "POST /order" },
+    ];
+    if (withDb) {
+      probes.push({ path: "db/schema.sql", probe: "table", value: "orders" });
+      probes.push({ path: "db/schema.sql", probe: "table", value: "items" });
+    }
+    const edges = withDb ? [{ from: "etl/import.js", to: "db/schema.sql" }] : [];
+    return buildComponentGraph(mkTree(kids), edges, probes);
+  };
+  const mkTree = (kids) => dir("", kids);
+
+  const SEED = 20260818;
+  const g1 = mk(false);
+  const p1 = planCastle(g1, SEED);
+  check("keep stands at the origin", (() => {
+    const k = p1.sockets.find((s) => s.componentId === g1.rootId);
+    return k && k.ring === 0 && k.x === 0 && k.z === 0 && k.form === "keep";
+  })());
+  check("support kinds hold the outer ring", p1.sockets.filter((s) => ["root:tests", "root:docs", "tests:tests"].includes(s.componentId) || s.componentId.endsWith(":tests") || s.componentId.endsWith(":docs")).every((s) => s.ring >= 2));
+  check("no two sockets share a slot", new Set(p1.sockets.map((s) => `${s.ring}:${s.slot}`)).size === p1.sockets.length);
+  check("plan is deterministic", planCastle(g1, SEED).hash === p1.hash);
+
+  // growth law: founding again WITH the db, carrying the ledger — nothing moves
+  const g2 = mk(true);
+  const p2 = planCastle(g2, SEED, p1.ledger);
+  for (const s of p1.sockets) {
+    const after = p2.sockets.find((t) => t.componentId === s.componentId);
+    if (!after || after.ring !== s.ring || after.slot !== s.slot || after.x !== s.x || after.z !== s.z) {
+      check(`socket ${s.componentId} never moves`, false, JSON.stringify({ before: s, after }));
+    }
+  }
+  check("all prior sockets stood fast", true);
+  const mine = p2.sockets.find((s) => s.componentId === "db:database");
+  check("the mine claims a fresh socket", Boolean(mine) && !p1.sockets.some((s) => s.ring === mine.ring && s.slot === mine.slot));
+  check("growth changes the hash", p2.hash !== p1.hash);
+  check("rails run from pipeline to mine", p2.connectors.some((c) => c.kind === "rails" && c.from === "etl:pipeline" && c.to === "db:database"));
+  const rails = p2.connectors.find((c) => c.kind === "rails");
+  check("rails start and end at their sockets", (() => {
+    const a = p2.sockets.find((s) => s.componentId === rails.from);
+    const b = p2.sockets.find((s) => s.componentId === rails.to);
+    const first = rails.points[0];
+    const last = rails.points[rails.points.length - 1];
+    return first.x === a.x && first.z === a.z && last.x === b.x && last.z === b.z;
+  })());
+
+  // the fundamental isomorphism: repaint the css → the manor tint changes,
+  // nothing moves, the hash records the difference
+  const g3 = mk(true, "#3aa0ff");
+  const p3 = planCastle(g3, SEED, p2.ledger);
+  const manor2 = p2.sockets.find((s) => s.componentId === "root:app-web");
+  const manor3 = p3.sockets.find((s) => s.componentId === "root:app-web");
+  check("css color becomes the manor tint", manor2.traits.tint === "#e86a33" && manor3.traits.tint === "#3aa0ff");
+  check("a repaint moves nothing", manor3.ring === manor2.ring && manor3.slot === manor2.slot && p3.sockets.length === p2.sockets.length);
+  check("a repaint changes the hash", p3.hash !== p2.hash);
+
+  // razing: the db component vanishes — its socket stands as a ruin
+  const g4 = mk(false);
+  const p4 = planCastle(g4, SEED, p3.ledger);
+  const ruin = p4.sockets.find((s) => s.componentId === "db:database");
+  check("a vanished component stands as a ruin", Boolean(ruin) && ruin.razed === true && ruin.ring === mine.ring && ruin.slot === mine.slot);
+
+  // trait bindings + vocabulary
+  const server = g2.components.find((c) => c.id === "root:app-server");
+  check("gates bind to routes", traitsFor(server).gates === 3);
+  const dbC = g2.components.find((c) => c.id === "db:database");
+  check("shafts bind to tables", traitsFor(dbC).shafts === 2);
+  check("every kind has a lawful default form", Object.entries(ALLOWED_FORMS).every(([k, forms]) => forms.length > 0 && forms[0] === defaultFormFor(k)));
+  check("gate faces the server's angle", (() => {
+    const sv = p2.sockets.find((s) => s.componentId === "root:app-server");
+    return Math.abs(p2.wall.gateAngle - sv.angle) < 1e-9 || sv.ring === 0;
+  })());
+}
+
+console.log("Castle Era (live loop)");
+{
+  const { CastleState } = await import("../apps/web/src/game/castlestate.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+  const bakery = dir("", [
+    file("index.html", 120),
+    file("styles.css", 260),
+    file("server.js", 240),
+    dir("tests", [file("tests/app.test.js", 110)]),
+    file("README.md", 40),
+  ]);
+  const probes = [
+    { path: "styles.css", probe: "color", value: "#e86a33" },
+    { path: "server.js", probe: "route", value: "GET /" },
+  ];
+
+  const st = new CastleState();
+  const plan0 = st.found(bakery, 777, [], probes);
+  check("founding plans the castle", plan0.sockets.length >= 4 && plan0.sockets.some((s) => s.form === "keep"));
+
+  // THE loop: repaint css → exactly one traits diff, tint flips, nothing moves
+  const r1 = st.applyFacts("styles.css", [{ path: "styles.css", probe: "color", value: "#3aa0ff" }]);
+  const tintChange = r1.changes.find((c) => c.kind === "traits" && c.componentId === "root:app-web");
+  check("repaint yields a traits diff", Boolean(tintChange), JSON.stringify(r1.changes));
+  check("tint flips to the measured color", tintChange && tintChange.before.tint === "#e86a33" && tintChange.after.tint === "#3aa0ff");
+  check("repaint adds and removes nothing", r1.changes.every((c) => c.kind === "traits"));
+  check("repaint moves nothing", (() => {
+    const a = plan0.sockets.find((s) => s.componentId === "root:app-web");
+    const b = r1.plan.sockets.find((s) => s.componentId === "root:app-web");
+    return a.ring === b.ring && a.slot === b.slot;
+  })());
+
+  // growth: a worker writes a new module → a new socket is added, none move
+  const r2 = st.applyWrite("lib/colors.js", true, 140, 0);
+  check("a new module raises a new component", r2.changes.some((c) => c.kind === "added" && c.componentId === "lib:library"), JSON.stringify(r2.changes));
+  check("growth never moves the old town", plan0.sockets.every((s) => {
+    const b = r2.plan.sockets.find((t) => t.componentId === s.componentId);
+    return b && b.ring === s.ring && b.slot === s.slot;
+  }));
+
+  // representation loop: lawful choice lands with its citation
+  const r3 = st.applyRepr("lib:library", "well", "the palette utils draw color like water");
+  const wk = r3.plan.sockets.find((s) => s.componentId === "lib:library");
+  check("lawful form choice lands", wk.form === "well" && wk.cited === "the palette utils draw color like water");
+  check("form change is reported", r3.changes.some((c) => c.kind === "form" && c.componentId === "lib:library"));
+
+  // unlawful choice falls back to the kind's default form
+  const r4 = st.applyRepr("lib:library", "ore-mine", "everything is a mine");
+  check("unlawful form falls back", r4.plan.sockets.find((s) => s.componentId === "lib:library").form === "foundry");
+
+  // the keep may be retitled, never re-formed
+  const keepId = r4.plan.sockets.find((s) => s.ring === 0).componentId;
+  const r5 = st.applyRepr(keepId, "manor", "make it cozy");
+  check("the keep stays the keep", r5.plan.sockets.find((s) => s.componentId === keepId).form === "keep");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

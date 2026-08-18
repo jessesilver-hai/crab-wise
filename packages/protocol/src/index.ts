@@ -274,6 +274,18 @@ const base = {
   ts: z.number(), // epoch ms
 };
 
+/** One bounded fact-probe hit from the workspace (Castle Era FACT_SCAN law). */
+export const ProbeKind = z.enum(["color", "route", "table"]);
+export type ProbeKind = z.infer<typeof ProbeKind>;
+
+export const ProbeHit = z.object({
+  path: z.string(),
+  probe: ProbeKind,
+  /** color: "#rrggbb" · route: method/handler token · table: entity name. */
+  value: z.string().max(120),
+});
+export type ProbeHit = z.infer<typeof ProbeHit>;
+
 export const MatchStartedEvent = z.object({
   ...base,
   type: z.literal("match_started"),
@@ -289,6 +301,8 @@ export const MatchStartedEvent = z.object({
   repoTree: FileNode,
   /** Founding-time import survey: real edges become the street law (v3). */
   depEdges: z.array(z.object({ from: z.string(), to: z.string() })).optional(),
+  /** Founding-time fact survey: measured colors/routes/tables (Castle Era). */
+  probeHits: z.array(ProbeHit).optional(),
 });
 
 /** The LLM-generated world skin arrived (may follow match_started by a while). */
@@ -455,6 +469,35 @@ export const ThemePatchEvent = z.object({
   patch: DistrictPatch,
 });
 
+/**
+ * Castle Era: a file's fact probes were re-taken after a write. The client
+ * folds these into the owning component's facts and repaints its element —
+ * the live isomorphism loop (css color → manor tint) rides this event.
+ */
+export const ComponentFactsEvent = z.object({
+  ...base,
+  type: z.literal("component_facts"),
+  path: z.string(),
+  /** Full replacement set of hits for this path (may be empty). */
+  hits: z.array(ProbeHit).max(64),
+});
+export type ComponentFactsEvent = z.infer<typeof ComponentFactsEvent>;
+
+/**
+ * Castle Era: the representation loop chose a component's castle form.
+ * The form must be lawful for the kind (ALLOWED_FORMS) — the client falls
+ * back to the default form when it is not. `cited` is the one-line reason
+ * the spectator reads when inspecting the element.
+ */
+export const CastleReprEvent = z.object({
+  ...base,
+  type: z.literal("castle_repr"),
+  componentId: z.string(),
+  form: z.string().max(40),
+  cited: z.string().max(240),
+});
+export type CastleReprEvent = z.infer<typeof CastleReprEvent>;
+
 export const TokensEvent = z.object({
   ...base,
   type: z.literal("tokens"),
@@ -526,6 +569,8 @@ export const GameEvent = z.discriminatedUnion("type", [
   ScrollEvent,
   DialogueEvent,
   ThemePatchEvent,
+  ComponentFactsEvent,
+  CastleReprEvent,
   TokensEvent,
   ContextEvent,
   CompactionEvent,
