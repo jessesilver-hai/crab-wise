@@ -1,6 +1,6 @@
 import { ARCHETYPE_IDS, type ArchetypeId } from "./archetypes.js";
-import { mulberry32, RIVER_MIN_DEPTH } from "./map.js";
-import type { Census, LangFamily } from "./census.js";
+import { mulberry32, pickComposition, RIVER_MIN_DEPTH, type CompositionKind } from "./map.js";
+import type { Census, FileRole, LangFamily } from "./census.js";
 import type { DistrictArchetype } from "@agent-empires/protocol";
 
 /**
@@ -14,8 +14,31 @@ import type { DistrictArchetype } from "@agent-empires/protocol";
 
 export type TimeOfDay = "dawn" | "noon" | "dusk" | "night";
 
+/** Generic structure vocabulary; each engine maps kinds to its own models. */
+export type StructureKind =
+  | "dwelling"
+  | "workshop"
+  | "watchtower"
+  | "stela"
+  | "silo"
+  | "reliquary"
+  | "gatehouse"
+  | "megastructure";
+
+/** World population tier — sets map scale, camera envelope, expectations. */
+export type ScaleTier = "hamlet" | "town" | "city" | "metropolis";
+
+export type LandmarkKind = "colossus" | "harbor-beacon" | "great-library" | "garrison-keep" | "crown-spire";
+
 export type WorldDNA = {
   form: ArchetypeId;
+  /** The measured macro-form (mirrors the layout law, cited in lore). */
+  composition: CompositionKind;
+  /** File role → structure typology; the skyline is a histogram of the code. */
+  structures: Record<FileRole, StructureKind>;
+  scaleTier: ScaleTier;
+  /** One census-derived monument that breaks the roofline. */
+  landmark: { kind: LandmarkKind; subject: string; line: string };
   /** Ground colors (uint24). Curated per form — never mud-dark, never neon. */
   ground: {
     base: number; // city floor
@@ -150,6 +173,68 @@ const ROLE_PROPS: Record<DistrictArchetype, readonly string[]> = {
 
 const AZIMUTHS: Record<TimeOfDay, number> = { dawn: 0.8, noon: 1.6, dusk: 3.9, night: 4.7 };
 
+/** Structural typology law: what a file IS decides what gets built on it. */
+const STRUCTURE_BASE: Record<FileRole, StructureKind> = {
+  source: "dwelling",
+  test: "watchtower",
+  docs: "stela",
+  config: "silo",
+  asset: "reliquary",
+  entry: "gatehouse",
+  giant: "megastructure",
+};
+
+/** Family flavor: forge realms raise workshops where others raise homes. */
+const STRUCTURE_OVERRIDES: Partial<Record<ArchetypeId, Partial<Record<FileRole, StructureKind>>>> = {
+  "oracle-forge": { source: "workshop" },
+  "ash-steppe": { source: "workshop" },
+};
+
+export function scaleTierFor(fileCount: number): ScaleTier {
+  if (fileCount <= 20) return "hamlet";
+  if (fileCount <= 200) return "town";
+  if (fileCount <= 1200) return "city";
+  return "metropolis";
+}
+
+/** First measured claim wins: the monument cites the loudest census fact. */
+export function deriveLandmark(census: Census): WorldDNA["landmark"] {
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  if (census.giantShare > 0.25) {
+    return {
+      kind: "colossus",
+      subject: "the giant files",
+      line: `The Colossus honors the giants — ${pct(census.giantShare)} of all lines dwell in files of a thousand or more.`,
+    };
+  }
+  if (census.monorepo) {
+    return {
+      kind: "harbor-beacon",
+      subject: `${census.packageDirs} packages`,
+      line: `The Harbor Beacon guides ${census.packageDirs} island-works home through one strait.`,
+    };
+  }
+  if (census.docsRatio > 0.2) {
+    return {
+      kind: "great-library",
+      subject: "the scriptures",
+      line: `The Great Library rose where scripture is ${pct(census.docsRatio)} of the realm.`,
+    };
+  }
+  if (census.testRatio >= 0.3) {
+    return {
+      kind: "garrison-keep",
+      subject: "the trials",
+      line: `The Garrison Keep drills trials that guard ${pct(census.testRatio)} of all lines.`,
+    };
+  }
+  return {
+    kind: "crown-spire",
+    subject: "the crown",
+    line: `The Crown Spire marks a young dominion — ${census.fileCount.toLocaleString()} works and rising.`,
+  };
+}
+
 export function deriveWorldDNA(census: Census, seed: number, formOverride?: string): WorldDNA {
   const rng = mulberry32((seed ^ 0x5eed) >>> 0);
   const jitter = rng(); // consumed before any branch so choices stay aligned
@@ -175,6 +260,12 @@ export function deriveWorldDNA(census: Census, seed: number, formOverride?: stri
   const district = {} as Record<DistrictArchetype, number>;
   for (const role of DISTRICT_ROLES) district[role] = skin.districtMix[role] ?? skin.ground.base;
 
+  // --- composition, typology, scale, landmark --------------------------------
+  const composition = pickComposition(census);
+  const structures = { ...STRUCTURE_BASE, ...(STRUCTURE_OVERRIDES[form] ?? {}) };
+  const scaleTier = scaleTierFor(census.fileCount);
+  const landmark = deriveLandmark(census);
+
   // --- citable lore ----------------------------------------------------------
   const pct = (x: number) => `${Math.round(x * 100)}%`;
   const loreNotes: WorldDNA["loreNotes"] = [];
@@ -183,6 +274,14 @@ export function deriveWorldDNA(census: Census, seed: number, formOverride?: stri
     subject: "realm",
     line: `This land took the ${form.replace("-", " ")} form: ${census.dominant} holds ${pct(domShare)} of its ${census.totalLines.toLocaleString()} lines.`,
   });
+  const compositionLine: Record<CompositionKind, string> = {
+    "terrace-mount": `The realm rose as a terrace mount — its passages run ${census.maxDepth} levels deep, and altitude is depth.`,
+    "archipelago": `The realm scattered into an archipelago — ${census.packageDirs} package isles in one sea.`,
+    "ring-city": `The realm closed into a ring city — ${census.coreDir || "the core"} holds ${pct(census.coreShare)} of every line, and all roads circle it.`,
+    "canyon-strata": `The realm cut a canyon — ${census.topLevelDirs} shallow strata along one Long Road.`,
+  };
+  loreNotes.push({ subject: "composition", line: compositionLine[composition] });
+  loreNotes.push({ subject: "landmark", line: landmark.line });
   if (fortification >= 2) loreNotes.push({ subject: "walls", line: `The walls stand ${fortification === 3 ? "triple" : "double"}-ringed — trials guard ${pct(census.testRatio)} of all lines.` });
   else if (fortification === 0) loreNotes.push({ subject: "walls", line: `No garrison drills here — barely a trial guards these ${census.fileCount} structures.` });
   if (census.docsRatio > 0.2) loreNotes.push({ subject: "scriptorium", line: `Scripture is ${pct(census.docsRatio)} of the realm — the scriptoria burn many candles.` });
@@ -192,6 +291,10 @@ export function deriveWorldDNA(census: Census, seed: number, formOverride?: stri
 
   return {
     form,
+    composition,
+    structures,
+    scaleTier,
+    landmark,
     ground: { ...skin.ground, district },
     vegetation: { density, tint: skin.veg.tint, cutShare: skin.veg.cutShare },
     rockDensity: skin.rock,

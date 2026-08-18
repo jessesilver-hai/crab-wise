@@ -693,6 +693,20 @@ console.log("Worlds Apart (composition law)");
     const wet = [...m.streets].filter((k) => m.water.has(k));
     check("street bridges span the channel", wet.length === 0 || wet.every((k) => m.bridges.has(k)));
   }
+
+  // world DNA carries the composition, typology, scale and landmark laws
+  {
+    const { deriveWorldDNA, scaleTierFor, deriveLandmark } = await import("../apps/web/src/game/worlddna.ts");
+    const dna = deriveWorldDNA(analyzeCensus(coreTree), 7);
+    check("dna cites the composition", dna.composition === "ring-city" && dna.loreNotes.some((n) => n.subject === "composition" && n.line.includes("ring city")));
+    check("dna maps roles to structures", dna.structures.test === "watchtower" && dna.structures.giant === "megastructure" && dna.structures.docs === "stela");
+    const forge = deriveWorldDNA(analyzeCensus(coreTree), 7, "oracle-forge");
+    const ruin = deriveWorldDNA(analyzeCensus(coreTree), 7, "verdant-ruin");
+    check("forge realms raise workshops for source", forge.structures.source === "workshop" && ruin.structures.source === "dwelling");
+    check("scale tiers bucket by file count", scaleTierFor(10) === "hamlet" && scaleTierFor(100) === "town" && scaleTierFor(1000) === "city" && scaleTierFor(5000) === "metropolis");
+    check("landmark cites the loudest fact", deriveLandmark(analyzeCensus(monoTree)).kind === "harbor-beacon" && dna.landmark.kind === "colossus");
+    check("landmark lore rides the notes", dna.loreNotes.some((n) => n.subject === "landmark"));
+  }
 }
 
 // --- Dependency survey: grep hits → real file edges ---------------------------
