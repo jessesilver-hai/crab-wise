@@ -19,6 +19,13 @@ const QUEST_CHARGE = (what: string) =>
   `inline CSS and JS, no external dependencies, no build step; it must run alone when opened. ` +
   `You may add a README or supporting files. When it works, read your own code end to end and polish it until it is genuinely good.`;
 
+// Returning to a standing castle: the workspace is restored from its archive;
+// the charge is an addition, never a rebuild.
+const EXTEND_CHARGE = (order: string) =>
+  `The castle already stands from prior commissions — its code is in the workspace. ` +
+  `Study what exists first (README, then the key files), then carry out this new charge: ${order}. ` +
+  `Extend without breaking what stands; keep index.html self-contained (inline CSS/JS, no build step).`;
+
 const QUESTS: Quest[] = [
   { label: "Snake", icon: "🐍", slug: "snake", what: "the classic Snake game: keyboard controls, score, gentle speed-up, game-over and restart" },
   { label: "Pong", icon: "🏓", slug: "pong", what: "Pong against a simple computer opponent: mouse or keys, score to 7, satisfying ball physics" },
@@ -112,38 +119,40 @@ export function renderLobby(root: HTMLElement): void {
     <div class="lobby">
       <div class="hero">
         <h1>AGENT EMPIRES</h1>
-        <p class="tagline">Paste a public repository — or commission new software from bare earth.
-        A civilization wakes upon the code: agents labor, specters rise from failing tests,
-        and you rule it all by decree.</p>
+        <p class="tagline">Commission software and watch AI agents raise it as a castle —
+        the web front is the manor, the database an ore mine, the pipelines run as rails.
+        Every stone is a measured fact of the code. You rule by decree.</p>
         <div class="rule"></div>
       </div>
       <div class="lobby-grid">
         <div class="panel" id="found-panel">
-          <h2>Paste a Public Repo</h2>
-          <div class="form-row">
-            <input id="repo-url" type="text" autofocus
-              placeholder="https://github.com/owner/repo — press Enter" />
-          </div>
-          <div class="one-door">The Crown funds the agents; the repository becomes the realm —
-          every file a building, every directory a walled quarter.</div>
-          <div class="error-note" id="start-error"></div>
-          <div class="sample-label">— or commission a new realm, built from nothing —</div>
+          <h2>⚒ Found a Castle</h2>
           <div class="form-row commission-row">
-            <input id="brief-input" type="text" placeholder="describe what to build — e.g. a tiny drum machine" />
-            <button id="brief-btn" title="Found a bare realm and set the agents building">⚒ Found</button>
+            <input id="brief-input" type="text" autofocus placeholder="describe what to build — e.g. a tiny drum machine" />
+            <button id="brief-btn" title="Found a castle and set the builders to work">⚒ Found</button>
           </div>
-          <div class="one-door">The realm begins as bare earth. Watch the city rise file by file,
-          then press <strong>⌂ Behold the Work</strong> to run what they built.</div>
+          <div class="one-door">The castle begins as bare earth. Watch wings rise as files are written;
+          save at departure and the castle stands — return later and commission the next wing.
+          Press <strong>⌂ Behold the Work</strong> any time to run what they built.</div>
+          <div class="error-note" id="start-error"></div>
           <div class="quest-grid" id="quest-grid">${QUESTS.map(
             (q, i) => `<button class="quest-chip" data-q="${i}"><span class="q-icon">${q.icon}</span>${escapeHtml(q.label)}</button>`,
           ).join("")}</div>
-          <div class="sample-label">— or choose an existing realm, by size —</div>
+          <div class="sample-label">— standing castles: click one to commission its next wing —</div>
+          <div id="castle-list"><p class="empty-note">No castles stand yet. Found one above and save it at departure.</p></div>
+          <div class="sample-label">— or point the builders at a public repository —</div>
+          <div class="form-row">
+            <input id="repo-url" type="text"
+              placeholder="https://github.com/owner/repo — press Enter" />
+          </div>
+          <div class="one-door">The repository becomes a castle too: its measured components claim
+          the wards, its imports pave the roads.</div>
           <div id="tier-list"></div>
         </div>
         <div class="panel">
           <h2>☾ Prior Worlds</h2>
-          <p class="panel-sub">Worlds saved at departure — click one to replay its chronicle.</p>
-          <div id="finished-list"><p class="empty-note">None yet. When you depart a settlement, choose to save it and it will rest here.</p></div>
+          <p class="panel-sub">Chronicles saved at departure — click one to replay.</p>
+          <div id="finished-list"><p class="empty-note">None yet. When you depart, choose to save and the chronicle rests here.</p></div>
           <h2 style="margin-top:1.5rem">☨ Hall of Legends</h2>
           <div id="hall-list"><p class="empty-note">No legends yet. Clear bounties — fix failing tests — and be remembered.</p></div>
         </div>
@@ -160,16 +169,23 @@ export function renderLobby(root: HTMLElement): void {
   const foundPanel = root.querySelector<HTMLElement>("#found-panel")!;
   let starting = false;
 
-  function begin(repoUrl: string, repoLabel: string, firstOrder?: string) {
+  function begin(repoUrl: string, repoLabel: string, firstOrder?: string, castle?: { id: string; name: string }) {
     if (starting) return;
     starting = true;
     errorNote.textContent = "";
     foundPanel.classList.add("starting");
-    startSettlement(document.getElementById("app")!, { repoUrl, repoLabel, apiKey: "", model: "", firstOrder }).catch((err) => {
+    startSettlement(document.getElementById("app")!, { repoUrl, repoLabel, apiKey: "", model: "", firstOrder, castle }).catch((err) => {
       errorNote.textContent = String(err);
       starting = false;
       foundPanel.classList.remove("starting");
     });
+  }
+
+  /** Every fresh commission founds its own castle: slug + a short claim mark. */
+  function foundCastle(label: string, what: string) {
+    const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 30) || "castle";
+    const id = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
+    begin(`castle:${id}`, `Castle ${label.slice(0, 40)}`, QUEST_CHARGE(what), { id, name: `Castle ${label.slice(0, 40)}` });
   }
 
   repoInput.addEventListener("keydown", (e) => {
@@ -189,9 +205,7 @@ export function renderLobby(root: HTMLElement): void {
       errorNote.textContent = "Describe the commission in a few words — e.g. “a tiny drum machine”.";
       return;
     }
-    // Slug keeps the realm's seed, README title, and divined theme distinct per brief.
-    const slug = what.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 40) || "commission";
-    begin(`new:${slug}`, `New Realm — ${what.slice(0, 40)}`, QUEST_CHARGE(what));
+    foundCastle(what, what);
   };
   root.querySelector<HTMLButtonElement>("#brief-btn")!.onclick = commission;
   briefInput.addEventListener("keydown", (e) => {
@@ -200,7 +214,7 @@ export function renderLobby(root: HTMLElement): void {
   for (const chip of root.querySelectorAll<HTMLElement>(".quest-chip")) {
     chip.onclick = () => {
       const q = QUESTS[Number(chip.dataset.q)]!;
-      begin(`new:${q.slug}`, `New Realm — ${q.label}`, QUEST_CHARGE(q.what));
+      foundCastle(q.label, q.what);
     };
   }
 
@@ -224,11 +238,57 @@ export function renderLobby(root: HTMLElement): void {
     };
   }
 
+  refreshCastles(root, begin);
   refreshMatches(root);
   const interval = setInterval(() => {
     if (!document.body.contains(root)) return clearInterval(interval);
+    refreshCastles(root, begin);
     refreshMatches(root);
   }, 5000);
+}
+
+type CastleSummary = {
+  id: string;
+  name: string;
+  commissions: number;
+  lastTitle: string;
+  updatedAt: number;
+  hasBundle: boolean;
+};
+
+async function refreshCastles(
+  root: HTMLElement,
+  begin: (repoUrl: string, repoLabel: string, firstOrder?: string, castle?: { id: string; name: string }) => void,
+) {
+  try {
+    const res = await fetch("/api/castles");
+    const { castles } = (await res.json()) as { castles: CastleSummary[] };
+    const list = root.querySelector<HTMLElement>("#castle-list");
+    if (!list || castles.length === 0) return;
+    list.innerHTML = castles
+      .slice(0, 8)
+      .map(
+        (c) => `<div class="match-row castle-row" data-cid="${escapeHtml(c.id)}" data-cname="${escapeHtml(c.name)}">
+          <div>
+            <div>🏰 ${escapeHtml(c.name)}</div>
+            <div class="m-id">${c.commissions} commission${c.commissions === 1 ? "" : "s"} · last: ${escapeHtml(c.lastTitle)}</div>
+          </div>
+          <span class="badge">standing</span>
+        </div>`,
+      )
+      .join("");
+    for (const row of list.querySelectorAll<HTMLElement>(".castle-row")) {
+      row.onclick = () => {
+        const id = row.dataset.cid!;
+        const name = row.dataset.cname!;
+        const order = prompt(`${name} stands. What shall the builders add?`);
+        if (!order || order.trim().length < 8) return;
+        begin(`castle:${id}`, name, EXTEND_CHARGE(order.trim()), { id, name });
+      };
+    }
+  } catch {
+    // relay unreachable; the list keeps its last state
+  }
 }
 
 async function refreshMatches(root: HTMLElement) {

@@ -1,14 +1,11 @@
 import type { Renderer } from "./match-view.js";
 
 /**
- * Engine selection with code-splitting: the default 3D engine (three.js) and
- * the legacy 2D engine (Phaser) live in separate lazy chunks, so spectators
- * only ever download the one they use. `?r=2d` is the rollback lever.
+ * Castle Era: one engine. The 3D castle renderer is the world; it loads as
+ * its own lazy chunk so the lobby stays light. (The 2D sprite engine of the
+ * city era is retired — its laws live on in git history.)
  */
 export async function selectRenderer(mount: HTMLElement): Promise<Renderer> {
-  const use2d = new URLSearchParams(window.location.search).get("r") === "2d";
-  const mod = use2d
-    ? await import("./game/renderer.js")
-    : await import("./game3d/renderer.js");
+  const mod = await import("./game3d/renderer.js");
   return mod.attachGameRenderer(mount);
 }
