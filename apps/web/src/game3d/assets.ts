@@ -25,6 +25,8 @@ export const MODEL_FILES: Record<string, string> = {
   market: "buildings/building_market_blue.glb",
   well: "buildings/building_well_blue.glb",
   scaffolding: "buildings/building_scaffolding.glb",
+  lumbermill: "buildings/building_lumbermill_blue.glb",
+  destroyed: "buildings/building_destroyed.glb",
   // walls
   wall_straight: "buildings/wall_straight.glb",
   wall_gate: "buildings/wall_straight_gate.glb",
@@ -82,21 +84,57 @@ const CHARACTER_KEYS = new Set([
   "Skeleton_Warrior",
 ]);
 
-/** First paint waits for these; the rest streams in behind. */
+/**
+ * First paint waits for these: every kit piece a castle recipe, the curtain
+ * wall or the grounds scatter can ask for, plus the worker characters. The
+ * whole set is small low-poly glbs, and loading it up front means recipes
+ * never need re-realize machinery.
+ */
 export const CORE_KEYS = [
+  // forms
   "castle",
+  "home_B",
+  "mine",
+  "watermill",
+  "blacksmith",
+  "lumbermill",
+  "market",
+  "well",
+  "church",
+  "tower_A",
+  "tower_B",
+  "scaffolding",
+  "destroyed",
+  // walls + fences
   "wall_straight",
   "wall_gate",
-  "wall_corner",
   "fence",
-  "fence_gate",
-  "home_A",
-  "home_B",
+  // props
+  "flag",
+  "banner",
+  "target",
+  "weaponrack",
+  "book_set",
+  "sack",
+  "crate_big",
+  "crate_A_small",
+  "barrel",
+  "wheelbarrow",
+  "chest",
+  "torch_lit",
+  "resource_lumber",
+  "resource_stone",
+  // nature
+  "tree_A",
+  "tree_B",
+  "rock_A",
+  "rock_B",
+  "rock_C",
+  "rock_D",
+  // characters
   "Rogue",
   "Barbarian",
   "Mage",
-  "Skeleton_Minion",
-  "Skeleton_Warrior",
 ] as const;
 
 export type StaticPart = { geometry: THREE.BufferGeometry; material: THREE.Material };

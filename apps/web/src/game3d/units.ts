@@ -5,7 +5,7 @@ import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { AgentStatus } from "@agent-empires/protocol";
 import type { CharModel } from "./assets.js";
 import { makeBillboard, type Billboard } from "./billboards.js";
-import type { PickInfo } from "./city.js";
+import type { PickInfo } from "./constructions.js";
 
 const CROSSFADE = 0.2;
 

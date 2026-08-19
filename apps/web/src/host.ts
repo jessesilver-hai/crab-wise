@@ -7,7 +7,7 @@ import { getCachedTheme, generateTheme, repoKey } from "./themer.js";
 import { analyzeCensus, censusBrief } from "./game/census.js";
 import { buildComponentGraph } from "./game/components.js";
 import { CastleState } from "./game/castlestate.js";
-import type { CastleLedger } from "./game/castle.js";
+import { asLedger, type CastleLedger } from "./game/castle.js";
 import { generateRepresentation } from "./reprloop.js";
 
 export type SettlementStart = {
@@ -20,15 +20,6 @@ export type SettlementStart = {
   /** Castle Era: found upon (or found) a persistent castle. */
   castle?: { id: string; name: string };
 };
-
-/** Only a shape the plan law can actually merge counts as a prior ledger. */
-function asLedger(u: unknown): CastleLedger | undefined {
-  if (typeof u !== "object" || u === null) return undefined;
-  const c = u as { version?: unknown; entries?: unknown; seed?: unknown };
-  if (c.version !== 1 || typeof c.seed !== "number") return undefined;
-  if (typeof c.entries !== "object" || c.entries === null) return undefined;
-  return u as CastleLedger;
-}
 
 /** Model used when the visitor brings no key and the Crown pays via OpenRouter. */
 export const FUNDED_MODEL = "x-ai/grok-4.6";

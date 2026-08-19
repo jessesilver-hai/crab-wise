@@ -123,6 +123,15 @@ export function foundLedger(seed: number): CastleLedger {
   return { version: 1, seed, entries: {} };
 }
 
+/** Only a shape the plan law can actually merge counts as a prior ledger. */
+export function asLedger(u: unknown): CastleLedger | undefined {
+  if (typeof u !== "object" || u === null) return undefined;
+  const c = u as { version?: unknown; entries?: unknown; seed?: unknown };
+  if (c.version !== 1 || typeof c.seed !== "number") return undefined;
+  if (typeof c.entries !== "object" || c.entries === null) return undefined;
+  return u as CastleLedger;
+}
+
 // ---------------------------------------------------------------------------
 // Plan geometry
 // ---------------------------------------------------------------------------

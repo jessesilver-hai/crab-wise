@@ -1,14 +1,14 @@
-// Classic RTS orthographic camera: fixed azimuth 45° / elevation 35°, wheel
-// zoom, edge-scroll + middle/right-drag + WASD/arrow pan, smooth lerp.
+// Orbit rig for the castle: 3/4 perspective view framing the whole plan,
+// left-drag orbit (azimuth + pitch, clamped 15°–70°), wheel zoom, right-drag
+// or WASD pan, and focus tweens for double-clicked constructions. Typing in
+// the command bar must never move the camera — isTypingTarget guards keys.
 import * as THREE from "three";
-import type { Rect } from "../game/map.js";
 
-const AZIMUTH = (45 * Math.PI) / 180;
-const ELEVATION = (35 * Math.PI) / 180;
-const MIN_VIEW_H = 6;
-const MAX_VIEW_H = 160;
-const MAX_VIEW_H_CAP = 200;
-const CAM_DIST = 220;
+const DEG = Math.PI / 180;
+const PITCH_MIN = 15 * DEG;
+const PITCH_MAX = 70 * DEG;
+const R_MIN = 6;
+const R_MAX = 120;
 
 /** True when the key press belongs to a text field (command bar, inputs). */
 export function isTypingTarget(e: KeyboardEvent): boolean {
@@ -17,38 +17,23 @@ export function isTypingTarget(e: KeyboardEvent): boolean {
   return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable;
 }
 
-export class RtsCamera {
-  readonly camera: THREE.OrthographicCamera;
-  /** World-space look-at point on the ground plane. */
+export class OrbitRig {
+  readonly camera = new THREE.PerspectiveCamera(45, 1, 0.1, 600);
   readonly target = new THREE.Vector3();
-  private targetGoal = new THREE.Vector3();
-  /** Vertical world units visible at zoom 1. */
-  private viewH = 40;
-  private viewHGoal = 40;
-  private aspect = 1;
-  private dir: THREE.Vector3;
+  azimuth = -Math.PI / 4;
+  pitch = 38 * DEG;
+  radius = 60;
+  private tGoal = new THREE.Vector3();
+  private azGoal = this.azimuth;
+  private pitchGoal = this.pitch;
+  private rGoal = this.radius;
+  private panBound = 40;
   private keys = new Set<string>();
-  private bounds: Rect | null = null;
-  /** Zoom-out ceiling from the world's scale tier (hamlets feel close). */
-  private maxViewH = MAX_VIEW_H;
   private detach: (() => void)[] = [];
-  edgeScroll = true;
-  /** Pointer position in mount px, updated by the renderer. */
-  pointer = { x: -1, y: -1, inside: false, moved: false };
-
-  constructor() {
-    this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 800);
-    this.dir = new THREE.Vector3(
-      Math.cos(ELEVATION) * Math.sin(AZIMUTH),
-      Math.sin(ELEVATION),
-      Math.cos(ELEVATION) * Math.cos(AZIMUTH),
-    ).normalize();
-    this.apply(1, 1);
-  }
 
   attachKeys(): void {
     const down = (e: KeyboardEvent) => {
-      if (isTypingTarget(e)) return; // the Crown at the command bar must not pan the realm
+      if (isTypingTarget(e)) return; // chat focus must never pan the castle
       if (["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
         this.keys.add(e.code);
       }
@@ -67,140 +52,77 @@ export class RtsCamera {
     this.detach = [];
   }
 
-  setBounds(rect: Rect): void {
-    this.bounds = rect;
+  /** Auto-fit: frame a plan of the given world radius in the default view. */
+  fit(planRadius: number): void {
+    this.panBound = planRadius + 12;
+    this.target.set(0, 0.5, 0);
+    this.tGoal.copy(this.target);
+    this.azimuth = this.azGoal = -Math.PI / 4;
+    this.pitch = this.pitchGoal = 38 * DEG;
+    const need = (planRadius + 4) / Math.tan((this.camera.fov * DEG) / 2);
+    this.radius = this.rGoal = Math.min(R_MAX, Math.max(R_MIN, need * 1.02));
+    this.apply(this.camera.aspect || 1);
   }
 
-  /** Scale envelope: cap how far out this world lets the camera pull. */
-  setZoomEnvelope(maxViewH: number): void {
-    this.maxViewH = Math.min(MAX_VIEW_H_CAP, Math.max(MIN_VIEW_H + 4, maxViewH));
-    this.viewHGoal = Math.min(this.viewHGoal, this.maxViewH);
+  orbitBy(dxPx: number, dyPx: number): void {
+    this.azGoal -= dxPx * 0.0075;
+    this.pitchGoal = Math.min(PITCH_MAX, Math.max(PITCH_MIN, this.pitchGoal + dyPx * 0.005));
   }
 
-  /** Wheel zoom toward/away, clamped; smoothed in update(). */
   zoomBy(deltaY: number): void {
-    const f = deltaY > 0 ? 1.18 : 1 / 1.18;
-    this.viewHGoal = Math.min(this.maxViewH, Math.max(MIN_VIEW_H, this.viewHGoal * f));
+    const f = deltaY > 0 ? 1.16 : 1 / 1.16;
+    this.rGoal = Math.min(R_MAX, Math.max(R_MIN, this.rGoal * f));
   }
 
   panPx(dx: number, dy: number, w: number, h: number): void {
-    // screen px → world units on the ground plane
-    const unitsPerPxY = this.viewH / Math.max(1, h);
-    const unitsPerPxX = (this.viewH * this.aspect) / Math.max(1, w);
-    // camera right on ground = (cos az, 0, -sin az); camera "up" on ground
-    const rx = Math.cos(AZIMUTH);
-    const rz = -Math.sin(AZIMUTH);
-    const fScale = 1 / Math.max(0.15, Math.sin(ELEVATION));
-    const fx = -Math.sin(AZIMUTH);
-    const fz = -Math.cos(AZIMUTH);
-    // drag-content semantics: +dx pointer drag moves the world right, so the
-    // camera target moves -right; +dy moves the target +forward (up-screen).
-    const mx = -dx * unitsPerPxX;
-    const mz = dy * unitsPerPxY * fScale;
-    this.targetGoal.x += rx * mx + fx * mz;
-    this.targetGoal.z += rz * mx + fz * mz;
-    this.clampGoal();
+    const worldPerPx = (2 * this.radius * Math.tan((this.camera.fov * DEG) / 2)) / Math.max(1, h);
+    // camera right on the ground plane, and camera-forward projected to ground
+    const rx = -Math.sin(this.azimuth);
+    const rz = Math.cos(this.azimuth);
+    const fx = -Math.cos(this.azimuth);
+    const fz = -Math.sin(this.azimuth);
+    void w;
+    this.tGoal.x += (-dx * rx + dy * fx * 1.4) * worldPerPx;
+    this.tGoal.z += (-dx * rz + dy * fz * 1.4) * worldPerPx;
+    const b = this.panBound;
+    this.tGoal.x = Math.min(b, Math.max(-b, this.tGoal.x));
+    this.tGoal.z = Math.min(b, Math.max(-b, this.tGoal.z));
   }
 
-  jumpTo(x: number, z: number): void {
-    this.targetGoal.set(x, 0, z);
-    this.clampGoal();
+  /** Smooth focus tween onto a world point (double-click a construction). */
+  focusOn(x: number, y: number, z: number, radius = 14): void {
+    this.tGoal.set(x, y, z);
+    this.rGoal = Math.min(R_MAX, Math.max(R_MIN, radius));
   }
 
-  panTo(x: number, z: number): void {
-    this.jumpTo(x, z);
+  update(dt: number, w: number, h: number): void {
+    const kx =
+      (this.keys.has("KeyD") || this.keys.has("ArrowRight") ? 1 : 0) -
+      (this.keys.has("KeyA") || this.keys.has("ArrowLeft") ? 1 : 0);
+    const ky =
+      (this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0) -
+      (this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0);
+    if (kx !== 0 || ky !== 0) this.panPx(-kx * 540 * dt, -ky * 540 * dt, w, h);
+    const k = Math.min(1, dt * 9);
+    this.target.lerp(this.tGoal, k);
+    this.azimuth += (this.azGoal - this.azimuth) * k;
+    this.pitch += (this.pitchGoal - this.pitch) * k;
+    this.radius += (this.rGoal - this.radius) * Math.min(1, dt * 7);
+    this.apply(w / Math.max(1, h));
   }
 
-  private clampGoal(): void {
-    const b = this.bounds;
-    if (!b) return;
-    this.targetGoal.x = Math.min(b.x + b.w + 4, Math.max(b.x - 4, this.targetGoal.x));
-    this.targetGoal.z = Math.min(b.y + b.h + 4, Math.max(b.y - 4, this.targetGoal.z));
-  }
-
-  /** Fit the city rect in view and center on it (fit < 1 starts closer). */
-  frame(rect: Rect, aspect: number, fit = 1): void {
-    const cx = rect.x + rect.w / 2;
-    const cz = rect.y + rect.h / 2;
-    this.target.set(cx, 0, cz);
-    this.targetGoal.copy(this.target);
-    // project the rect corners into camera space to find the needed extents
-    const cam = new THREE.Matrix4().lookAt(this.dir, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0));
-    const inv = cam.clone().invert();
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (const [px, pz] of [
-      [rect.x, rect.y],
-      [rect.x + rect.w, rect.y],
-      [rect.x, rect.y + rect.h],
-      [rect.x + rect.w, rect.y + rect.h],
-    ] as const) {
-      const v = new THREE.Vector3(px - cx, 0, pz - cz).applyMatrix4(inv);
-      minX = Math.min(minX, v.x);
-      maxX = Math.max(maxX, v.x);
-      minY = Math.min(minY, v.y);
-      maxY = Math.max(maxY, v.y);
-    }
-    const needH = Math.max(maxY - minY, (maxX - minX) / Math.max(0.1, aspect)) * 1.12 * fit;
-    this.viewH = Math.min(this.maxViewH, Math.max(MIN_VIEW_H, needH));
-    this.viewHGoal = this.viewH;
-    this.apply(aspect, 1);
-  }
-
-  private apply(aspect: number, _dt: number): void {
-    this.aspect = aspect;
-    const halfH = this.viewH / 2;
-    const halfW = halfH * aspect;
-    this.camera.left = -halfW;
-    this.camera.right = halfW;
-    this.camera.top = halfH;
-    this.camera.bottom = -halfH;
-    this.camera.position.copy(this.target).addScaledVector(this.dir, CAM_DIST);
+  private apply(aspect: number): void {
+    this.camera.aspect = aspect;
+    this.camera.position.set(
+      this.target.x + this.radius * Math.cos(this.pitch) * Math.cos(this.azimuth),
+      this.target.y + this.radius * Math.sin(this.pitch),
+      this.target.z + this.radius * Math.cos(this.pitch) * Math.sin(this.azimuth),
+    );
     this.camera.lookAt(this.target);
     this.camera.updateProjectionMatrix();
     this.camera.updateMatrixWorld();
   }
 
-  update(dt: number, w: number, h: number): void {
-    // keyboard pan
-    const kx = (this.keys.has("KeyD") || this.keys.has("ArrowRight") ? 1 : 0) -
-      (this.keys.has("KeyA") || this.keys.has("ArrowLeft") ? 1 : 0);
-    const ky = (this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0) -
-      (this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0);
-    const speedPx = 620 * dt;
-    if (kx !== 0 || ky !== 0) this.panPx(-kx * speedPx, -ky * speedPx, w, h);
-    // edge scroll (only after a real pointer move, so headless runs stay put)
-    if (this.edgeScroll && this.pointer.inside && this.pointer.moved) {
-      const m = 14;
-      let ex = 0;
-      let ey = 0;
-      if (this.pointer.x < m) ex = 1;
-      else if (this.pointer.x > w - m) ex = -1;
-      if (this.pointer.y < m) ey = 1;
-      else if (this.pointer.y > h - m) ey = -1;
-      if (ex !== 0 || ey !== 0) this.panPx(ex * speedPx, ey * speedPx, w, h);
-    }
-    // smooth lerp
-    const k = Math.min(1, dt * 9);
-    this.target.lerp(this.targetGoal, k);
-    this.viewH += (this.viewHGoal - this.viewH) * Math.min(1, dt * 8);
-    this.apply(w / Math.max(1, h), dt);
-  }
-
-  /** Mount-px → ground-plane world point (plane y = planeY, default 0). */
-  screenToGround(px: number, py: number, w: number, h: number, planeY = 0): THREE.Vector3 {
-    const ndc = new THREE.Vector2((px / w) * 2 - 1, -(py / h) * 2 + 1);
-    const origin = new THREE.Vector3(ndc.x, ndc.y, -1).unproject(this.camera);
-    const dir = new THREE.Vector3(0, 0, 1)
-      .transformDirection(this.camera.matrixWorld)
-      .negate();
-    const t = (planeY - origin.y) / dir.y;
-    return origin.clone().addScaledVector(dir, t);
-  }
-
-  /** World point → mount px. */
   worldToScreen(p: THREE.Vector3, w: number, h: number): { x: number; y: number } {
     const v = p.clone().project(this.camera);
     return { x: ((v.x + 1) / 2) * w, y: ((1 - v.y) / 2) * h };
