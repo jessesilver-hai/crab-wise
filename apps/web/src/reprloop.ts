@@ -42,6 +42,8 @@ export async function generateRepresentation(opts: {
     dangerouslyAllowBrowser: true,
     baseURL: opts.llm?.baseURL,
     defaultHeaders: opts.llm?.headers,
+    maxRetries: 1,
+    timeout: 60_000, // a hung call must become the lawful null, not a stalled decree
   });
 
   const vocab = graph.components

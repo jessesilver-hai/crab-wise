@@ -1142,5 +1142,61 @@ console.log("Castle Era (persistence law)");
   check("end message carries the farewell", endMsg.success);
 }
 
+console.log("Castle Era (veil law)");
+{
+  const { Agent } = await import("../packages/runtime/src/agent.ts");
+  const { Emitter } = await import("../packages/runtime/src/emitter.ts");
+  const events = [];
+  const emitter = new Emitter((e) => events.push(e));
+  const inbox = { drain: () => [] };
+  const okMessage = {
+    content: [{ type: "text", text: "the work is done" }],
+    usage: { input_tokens: 10, output_tokens: 5 },
+  };
+  const veil = (failures) => {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      messages: {
+        create: async () => {
+          calls++;
+          if (calls <= failures) throw new Error("Request timed out.");
+          return okMessage;
+        },
+      },
+    };
+  };
+  const mkAgent = (client, signal) =>
+    new Agent("w1", "Imre Vault-Keeper", "worker", client, "grok", emitter, {}, inbox, { total: 0 }, signal);
+
+  // one stumble, then the communion recovers
+  const c1 = veil(1);
+  const out1 = await mkAgent(c1).run("sys", "brief");
+  check("a stumble recovers into the next communion", out1 === "the work is done" && c1.calls() === 2);
+  check("the stumble is heralded", events.some((e) => e.type === "log" && /loses the thread/.test(e.text)));
+  check("the trance is shaken off visibly", events.some((e) => e.type === "agent_status" && e.status === "resting" && e.detail === "shakes off a trance"));
+
+  // an unreachable veil ends the shift after a bounded number of attempts
+  events.length = 0;
+  const c2 = veil(99);
+  const out2 = await mkAgent(c2).run("sys", "brief");
+  check("an unreachable veil ends the shift", out2 === "");
+  check("spend is bounded to the stumble cap", c2.calls() === 2, `calls=${c2.calls()}`);
+  check("the ended shift is heralded as error", events.some((e) => e.type === "log" && e.level === "error" && /the shift ends/.test(e.text)));
+  check("the fallen worker still reports done", events.some((e) => e.type === "agent_status" && e.status === "done"));
+
+  // an aborted match still raises the old law, never a stumble
+  const ctrl = new AbortController();
+  ctrl.abort();
+  const c3 = veil(99);
+  let threw = "";
+  try {
+    await mkAgent(c3, ctrl.signal).run("sys", "brief");
+  } catch (e) {
+    threw = String(e);
+  }
+  check("an aborted match raises the old law", /match aborted/.test(threw) && c3.calls() === 0);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

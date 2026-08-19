@@ -4,6 +4,8 @@ import { Emitter } from "./emitter.js";
 import { executeTool, ToolContext, WORKER_TOOLS } from "./tools.js";
 
 const MAX_TURNS = 28;
+const TURN_TIMEOUT_MS = 120_000; // one communion attempt; the SDK retries transport faults inside this
+const MAX_STUMBLES = 2; // consecutive failed communions before the shift ends
 const CONTEXT_MAX_TOKENS = 200_000;
 const COMPACTION_THRESHOLD_TOKENS = 60_000;
 const FOLD_THRESHOLD_TOKENS = 80_000;
@@ -35,6 +37,7 @@ export class Agent {
   async run(systemPrompt: string, brief: string): Promise<string> {
     this.history.push({ role: "user", content: brief });
     let finalText = "";
+    let stumbles = 0;
 
     for (let turn = 0; turn < this.maxTurns; turn++) {
       if (this.signal?.aborted) throw new Error("match aborted");
@@ -55,13 +58,43 @@ export class Agent {
 
       this.emitter.emit("agent_status", { agentId: this.id, status: "thinking" });
 
-      const response = await this.client.messages.create({
-        model: this.model,
-        max_tokens: 4096,
-        system: systemPrompt,
-        tools: this.tools,
-        messages: this.history,
-      });
+      // The veil law: no communion may hang the realm. Every attempt is
+      // bounded, a failure is a visible stumble, and repeated stumbles end
+      // the shift — the spectator must never watch an eternal ponder.
+      let response: Anthropic.Message;
+      try {
+        response = await this.client.messages.create(
+          {
+            model: this.model,
+            max_tokens: 4096,
+            system: systemPrompt,
+            tools: this.tools,
+            messages: this.history,
+          },
+          { timeout: TURN_TIMEOUT_MS, signal: this.signal },
+        );
+        stumbles = 0;
+      } catch (err) {
+        if (this.signal?.aborted) throw new Error("match aborted");
+        stumbles++;
+        const reason = (err instanceof Error ? err.message : String(err)).slice(0, 120);
+        if (stumbles >= MAX_STUMBLES) {
+          this.emitter.emit("log", {
+            agentId: this.id,
+            level: "error",
+            text: `${this.name} cannot reach beyond the veil (${reason}) — the shift ends.`,
+          });
+          break;
+        }
+        this.emitter.emit("log", {
+          agentId: this.id,
+          level: "info",
+          text: `${this.name} loses the thread beyond the veil (${reason}) — steadies for another attempt.`,
+        });
+        this.emitter.emit("agent_status", { agentId: this.id, status: "resting", detail: "shakes off a trance" });
+        await new Promise((r) => setTimeout(r, 2500));
+        continue;
+      }
 
       const inputTokens = response.usage.input_tokens;
       const outputTokens = response.usage.output_tokens;
@@ -137,13 +170,16 @@ export class Agent {
 
     const folded = this.history.slice(0, keepFrom);
     const digestSource = JSON.stringify(folded);
-    const res = await this.client.messages.create({
-      model: this.model,
-      max_tokens: 900,
-      system:
-        "You are the royal scribe. Distill this working-session transcript into the durable facts the project lead must retain: what the repository is, files explored and changed (exact paths), decisions made, worker assignments and their outcomes, current test/build state, and open threads. Under 300 words, plain prose, no preamble.",
-      messages: [{ role: "user", content: digestSource.slice(0, 240_000) }],
-    });
+    const res = await this.client.messages.create(
+      {
+        model: this.model,
+        max_tokens: 900,
+        system:
+          "You are the royal scribe. Distill this working-session transcript into the durable facts the project lead must retain: what the repository is, files explored and changed (exact paths), decisions made, worker assignments and their outcomes, current test/build state, and open threads. Under 300 words, plain prose, no preamble.",
+        messages: [{ role: "user", content: digestSource.slice(0, 240_000) }],
+      },
+      { timeout: 90_000 },
+    );
     this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
     this.emitter.emit("tokens", {
       agentId: this.id,

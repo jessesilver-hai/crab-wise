@@ -225,7 +225,11 @@ export class Settlement {
       dangerouslyAllowBrowser: true,
       baseURL: opts.llm?.baseURL,
       defaultHeaders: opts.llm?.headers,
-      maxRetries: 4,
+      maxRetries: 2,
+      // Without this the SDK waits 10 minutes per attempt: a single hung
+      // upstream call reads as an agent pondering forever. Every session
+      // call site already has a catch/fallback that this rejection feeds.
+      timeout: 120_000,
     });
     this.theme = opts.theme ?? null;
     this.kingName = this.theme?.kingName ?? ORCHESTRATOR_NAME;

@@ -124,6 +124,8 @@ export async function generateTheme(opts: {
     dangerouslyAllowBrowser: true,
     baseURL: opts.llm?.baseURL,
     defaultHeaders: opts.llm?.headers,
+    maxRetries: 1,
+    timeout: 120_000, // a hung theme call must fall to the default pack, not stall founding
   });
   try {
     const response = await client.messages.create({
