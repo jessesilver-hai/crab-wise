@@ -1198,5 +1198,80 @@ console.log("Castle Era (veil law)");
   check("an aborted match raises the old law", /match aborted/.test(threw) && c3.calls() === 0);
 }
 
+console.log("Castle Era (genome law)");
+{
+  const {
+    permutationCount, deriveGenome, lawClamp, validateBuildingGenome, validateStyleGenome,
+    genomeSignature, styleSignature,
+  } = await import("../apps/web/src/game/genome.ts");
+  const { CastleState } = await import("../apps/web/src/game/castlestate.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  check("the design language exceeds a billion permutations", permutationCount() > 1e9, String(permutationCount()));
+
+  const traits = { size: 2, tint: "#e86a33", banner: "#222831", gates: 2, shafts: 1, banners: 2, storeys: 2 };
+  const g1 = deriveGenome("app-web", traits, "root:app-web", 777, null);
+  const g2 = deriveGenome("app-web", traits, "root:app-web", 777, null);
+  check("derived genomes are deterministic", genomeSignature(g1) === genomeSignature(g2));
+  const g3 = deriveGenome("app-web", traits, "root:app-web", 778, null);
+  check("a different seed dresses differently", genomeSignature(g1) !== genomeSignature(g3));
+
+  const tall = lawClamp({ ...structuredClone(g1), storeys: 6 }, traits);
+  check("storeys clamp to the measured band", tall.storeys === 3);
+
+  const vg = validateBuildingGenome(
+    { roof: { form: "onion" }, material: { family: "molten-gold" }, storeys: 99, ornament: { banners: 44 } },
+    "app-web", traits, "root:app-web", 777, null,
+  );
+  check("lawful fields survive validation", vg.roof.form === "onion");
+  check("unlawful fields fall to the derived default", vg.material.family === g1.material.family);
+  check("bounded fields clamp", vg.storeys <= 3 && vg.ornament.banners <= 4);
+  check("garbage input yields the lawful default", genomeSignature(validateBuildingGenome("junk", "app-web", traits, "root:app-web", 777, null)) === genomeSignature(g1));
+
+  check("an uncited style does not exist", validateStyleGenome({ name: "Oracle-Forge" }) === null);
+  const style = validateStyleGenome({
+    name: "Oracle-Forge Brutalism", cited: "71% strict TypeScript, zero runtime deps",
+    materialBias: ["obsidian", "nonsense", "basalt"], roofBias: ["sawtooth"], trimBias: ["glowseams"],
+    natureSet: "dead", wallStyle: "obsidian", groundTone: "scorch", fog: "thin",
+  });
+  check("a cited style validates and filters its vocab", style !== null && style.materialBias.join(",") === "obsidian,basalt");
+  const styled = deriveGenome("library", traits, "lib:library", 777, style);
+  check("style biases steer derived genomes", ["obsidian", "basalt"].includes(styled.material.family) && styled.roof.form === "sawtooth");
+
+  // live fold: genomes ride applyRepr, styles ride applyStyle, hash is contractual
+  const bakery = dir("", [
+    file("index.html", 120), file("styles.css", 260), file("server.js", 240),
+    dir("db", [file("db/schema.sql", 90)]), file("README.md", 40),
+  ]);
+  const st = new CastleState();
+  const p0 = st.found(bakery, 777, [], [{ path: "styles.css", probe: "color", value: "#e86a33" }]);
+  check("every socket carries a resolved genome", p0.sockets.every((s) => s.genome && typeof s.genome.footprint === "string"));
+  const h0 = p0.hash;
+  const r1 = st.applyRepr("db:database", "ore-mine", "two tables sink two shafts", { roof: { form: "dome" }, material: { family: "basalt" } });
+  check("a chosen genome lands and is reported", r1.changes.some((c) => c.kind === "genome" && c.componentId === "db:database"));
+  check("the chosen genome is visible on the socket", r1.plan.sockets.find((s) => s.componentId === "db:database").genome.roof.form === "dome");
+  check("the castle hash answers the redress", r1.plan.hash !== h0);
+
+  const uncited = st.applyStyle({ name: "Nameless" });
+  check("an uncited style decree is refused", uncited.changes.length === 0);
+  const r2 = st.applyStyle({
+    name: "Harbor Timberwork", cited: "a static html page, hand-inlined styles",
+    materialBias: ["timber"], roofBias: ["gable"], trimBias: ["halftimber"],
+    natureSet: "oak", wallStyle: "palisade", groundTone: "meadow", fog: "none",
+  });
+  check("a cited style decree lands", r2.changes.some((c) => c.kind === "style" && c.name === "Harbor Timberwork"));
+  check("the style stands on the plan", r2.plan.style !== null && styleSignature(r2.plan.style).startsWith("Harbor Timberwork"));
+  check("unchosen buildings re-derive under the style", r2.changes.some((c) => c.kind === "genome" && c.componentId !== "db:database"));
+  check("chosen genomes outrank the style", r2.plan.sockets.find((s) => s.componentId === "db:database").genome.material.family === "basalt");
+
+  // persistence: genomes and style ride the ledger across foundings
+  const st2 = new CastleState();
+  const p2 = st2.found(bakery, 777, [], [{ path: "styles.css", probe: "color", value: "#e86a33" }], structuredClone(r2.plan.ledger));
+  check("the style survives re-founding", p2.style !== null && p2.style.name === "Harbor Timberwork");
+  check("chosen genomes survive re-founding", p2.sockets.find((s) => s.componentId === "db:database").genome.roof.form === "dome");
+  check("the re-founded castle hashes identical", p2.hash === r2.plan.hash);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

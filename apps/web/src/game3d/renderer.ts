@@ -343,8 +343,14 @@ class CastleGame {
       }
       case "castle_repr": {
         if (!this.founded) break;
-        const { plan, changes } = this.st.applyRepr(e.componentId, e.form, e.cited);
+        const { plan, changes } = this.st.applyRepr(e.componentId, e.form, e.cited, e.genome);
         this.applyChanges(plan, changes, historical, e.cited);
+        break;
+      }
+      case "castle_style": {
+        if (!this.founded) break;
+        const { plan, changes } = this.st.applyStyle(e.style);
+        this.applyChanges(plan, changes, historical, "the design decree");
         break;
       }
       case "file_write": {
@@ -518,10 +524,17 @@ class CastleGame {
   ): void {
     // labels for removed components come from the pre-refresh cache
     const oldLabels = new Map<string, string>();
-    for (const ch of changes) oldLabels.set(ch.componentId, this.labelOf(ch.componentId));
+    for (const ch of changes) {
+      if ("componentId" in ch) oldLabels.set(ch.componentId, this.labelOf(ch.componentId));
+    }
     this.refreshMaps();
     const socketOf = new Map(plan.sockets.map((s) => [s.componentId, s]));
     for (const ch of changes) {
+      if (ch.kind === "style") {
+        // full design-language shift: the genome engine restyles the realm
+        if (!historical) this.examine(`the castle takes the style «${ch.name}» — ${ch.cited}`);
+        continue;
+      }
       const label = this.labelOf(ch.componentId) ?? oldLabels.get(ch.componentId) ?? ch.componentId;
       switch (ch.kind) {
         case "added": {
@@ -573,6 +586,16 @@ class CastleGame {
             this.examine(
               `${label} is reformed as a ${socket.form}${ch.cited ? ` — ${ch.cited}` : ""}`,
             );
+          }
+          break;
+        }
+        case "genome": {
+          // the design vector changed: rebuild this construction in place
+          const socket = socketOf.get(ch.componentId);
+          if (!socket) break;
+          this.constructions.swapForm(ch.componentId, socket, !historical);
+          if (!historical) {
+            this.examine(`${label} is redressed${ch.cited ? ` — ${ch.cited}` : ""}`);
           }
           break;
         }

@@ -497,8 +497,28 @@ export const CastleReprEvent = z.object({
   componentId: z.string(),
   form: z.string().max(40),
   cited: z.string().max(240),
+  /**
+   * Optional design genome (bounded axes: massing, roof, material, openings,
+   * ornament, dressing). Carried opaque here; the genome law validates and
+   * clamps every field client-side — unlawful values fall to the derived
+   * default, so a malformed genome can never break the castle.
+   */
+  genome: z.record(z.unknown()).optional(),
 });
 export type CastleReprEvent = z.infer<typeof CastleReprEvent>;
+
+/**
+ * Castle Era: the Master Builder declared the castle's design language —
+ * a named, cited StyleGenome (material/roof/trim biases, nature, wall,
+ * grounds, fog). Opaque here; the genome law validates it client-side and
+ * refuses unnamed or uncited styles.
+ */
+export const CastleStyleEvent = z.object({
+  ...base,
+  type: z.literal("castle_style"),
+  style: z.record(z.unknown()),
+});
+export type CastleStyleEvent = z.infer<typeof CastleStyleEvent>;
 
 export const TokensEvent = z.object({
   ...base,
@@ -573,6 +593,7 @@ export const GameEvent = z.discriminatedUnion("type", [
   ThemePatchEvent,
   ComponentFactsEvent,
   CastleReprEvent,
+  CastleStyleEvent,
   TokensEvent,
   ContextEvent,
   CompactionEvent,

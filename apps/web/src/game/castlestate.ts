@@ -23,12 +23,15 @@ import {
   type CastlePlan,
   type Traits,
 } from "./castle.js";
+import { genomeSignature, validateBuildingGenome, validateStyleGenome } from "./genome.js";
 
 export type CastleChange =
   | { kind: "added"; componentId: string }
   | { kind: "removed"; componentId: string }
   | { kind: "form"; componentId: string; form: CastleForm; cited?: string }
-  | { kind: "traits"; componentId: string; before: Traits; after: Traits };
+  | { kind: "traits"; componentId: string; before: Traits; after: Traits }
+  | { kind: "genome"; componentId: string; cited?: string }
+  | { kind: "style"; name: string; cited: string };
 
 type FN = FileNode & { lines?: number };
 
@@ -84,7 +87,12 @@ export class CastleState {
   }
 
   /** The representation loop spoke: lawful forms land, others fall back. */
-  applyRepr(componentId: string, form: string, cited: string): { plan: CastlePlan; changes: CastleChange[] } {
+  applyRepr(
+    componentId: string,
+    form: string,
+    cited: string,
+    genome?: unknown,
+  ): { plan: CastlePlan; changes: CastleChange[] } {
     if (!this.plan) throw new Error("castle not founded");
     const ledger = this.plan.ledger;
     const entry = ledger.entries[componentId];
@@ -94,13 +102,42 @@ export class CastleState {
     const lawful = (allowed.includes(form) ? form : allowed[0]) as CastleForm;
     // the keep stays the keep — representation may retitle, never relocate
     const next = entry.ring === 0 ? ("keep" as CastleForm) : lawful;
-    if (entry.form === next && entry.cited === cited) return { plan: this.plan, changes: [] };
+    // a chosen design genome persists on the claim; unlawful fields fall
+    // back inside the validator, so what lands here is always buildable
+    let genomeChanged = false;
+    if (genome !== undefined && genome !== null) {
+      const socket = this.plan.sockets.find((s) => s.componentId === componentId);
+      const traits = socket?.traits ?? { size: 1, tint: null, banner: null, gates: 1, shafts: 1, banners: 1, storeys: 1 };
+      const validated = validateBuildingGenome(genome, comp.kind, traits, componentId, ledger.seed, this.plan.style);
+      genomeChanged = !entry.genome || genomeSignature(entry.genome) !== genomeSignature(validated);
+      entry.genome = validated;
+    }
+    if (entry.form === next && entry.cited === cited && !genomeChanged) return { plan: this.plan, changes: [] };
     entry.form = next;
     entry.cited = cited;
     const out = this.replan(ledger);
     if (!out.changes.some((c) => c.kind === "form" && c.componentId === componentId)) {
       out.changes.push({ kind: "form", componentId, form: next, cited });
     }
+    if (genomeChanged && !out.changes.some((c) => c.kind === "genome" && c.componentId === componentId)) {
+      out.changes.push({ kind: "genome", componentId, cited });
+    }
+    return out;
+  }
+
+  /**
+   * The Master Builder declared the castle's design language. A style must
+   * be named and cited or it is refused; unchosen buildings re-derive under
+   * its biases (the diff carries their genome changes), chosen ones stand.
+   */
+  applyStyle(style: unknown): { plan: CastlePlan; changes: CastleChange[] } {
+    if (!this.plan) throw new Error("castle not founded");
+    const validated = validateStyleGenome(style);
+    if (!validated) return { plan: this.plan, changes: [] };
+    const ledger = this.plan.ledger;
+    ledger.style = validated;
+    const out = this.replan(ledger);
+    out.changes.push({ kind: "style", name: validated.name, cited: validated.cited });
     return out;
   }
 
@@ -162,6 +199,9 @@ export function diffPlans(a: CastlePlan, b: CastlePlan): CastleChange[] {
     if (sa.form !== sb.form) changes.push({ kind: "form", componentId: id, form: sb.form, cited: sb.cited });
     if (JSON.stringify(sa.traits) !== JSON.stringify(sb.traits)) {
       changes.push({ kind: "traits", componentId: id, before: sa.traits, after: sb.traits });
+    }
+    if (genomeSignature(sa.genome) !== genomeSignature(sb.genome)) {
+      changes.push({ kind: "genome", componentId: id, cited: sb.cited });
     }
   }
   for (const [id, sa] of A) {

@@ -16,6 +16,15 @@
 
 import { mulberry32 } from "./map.js";
 import type { Component, ComponentEdge, ComponentGraph, ComponentKind } from "./components.js";
+import {
+  deriveGenome,
+  genomeSignature,
+  styleSignature,
+  validateBuildingGenome,
+  validateStyleGenome,
+  type BuildingGenome,
+  type StyleGenome,
+} from "./genome.js";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -111,12 +120,20 @@ export type LedgerEntry = {
   cited?: string;
   /** Component vanished from the graph — the works stand as a ruin. */
   razed?: boolean;
+  /**
+   * A CHOSEN design genome (representation loop, cited). Absent = the
+   * lawful default derives fresh each plan, so law upgrades can improve
+   * unchosen buildings while chosen ones persist forever.
+   */
+  genome?: BuildingGenome;
 };
 
 export type CastleLedger = {
   version: 1;
   seed: number;
   entries: Record<string, LedgerEntry>;
+  /** The castle's chosen design language (cited), if any ever was. */
+  style?: StyleGenome;
 };
 
 export function foundLedger(seed: number): CastleLedger {
@@ -165,6 +182,8 @@ export type Socket = {
   traits: Traits;
   razed: boolean;
   cited?: string;
+  /** Resolved design vector: the chosen genome or the derived default. */
+  genome: BuildingGenome;
 };
 
 export type Connector = {
@@ -185,6 +204,8 @@ export type CastlePlan = {
   wall: { radius: number; towers: WallTower[]; gateAngle: number };
   connectors: Connector[];
   ledger: CastleLedger;
+  /** The castle's design language (validated) or null = unstyled defaults. */
+  style: StyleGenome | null;
   hash: string;
 };
 
@@ -211,7 +232,7 @@ function posOf(ring: number, slot: number, seed: number): { x: number; z: number
  */
 export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLedger): CastlePlan {
   const ledger: CastleLedger = prior
-    ? { version: 1, seed: prior.seed, entries: { ...prior.entries } }
+    ? { version: 1, seed: prior.seed, entries: { ...prior.entries }, ...(prior.style ? { style: prior.style } : {}) }
     : foundLedger(seed);
   const S = ledger.seed;
 
@@ -276,12 +297,18 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
   // raze flags: claims whose component is gone stand as ruins
   for (const [id, e] of Object.entries(ledger.entries)) e.razed = !byId.has(id);
 
-  // sockets
+  // sockets — the design vector resolves here: a chosen genome (validated
+  // against today's law) outranks the derived default; both clamp to traits.
+  const style = validateStyleGenome(ledger.style);
   const sockets: Socket[] = Object.entries(ledger.entries)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
     .map(([id, e]) => {
       const c = byId.get(id);
       const p = e.ring === 0 ? { x: 0, z: 0, angle: angleOf(1, 0, S) } : posOf(e.ring, e.slot, S);
+      const traits: Traits = c
+        ? traitsFor(c)
+        : { size: 1, tint: null, banner: null, gates: 1, shafts: 1, banners: 1, storeys: 1 };
+      const kind = c?.kind ?? "library";
       return {
         componentId: id,
         form: e.form,
@@ -290,11 +317,12 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
         x: p.x,
         z: p.z,
         angle: p.angle,
-        traits: c
-          ? traitsFor(c)
-          : { size: 1, tint: null, banner: null, gates: 1, shafts: 1, banners: 1, storeys: 1 },
+        traits,
         razed: e.razed === true,
         cited: e.cited,
+        genome: e.genome
+          ? validateBuildingGenome(e.genome, kind, traits, id, S, style)
+          : deriveGenome(kind, traits, id, S, style),
       };
     });
 
@@ -332,6 +360,7 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
     wall: { radius: WALL_RADIUS, towers, gateAngle },
     connectors,
     ledger,
+    style,
     hash: "",
   };
   plan.hash = castleHash(plan);
@@ -375,8 +404,10 @@ export function castleHash(plan: CastlePlan): string {
     mix(
       `|${s.componentId}:${s.ring}:${s.slot}:${s.form}:${s.razed ? 1 : 0}:${s.traits.size}:${s.traits.tint ?? "-"}:${s.traits.gates}:${s.traits.shafts}`,
     );
+    mix(`~${genomeSignature(s.genome)}`);
   }
   for (const c of plan.connectors) mix(`|${c.from}>${c.to}:${c.kind}:${c.points.length}`);
   mix(`|gate:${plan.wall.gateAngle.toFixed(4)}:towers:${plan.wall.towers.length}`);
+  mix(`|style:${styleSignature(plan.style)}`);
   return (h >>> 0).toString(16).padStart(8, "0");
 }
