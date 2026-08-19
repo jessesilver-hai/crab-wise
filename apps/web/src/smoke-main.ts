@@ -26,6 +26,8 @@ export const BAKERY: FN = dir(".", [
 ]);
 
 export const BAKERY_PROBES: ProbeHit[] = [
+  // the brand color leads by measured frequency; the dark ink is the banner
+  { path: "styles.css", probe: "color", value: "#e86a33" },
   { path: "styles.css", probe: "color", value: "#e86a33" },
   { path: "styles.css", probe: "color", value: "#222831" },
   { path: "server.js", probe: "route", value: "GET /" },
@@ -103,13 +105,16 @@ async function main(): Promise<void> {
 
   if (still || big) return;
 
-  // Self-running reel: growth → repaint → representation → razing.
+  // Self-running reel: growth → repaint → representation → fact loss.
+  // (Live razing is impossible by law: no protocol event removes a path.
+  // Ruins appear only when a castle is re-founded over a shrunken repo.)
   const later = (ms: number, fn: () => void) => window.setTimeout(fn, ms);
   later(4000, () => {
     feed(ev({ type: "file_write", agentId: "w1", path: "lib/colors.js", created: true, linesAdded: 140, linesRemoved: 0, buildingKind: "house", diffSnippet: "+export const palette = []" }));
   });
   later(9000, () => {
     feed(ev({ type: "component_facts", path: "styles.css", hits: [
+      { path: "styles.css", probe: "color", value: "#3aa0ff" },
       { path: "styles.css", probe: "color", value: "#3aa0ff" },
       { path: "styles.css", probe: "color", value: "#222831" },
     ] }));

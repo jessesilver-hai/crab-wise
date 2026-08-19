@@ -59,8 +59,11 @@ export class OrbitRig {
     this.tGoal.copy(this.target);
     this.azimuth = this.azGoal = -Math.PI / 4;
     this.pitch = this.pitchGoal = 38 * DEG;
-    const need = (planRadius + 4) / Math.tan((this.camera.fov * DEG) / 2);
-    this.radius = this.rGoal = Math.min(R_MAX, Math.max(R_MIN, need * 1.02));
+    // A ground circle foreshortens vertically by sin(pitch); framing to the
+    // raw radius leaves the castle small in a letterboxed sky. 0.82 fills
+    // the frame while keeping the wall and a rim of grounds in view.
+    const need = ((planRadius + 2) / Math.tan((this.camera.fov * DEG) / 2)) * 0.82;
+    this.radius = this.rGoal = Math.min(R_MAX, Math.max(R_MIN, need));
     this.apply(this.camera.aspect || 1);
   }
 

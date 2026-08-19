@@ -205,7 +205,7 @@ class CastleGame {
     this.inspector = new Inspector(mount);
     this.inspector.onInspect = (path) => this.onInspect?.(path);
     this.cam.attachKeys();
-    this.cam.fit(GROUNDS_RADIUS);
+    this.cam.fit(GROUNDS_RADIUS * 0.66); // pre-founding: closer in, less empty field
     this.attachPointer();
 
     const ro = new ResizeObserver(() => {
