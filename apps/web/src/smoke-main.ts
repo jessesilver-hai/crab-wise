@@ -119,8 +119,17 @@ async function main(): Promise<void> {
       { path: "styles.css", probe: "color", value: "#222831" },
     ] }));
   });
+  later(12000, () => {
+    feed(ev({ type: "castle_style", style: {
+      name: "Bakers' Timberwork",
+      cited: "a hand-inlined page the color of crust — #e86a33 across 260 lines of css",
+      materialBias: ["timber", "plaster"], roofBias: ["gable", "hip"], trimBias: ["halftimber"],
+      natureSet: "oak", wallStyle: "palisade", groundTone: "meadow", fog: "none",
+    } }));
+  });
   later(14000, () => {
-    feed(ev({ type: "castle_repr", componentId: "lib:library", form: "well", cited: "the palette utils draw color like water" }));
+    feed(ev({ type: "castle_repr", componentId: "lib:library", form: "well", cited: "the palette utils draw color like water",
+      genome: { roof: { form: "dome" }, material: { family: "marble" }, dressing: { propSet: "scholar", density: 2 } } }));
   });
   later(19000, () => {
     feed(ev({ type: "component_facts", path: "db/schema.sql", hits: [] }));

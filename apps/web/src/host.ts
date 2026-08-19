@@ -177,7 +177,9 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
       } else if (event.type === "component_facts") {
         shadow.applyFacts(event.path, event.hits);
       } else if (event.type === "castle_repr") {
-        shadow.applyRepr(event.componentId, event.form, event.cited);
+        shadow.applyRepr(event.componentId, event.form, event.cited, event.genome);
+      } else if (event.type === "castle_style") {
+        shadow.applyStyle(event.style);
       }
     } catch {
       // the shadow must never break the session
@@ -202,32 +204,59 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
         (started.probeHits as Parameters<typeof buildComponentGraph>[2] | undefined) ?? [],
       );
       if (graph.components.length === 0 || abort.signal.aborted) return;
-      // one clouded reading earns one re-read; [] is lawful silence
-      let choices = await generateRepresentation({ apiKey, model, llm, graph });
-      if (choices === null && !abort.signal.aborted) {
-        choices = await generateRepresentation({ apiKey, model, llm, graph });
+      // one clouded reading earns one re-read; empty decree is lawful silence
+      let decree = await generateRepresentation({ apiKey, model, llm, graph });
+      if (decree === null && !abort.signal.aborted) {
+        decree = await generateRepresentation({ apiKey, model, llm, graph });
       }
-      if (!choices || abort.signal.aborted) return;
+      if (!decree || abort.signal.aborted) return;
       const labelOf = new Map(graph.components.map((c) => [c.id, c.label]));
-      choices.forEach((choice, i) => {
+      // the style travels first: the realm takes its design language, then
+      // the per-component redresses land against it
+      if (decree.style) {
+        const style = decree.style;
         window.setTimeout(() => {
           if (abort.signal.aborted) return;
           onEvent({
             seq: 0,
             ts: Date.now(),
-            type: "castle_repr",
-            componentId: choice.componentId,
-            form: choice.form,
-            cited: choice.cited,
+            type: "castle_style",
+            style,
           } as Parameters<typeof view.onEvent>[0]);
           onEvent({
             seq: 0,
             ts: Date.now(),
             type: "log",
             level: "info",
-            text: `⟡ The Master Builder decrees: ${labelOf.get(choice.componentId) ?? choice.componentId} shall stand as ${choice.form} — ${choice.cited}`,
+            text: `⟡ The Master Builder declares the style «${style.name}» — ${style.cited}`,
           } as Parameters<typeof view.onEvent>[0]);
-        }, 2500 + i * 1500);
+        }, 1800);
+      }
+      decree.choices.forEach((choice, i) => {
+        window.setTimeout(() => {
+          if (abort.signal.aborted) return;
+          // genome-only choices keep the component's current form
+          const form =
+            choice.form ||
+            shadow.plan?.sockets.find((s) => s.componentId === choice.componentId)?.form;
+          if (!form) return;
+          onEvent({
+            seq: 0,
+            ts: Date.now(),
+            type: "castle_repr",
+            componentId: choice.componentId,
+            form,
+            cited: choice.cited,
+            ...(choice.genome ? { genome: choice.genome } : {}),
+          } as Parameters<typeof view.onEvent>[0]);
+          onEvent({
+            seq: 0,
+            ts: Date.now(),
+            type: "log",
+            level: "info",
+            text: `⟡ The Master Builder decrees: ${labelOf.get(choice.componentId) ?? choice.componentId} shall stand as ${form}${choice.genome ? ", redressed" : ""} — ${choice.cited}`,
+          } as Parameters<typeof view.onEvent>[0]);
+        }, 3400 + i * 1500);
       });
     } catch {
       // the Builder kept his silence; lawful defaults stand

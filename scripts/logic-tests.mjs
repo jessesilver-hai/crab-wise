@@ -1118,6 +1118,19 @@ console.log("Castle Era (master builder law)");
   check("unknown components are discarded", !picks.some((p) => p.componentId === "ghost:library"));
   check("citations are mandatory", !picks.some((p) => p.componentId === "root:app-server"));
   check("garbage input yields silence", lawfulChoices("nonsense", g).length === 0 && lawfulChoices(null, g).length === 0);
+
+  // second charter: genomes ride the choices; bare citations stay noise
+  const gOnly = lawfulChoices(
+    [
+      { componentId: "lib:library", cited: "obsidian discipline in the helpers", genome: { material: { family: "obsidian" } } },
+      { componentId: "docs:docs", cited: "a bare word with no instrument" },
+      { componentId: "lib:library", form: "well", cited: "duplicate must drop" },
+    ],
+    g,
+  );
+  check("genome-only choices survive with an empty form", gOnly.some((p) => p.componentId === "lib:library" && p.form === "" && p.genome));
+  check("a bare citation is noise", !gOnly.some((p) => p.componentId === "docs:docs"));
+  check("one choice per component still holds", gOnly.filter((p) => p.componentId === "lib:library").length === 1);
 }
 
 console.log("Castle Era (persistence law)");
