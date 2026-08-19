@@ -11,10 +11,12 @@ import type { Renderer } from "../match-view.js";
 import { asLedger, type CastlePlan, type Traits } from "../game/castle.js";
 import type { Component } from "../game/components.js";
 import { CastleState, type CastleChange } from "../game/castlestate.js";
+import type { Fog as FogAxis } from "../game/genome.js";
 import { Assets } from "./assets.js";
 import { OrbitRig } from "./camera.js";
 import { ConnectorWorks } from "./connectors.js";
 import { Constructions, missingPieces, type PickInfo } from "./constructions.js";
+import { compileSignature, type CompileInput } from "./genomebuild.js";
 import { CastleGround, GROUNDS_RADIUS } from "./ground.js";
 import { Inspector, defaultWhy } from "./inspector.js";
 import { CurtainWall } from "./wall.js";
@@ -114,6 +116,8 @@ class CastleGame {
   private foundMsValue = -1;
   private wallSig = "";
   private connSig = "";
+  private groundSig = "";
+  private fogSig: FogAxis = "none";
   private pathToComp = new Map<string, string>();
   private compCache = new Map<string, Component>();
   private builders = new Map<string, string>(); // componentId → agentId hammering it
@@ -149,6 +153,7 @@ class CastleGame {
   private degraded = false;
   private particlesOff = false;
   private sparkNextAt = 0;
+  private smokeNextAt = 0;
 
   constructor(mount: HTMLElement) {
     this.mount = mount;
@@ -271,6 +276,13 @@ class CastleGame {
       formOf: (id: string) => this.constructions.formOf(id),
       labelOf: (id: string) => this.constructions.labelOf(id),
       tintOf: (id: string) => this.constructions.tintOf(id),
+      genomeOf: (id: string) =>
+        this.st.plan?.sockets.find((s) => s.componentId === id)?.genome ?? null,
+      styleOf: () => this.st.plan?.style ?? null,
+      groundStyle: () => this.ground.styleInfo(),
+      wallStyleName: () => this.wall.stats.style,
+      constructionSig: (id: string) => this.constructions.sigOf(id),
+      compileSig: (input: CompileInput) => compileSignature(this.assets, input),
       scaffoldCount: () => this.constructions.scaffoldCount(),
       towers: () => this.wall.stats.towers,
       gatePresent: () => this.wall.stats.gate,
@@ -473,7 +485,9 @@ class CastleGame {
 
   private buildCastle(plan: CastlePlan, historical: boolean): void {
     this.refreshMaps();
-    this.ground.build(plan.seed, this.assets);
+    this.constructions.planSeed = plan.seed;
+    // grounds/wall/fog first (style-aware) — constructions ask the ground height
+    this.rebuildWorks(plan);
     for (const s of plan.sockets) {
       this.constructions.add(s, this.labelOf(s.componentId), {
         theater: false,
@@ -481,7 +495,6 @@ class CastleGame {
         riseDelay: historical ? 0 : 200 + s.ring * RING_RISE_MS,
       });
     }
-    this.rebuildWorks(plan);
     const maxR = plan.sockets.reduce((m, s) => Math.max(m, Math.hypot(s.x, s.z)), plan.wall.radius);
     this.cam.fit(Math.max(14, maxR + 4));
     this.founded = true;
@@ -497,14 +510,28 @@ class CastleGame {
     }
   }
 
-  /** Rebuild wall/connector works when the plan's signature moved. */
+  /** Rebuild grounds/wall/fog/connector works when the plan's signature moved. */
   private rebuildWorks(plan: CastlePlan): void {
-    const wallSig = `${plan.wall.gateAngle.toFixed(3)}|${plan.wall.towers.length}|${plan.connectors
+    const style = plan.style;
+    const tone = style?.groundTone ?? "meadow";
+    const nature = style?.natureSet ?? "pine";
+    const groundSig = `${plan.seed}|${tone}|${nature}`;
+    if (groundSig !== this.groundSig) {
+      this.groundSig = groundSig;
+      this.ground.build(plan.seed, this.assets, tone, nature);
+    }
+    const fog = style?.fog ?? "none";
+    if (fog !== this.fogSig) {
+      this.fogSig = fog;
+      this.applyFog(fog);
+    }
+    const wallStyle = style?.wallStyle ?? "curtain";
+    const wallSig = `${wallStyle}|${plan.wall.gateAngle.toFixed(3)}|${plan.wall.towers.length}|${plan.connectors
       .map((c) => `${c.from}>${c.to}:${c.kind}:${c.points.length}`)
       .join(",")}`;
     if (wallSig !== this.wallSig) {
       this.wallSig = wallSig;
-      this.wall.build(this.assets, plan.wall, plan.connectors, this.ground.heightAt);
+      this.wall.build(this.assets, plan.wall, plan.connectors, this.ground.heightAt, wallStyle);
     }
     const connSig = plan.connectors
       .map((c) => `${c.from}>${c.to}:${c.kind}:${c.weight}:${c.points.length}`)
@@ -512,6 +539,21 @@ class CastleGame {
     if (connSig !== this.connSig) {
       this.connSig = connSig;
       this.connectors.build(this.assets, plan.connectors);
+    }
+  }
+
+  /** The fog axis, tuned so the castle stays readable at fit distance. */
+  private applyFog(fog: FogAxis): void {
+    const f = this.scene.fog as THREE.Fog;
+    if (fog === "heavy") {
+      f.near = 34;
+      f.far = 110;
+    } else if (fog === "thin") {
+      f.near = 52;
+      f.far = 140;
+    } else {
+      f.near = 70;
+      f.far = 170;
     }
   }
 
@@ -529,9 +571,13 @@ class CastleGame {
     }
     this.refreshMaps();
     const socketOf = new Map(plan.sockets.map((s) => [s.componentId, s]));
+    // one rebuild per construction per batch: added/form/traits handling
+    // already rebuilds with the socket's resolved genome
+    const rebuilt = new Set<string>();
     for (const ch of changes) {
       if (ch.kind === "style") {
-        // full design-language shift: the genome engine restyles the realm
+        // full design-language shift: grounds/nature/wall/fog restyle in
+        // rebuildWorks below; per-building genome diffs ride the same batch
         if (!historical) this.examine(`the castle takes the style «${ch.name}» — ${ch.cited}`);
         continue;
       }
@@ -542,6 +588,7 @@ class CastleGame {
           if (!socket) break;
           if (this.constructions.has(ch.componentId)) this.constructions.remove(ch.componentId);
           this.constructions.add(socket, label, { theater: !historical, instant: historical });
+          rebuilt.add(ch.componentId);
           if (!historical) {
             this.examine(`scaffolding rises for the ${socket.form} of ${label} (${source})`);
             this.assignBuilder(ch.componentId, byAgent, historical);
@@ -563,6 +610,7 @@ class CastleGame {
           if (!socket) break;
           const wasScaffold = this.constructions.stateOf(ch.componentId) === "scaffold";
           const res = this.constructions.applyTraits(ch.componentId, socket, !historical);
+          if (res.rebuilt) rebuilt.add(ch.componentId);
           if (wasScaffold) this.releaseBuilder(ch.componentId);
           if (historical) break;
           if (wasScaffold) {
@@ -581,6 +629,7 @@ class CastleGame {
           if (!socket) break;
           const wasScaffold = this.constructions.stateOf(ch.componentId) === "scaffold";
           this.constructions.swapForm(ch.componentId, socket, !historical);
+          rebuilt.add(ch.componentId);
           if (wasScaffold) this.releaseBuilder(ch.componentId);
           if (!historical) {
             this.examine(
@@ -590,10 +639,14 @@ class CastleGame {
           break;
         }
         case "genome": {
-          // the design vector changed: rebuild this construction in place
+          // the design vector changed: crossfade-rebuild in place (skip when
+          // another change in this batch already rebuilt with the new genome)
           const socket = socketOf.get(ch.componentId);
           if (!socket) break;
-          this.constructions.swapForm(ch.componentId, socket, !historical);
+          if (!rebuilt.has(ch.componentId)) {
+            this.constructions.swapForm(ch.componentId, socket, !historical);
+            rebuilt.add(ch.componentId);
+          }
           if (!historical) {
             this.examine(`${label} is redressed${ch.cited ? ` — ${ch.cited}` : ""}`);
           }
@@ -850,7 +903,7 @@ class CastleGame {
     if (!comp || !socket) return;
     const form = this.constructions.formOf(componentId) ?? socket.form;
     const why = socket.cited ?? defaultWhy(form, comp, socket.traits);
-    this.inspector.open(comp, socket, form, why);
+    this.inspector.open(comp, socket, form, why, this.st.plan?.style ?? null);
     this.examine(`${comp.label} — ${why}`);
   }
 
@@ -922,6 +975,13 @@ class CastleGame {
       this.sparkNextAt = now + 650;
       for (const p of this.constructions.scaffoldPositions().slice(0, 3)) {
         this.puff(p.x, p.y + 0.9, p.z, "spark");
+      }
+    }
+    // chimney smoke over constructions whose genome says ornament.smoke
+    if (!this.particlesOff && now >= this.smokeNextAt) {
+      this.smokeNextAt = now + 1400;
+      for (const p of this.constructions.smokeSources().slice(0, 4)) {
+        this.fx.burst(p.x, p.y, p.z, [0xbdbdb5, 0x9c9c94, 0xd6d6cf], 8, 0.55);
       }
     }
 

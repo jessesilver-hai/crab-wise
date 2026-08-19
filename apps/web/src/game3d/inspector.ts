@@ -5,6 +5,7 @@
 // app's inspect flow.
 import type { Component } from "../game/components.js";
 import type { CastleForm, Socket, Traits } from "../game/castle.js";
+import type { BuildingGenome, StyleGenome } from "../game/genome.js";
 
 const MONO = "IBM Plex Mono, monospace";
 
@@ -40,6 +41,14 @@ export function defaultWhy(form: CastleForm, c: Component, t: Traits): string {
   }
 }
 
+/** The genome's notable axes in plain words for the DESIGN section. */
+export function describeGenome(g: BuildingGenome): string {
+  const storey = `${g.storeys} storey${g.storeys === 1 ? "" : "s"}`;
+  const mat = g.material.trim === "none" ? g.material.family : `${g.material.family} + ${g.material.trim}`;
+  const dress = g.dressing.propSet === "none" ? "no dressing" : `${g.dressing.propSet} dressing`;
+  return `${g.footprint}, ${storey}, ${g.roof.form} roof (${g.roof.pitch}), ${mat}, ${dress}`;
+}
+
 export class Inspector {
   private root: HTMLDivElement;
   private panel: HTMLDivElement | null = null;
@@ -66,7 +75,7 @@ export class Inspector {
     return this.panel?.textContent ?? "";
   }
 
-  open(component: Component, socket: Socket, form: CastleForm, why: string): void {
+  open(component: Component, socket: Socket, form: CastleForm, why: string, style: StyleGenome | null = null): void {
     this.close();
     const f = component.facts;
     const el = document.createElement("div");
@@ -87,6 +96,11 @@ export class Inspector {
       `<button data-ae3d="inspector-close" style="border:none;background:none;cursor:pointer;font:inherit;color:#7a6236;">✕</button></div>` +
       `<div style="color:#7a6236;">${esc(component.kind)} · ${esc(form)}${socket.razed ? " · razed" : ""}</div>` +
       `<div data-ae3d="inspector-why" style="margin:7px 0;padding:6px 8px;background:#e7d9b4;border-radius:4px;font-style:italic;">“${esc(why)}”</div>` +
+      `<div style="color:#7a6236;">design</div>` +
+      (style
+        ? `<div data-ae3d="inspector-style" style="font-style:italic;">«${esc(style.name)}» — ${esc(style.cited)}</div>`
+        : "") +
+      `<div data-ae3d="inspector-design" style="margin-bottom:5px;">${esc(describeGenome(socket.genome))}</div>` +
       row("files", String(f.files)) +
       row("lines", String(f.lines)) +
       (f.routes > 0 ? row("routes", String(f.routes)) : "") +

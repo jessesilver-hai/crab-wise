@@ -68,6 +68,8 @@ export const MODEL_FILES: Record<string, string> = {
   resource_lumber: "props/resource_lumber.glb",
   resource_stone: "props/resource_stone.glb",
   chest: "props/chest.glb",
+  // dungeon-kit pieces the arcane prop set leans on
+  pillar: "kits/dungeon/pillar.gltf.glb",
   // characters
   Rogue: "characters/Rogue.glb",
   Barbarian: "characters/Barbarian.glb",
@@ -124,9 +126,14 @@ export const CORE_KEYS = [
   "torch_lit",
   "resource_lumber",
   "resource_stone",
+  "tent",
+  "book_single",
+  "pillar",
   // nature
   "tree_A",
   "tree_B",
+  "tree_cut",
+  "trees_B_medium",
   "rock_A",
   "rock_B",
   "rock_C",

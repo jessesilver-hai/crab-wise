@@ -6,7 +6,23 @@
  * Logs "[smoke3d] CHECK <name> PASS|FAIL" lines and a final SUMMARY the
  * external runner (run-smoke3d.mjs) exits on. */
 import type { FileNode, GameEvent, ProbeHit } from "@agent-empires/protocol";
-import { ringRadius } from "../src/game/castle.js";
+import { ringRadius, type CastleForm, type Socket, type Traits } from "../src/game/castle.js";
+import { CastleState } from "../src/game/castlestate.js";
+import {
+  FOOTPRINTS,
+  MATERIAL_FAMILIES,
+  PROP_SETS,
+  ROOF_CAPS,
+  ROOF_FORMS,
+  ROOF_OVERHANGS,
+  ROOF_PITCHES,
+  TAPERS,
+  TRIMS,
+  WINDOW_STYLES,
+  DOOR_STYLES,
+  type BuildingGenome,
+  type StyleGenome,
+} from "../src/game/genome.js";
 import { attachGameRenderer } from "../src/game3d/renderer.js";
 
 type FN = FileNode & { lines?: number };
@@ -116,6 +132,12 @@ type Debug = {
   formOf(id: string): string | null;
   labelOf(id: string): string | null;
   tintOf(id: string): { roof: string | null; banner: string | null };
+  genomeOf(id: string): BuildingGenome | null;
+  styleOf(): StyleGenome | null;
+  groundStyle(): { tone: string; nature: string; hex: string };
+  wallStyleName(): string;
+  constructionSig(id: string): string | null;
+  compileSig(input: { componentId: string; form: CastleForm; traits: Traits; genome: BuildingGenome; seed: number }): string;
   scaffoldCount(): number;
   towers(): number;
   gatePresent(): boolean;
@@ -435,6 +457,145 @@ async function clickConstruction(id: string, done: () => boolean): Promise<void>
     `open=${dbg().inspectorOpen()} label=${dbg().labelOf("root:app-server")}`,
   );
   check("inspect-examine-line", examineLog.length > examinesBefore, `examines=${examineLog.length}`);
+
+  // ============ genome redress ======================================================
+  stage("genome");
+  const sigBefore = dbg().constructionSig("root:app-web");
+  ev({
+    type: "castle_repr",
+    componentId: "root:app-web",
+    form: "manor",
+    cited: "an onion-domed obsidian manor for a storefront that trades at dusk",
+    genome: { roof: { form: "onion" }, material: { family: "obsidian" } },
+  });
+  const gVec = await until(() => {
+    const g = dbg().genomeOf("root:app-web");
+    return g?.roof.form === "onion" && g?.material.family === "obsidian";
+  }, 3000);
+  check("genome-redress-vector", gVec, JSON.stringify(dbg().genomeOf("root:app-web")));
+  const gRebuilt = await until(() => {
+    const s = dbg().constructionSig("root:app-web");
+    return s !== null && s !== sigBefore;
+  }, 4000);
+  check("genome-redress-rebuilt", gRebuilt, `${sigBefore} → ${dbg().constructionSig("root:app-web")}`);
+  // the measured tint law survives any redress: the roofcap still wears the hex
+  const tintHeld = await until(() => dbg().tintOf("root:app-web").roof === "#3aa0ff", 3000);
+  check("genome-redress-tint-law", tintHeld, JSON.stringify(dbg().tintOf("root:app-web")));
+  await clickConstruction("root:app-web", () => dbg().inspectorOpen() === dbg().labelOf("root:app-web"));
+  check(
+    "genome-inspector-design",
+    dbg().inspectorText().includes("onion roof") && dbg().inspectorText().includes("obsidian"),
+    `open=${dbg().inspectorOpen()}`,
+  );
+
+  // ============ style decree ========================================================
+  stage("style");
+  const groundBefore = dbg().groundStyle().hex;
+  const dbSigBefore = dbg().constructionSig("db:database");
+  ev({
+    type: "castle_style",
+    style: {
+      name: "Obsidian Dusk",
+      cited: "the code is compiled at night, so the castle wears the dark",
+      materialBias: ["obsidian"],
+      roofBias: ["onion"],
+      trimBias: ["glowseams"],
+      natureSet: "crystal",
+      wallStyle: "obsidian",
+      groundTone: "scorch",
+      fog: "thin",
+    },
+  });
+  const styled = await until(() => dbg().styleOf()?.name === "Obsidian Dusk", 3000);
+  check("style-decree-name", styled, JSON.stringify(dbg().styleOf()?.name ?? null));
+  const groundRestyled = await until(() => dbg().groundStyle().hex !== groundBefore, 3000);
+  check(
+    "style-grounds-restyled",
+    groundRestyled && dbg().groundStyle().tone === "scorch",
+    `${groundBefore} → ${dbg().groundStyle().hex} tone=${dbg().groundStyle().tone} nature=${dbg().groundStyle().nature}`,
+  );
+  const wallSwapped = await until(() => dbg().wallStyleName() === "obsidian", 3000);
+  check("style-wall-swapped", wallSwapped, `wall=${dbg().wallStyleName()}`);
+  // an unchosen construction re-derives under the bias and rebuilds
+  const dbRestyled = await until(
+    () => dbg().genomeOf("db:database")?.material.family === "obsidian" && dbg().constructionSig("db:database") !== dbSigBefore,
+    5000,
+  );
+  check(
+    "style-unchosen-rebuilt",
+    dbRestyled,
+    `family=${dbg().genomeOf("db:database")?.material.family} sig ${dbSigBefore} → ${dbg().constructionSig("db:database")}`,
+  );
+
+  // ============ determinism =========================================================
+  stage("determinism");
+  const stA = new CastleState();
+  const planA = stA.found(BAKERY, SEED, BAKERY_DEPS, BAKERY_PROBES);
+  const stB = new CastleState();
+  const planB = stB.found(BAKERY, SEED, BAKERY_DEPS, BAKERY_PROBES);
+  check("determinism-plan-hash", planA.hash === planB.hash && planA.hash.length === 8, `${planA.hash} vs ${planB.hash}`);
+  const sampleIds = ["root:app-web", "db:database", "tests:tests"];
+  const sigPairs = sampleIds.map((id) => {
+    const sa = planA.sockets.find((s) => s.componentId === id);
+    const sb = planB.sockets.find((s) => s.componentId === id);
+    if (!sa || !sb) return ["missing", "missing?"] as const;
+    const mk = (s: Socket, seed: number) =>
+      dbg().compileSig({ componentId: id, form: s.form, traits: s.traits, genome: s.genome, seed });
+    return [mk(sa, planA.seed), mk(sb, planB.seed)] as const;
+  });
+  check(
+    "determinism-construction-sig",
+    sigPairs.every(([a, b]) => a === b && a !== "missing"),
+    sigPairs.map(([a, b]) => `${a}${a === b ? "" : "≠" + b}`).join(" "),
+  );
+
+  // ============ axis coverage =======================================================
+  stage("axes");
+  const AXIS_FORMS: CastleForm[] = [
+    "keep", "manor", "gatehouse", "ore-mine", "enginehouse",
+    "smithy", "foundry", "training-yard", "library-tower", "signal-tower",
+  ];
+  let axisOk = true;
+  let axisDetail = "";
+  for (let i = 0; i < 10; i++) {
+    const genome: BuildingGenome = {
+      footprint: FOOTPRINTS[i % FOOTPRINTS.length]!,
+      storeys: 1 + (i % 6),
+      bays: 1 + (i % 5),
+      taper: TAPERS[i % TAPERS.length]!,
+      roof: {
+        form: ROOF_FORMS[i]!,
+        pitch: ROOF_PITCHES[i % ROOF_PITCHES.length]!,
+        overhang: ROOF_OVERHANGS[i % ROOF_OVERHANGS.length]!,
+        cap: ROOF_CAPS[i % ROOF_CAPS.length]!,
+      },
+      material: { family: MATERIAL_FAMILIES[i]!, trim: TRIMS[i % TRIMS.length]! },
+      openings: { windows: WINDOW_STYLES[i % WINDOW_STYLES.length]!, door: DOOR_STYLES[i % DOOR_STYLES.length]! },
+      ornament: { crenellated: i % 2 === 0, buttresses: i % 5, banners: i % 5, glow: i % 2 === 1, smoke: i % 3 === 0 },
+      dressing: { propSet: PROP_SETS[i]!, density: i % 4 },
+    };
+    const traits: Traits = {
+      size: ((i % 4) + 1) as Traits["size"],
+      tint: i % 2 === 0 ? "#aa3344" : null,
+      banner: "#2255aa",
+      gates: 2,
+      shafts: 2,
+      banners: 2,
+      storeys: 1 + (i % 5),
+    };
+    try {
+      const sig = dbg().compileSig({ componentId: `axis-${i}`, form: AXIS_FORMS[i]!, traits, genome, seed: SEED });
+      const [meshes, verts] = sig.split(":").map(Number);
+      if (!(meshes! > 0 && verts! > 0)) {
+        axisOk = false;
+        axisDetail += ` i=${i} empty(${sig})`;
+      }
+    } catch (err) {
+      axisOk = false;
+      axisDetail += ` i=${i} threw(${String(err)})`;
+    }
+  }
+  check("axis-coverage", axisOk, axisDetail || "10 roofs × 8 footprints × 10 families compiled non-empty");
 
   // ============ closing gates ======================================================
   check("draw-call-budget-final", dbg().drawCalls() <= 300, `calls=${dbg().drawCalls()}`);
