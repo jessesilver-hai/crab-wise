@@ -120,7 +120,9 @@ function fnv(str: string): number {
 }
 
 function pick<T>(arr: readonly T[], roll: number): T {
-  return arr[roll % arr.length]!;
+  // rolls arrive from shifted FNV words: coerce unsigned or a set sign bit
+  // indexes negatively and mints undefined axis values
+  return arr[(roll >>> 0) % arr.length]!;
 }
 
 /** Kind temperament: the lawful default leanings before any style bias. */
