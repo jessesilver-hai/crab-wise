@@ -256,7 +256,14 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
     return ra[0] - rb[0] || ra[1] - rb[1] || (ra[2] < rb[2] ? -1 : 1);
   });
   for (const c of newcomers) {
-    if (c.id === graph.rootId && !Object.values(ledger.entries).some((e) => e.ring === 0)) {
+    // The keep belongs to the software's heart. A support-kind root (a repo
+    // that is only a README so far) must not squat the motte — the origin
+    // stays bare until an app or library root arrives to claim it.
+    if (
+      c.id === graph.rootId &&
+      !SUPPORT_KINDS.has(c.kind) &&
+      !Object.values(ledger.entries).some((e) => e.ring === 0)
+    ) {
       ledger.entries[c.id] = { ring: 0, slot: 0, form: "keep" };
       taken.add("0:0");
       continue;

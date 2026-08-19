@@ -1029,6 +1029,16 @@ console.log("Castle Era (live loop)");
   const keepId = r4.plan.sockets.find((s) => s.ring === 0).componentId;
   const r5 = st.applyRepr(keepId, "manor", "make it cozy");
   check("the keep stays the keep", r5.plan.sockets.find((s) => s.componentId === keepId).form === "keep");
+
+  // bare-earth commission: the README lands first — a support root must not
+  // squat the motte; the keep waits for the app, then rises at the origin
+  const bare = new CastleState();
+  const bp0 = bare.found(dir("", [file("README.md", 20)]), 777, [], []);
+  check("a README-only realm leaves the motte bare", bp0.sockets.every((s) => s.ring !== 0));
+  const bg = bare.applyWrite("index.html", true, 80, 0);
+  const bKeep = bg.plan.sockets.find((s) => s.ring === 0);
+  check("the app claims the keep when it arrives", Boolean(bKeep) && bKeep.componentId.endsWith("app-web") && bKeep.form === "keep");
+  check("the docs pretender stands outside the keep", bg.plan.sockets.filter((s) => s.componentId.includes("docs")).every((s) => s.ring >= 2));
 }
 
 console.log("Castle Era (fact survey)");
