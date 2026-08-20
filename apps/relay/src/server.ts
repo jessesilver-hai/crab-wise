@@ -249,7 +249,20 @@ app.post<{ Params: { matchId: string } }>("/api/llm/:matchId/v1/messages", async
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(300_000),
     });
-    reply.code(res.status).header("content-type", "application/json").send(await res.text());
+    const text = await res.text();
+    // OpenRouter wraps provider failures ("model at capacity") in HTTP 200
+    // {"type":"error"} bodies; pass them on as real errors so the runtime's
+    // stumble law retries instead of crashing on a usage-less message.
+    let status = res.status;
+    if (status === 200) {
+      try {
+        const parsed = JSON.parse(text) as { type?: unknown };
+        if (parsed && parsed.type === "error") status = 502;
+      } catch {
+        status = 502;
+      }
+    }
+    reply.code(status).header("content-type", "application/json").send(text);
   } catch (err) {
     reply.code(502).send({ error: `the oracle is unreachable: ${String(err)}` });
   }

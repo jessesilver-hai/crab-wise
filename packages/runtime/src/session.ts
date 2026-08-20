@@ -514,11 +514,11 @@ You reported: "${gone?.summary ?? "no record"}". Answer The Crown's question con
 under 120 words. If you do not know, say so and name who might.`,
         messages: [{ role: "user", content: question.slice(0, 2000) }],
       });
-      this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+      this.matchTokens.total += (res.usage?.input_tokens ?? 0) + (res.usage?.output_tokens ?? 0);
       this.emitter.emit("tokens", {
         agentId,
-        inputTokens: res.usage.input_tokens,
-        outputTokens: res.usage.output_tokens,
+        inputTokens: res.usage?.input_tokens ?? 0,
+        outputTokens: res.usage?.output_tokens ?? 0,
         matchTotalTokens: this.matchTokens.total,
       });
       const reply = res.content
@@ -586,11 +586,11 @@ under 120 words. If you do not know, say so and name who might.`,
         system: WORLDSMITH_CHAT_SYSTEM(faction, tagline, enemy, grounding),
         messages: [{ role: "user", content: question.slice(0, 2000) }],
       });
-      this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+      this.matchTokens.total += (res.usage?.input_tokens ?? 0) + (res.usage?.output_tokens ?? 0);
       this.emitter.emit("tokens", {
         agentId: "worldsmith",
-        inputTokens: res.usage.input_tokens,
-        outputTokens: res.usage.output_tokens,
+        inputTokens: res.usage?.input_tokens ?? 0,
+        outputTokens: res.usage?.output_tokens ?? 0,
         matchTotalTokens: this.matchTokens.total,
       });
       const reply = res.content
@@ -878,11 +878,11 @@ ${todos.length ? `Real TODO/FIXME inscriptions (path:line: text):\n${todos.join(
         },
       ],
     });
-    this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+    this.matchTokens.total += (res.usage?.input_tokens ?? 0) + (res.usage?.output_tokens ?? 0);
     this.emitter.emit("tokens", {
       agentId: "worldsmith",
-      inputTokens: res.usage.input_tokens,
-      outputTokens: res.usage.output_tokens,
+      inputTokens: res.usage?.input_tokens ?? 0,
+      outputTokens: res.usage?.output_tokens ?? 0,
       matchTotalTokens: this.matchTokens.total,
     });
 

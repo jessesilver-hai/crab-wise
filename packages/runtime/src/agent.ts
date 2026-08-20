@@ -96,8 +96,9 @@ export class Agent {
         continue;
       }
 
-      const inputTokens = response.usage.input_tokens;
-      const outputTokens = response.usage.output_tokens;
+      // proxies can deliver usage-less messages; never crash the ledger
+      const inputTokens = response.usage?.input_tokens ?? 0;
+      const outputTokens = response.usage?.output_tokens ?? 0;
       this.matchTokens.total += inputTokens + outputTokens;
       this.emitter.emit("tokens", {
         agentId: this.id,
@@ -180,11 +181,11 @@ export class Agent {
       },
       { timeout: 90_000 },
     );
-    this.matchTokens.total += res.usage.input_tokens + res.usage.output_tokens;
+    this.matchTokens.total += (res.usage?.input_tokens ?? 0) + (res.usage?.output_tokens ?? 0);
     this.emitter.emit("tokens", {
       agentId: this.id,
-      inputTokens: res.usage.input_tokens,
-      outputTokens: res.usage.output_tokens,
+      inputTokens: res.usage?.input_tokens ?? 0,
+      outputTokens: res.usage?.output_tokens ?? 0,
       matchTotalTokens: this.matchTokens.total,
     });
     const digest = res.content
