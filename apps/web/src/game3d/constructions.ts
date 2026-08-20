@@ -540,6 +540,22 @@ export class Constructions {
       rec.built.height,
       rec.built.radius * 2,
     ).translate(0, rec.built.height / 2, 0);
+    this.settle(rec);
+  }
+
+  /** A construction never hovers: the base settles to the lowest measured
+   * ground under the built footprint (center + 8 ring samples at the built
+   * radius), sunk 0.02 for firm contact. Uphill sides bed into the slope. */
+  private settle(rec: Rec): void {
+    if (!rec.built) return;
+    const s = rec.socket;
+    const r = rec.built.radius;
+    let base = this.groundY(s.x, s.z);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      base = Math.min(base, this.groundY(s.x + Math.cos(a) * r, s.z + Math.sin(a) * r));
+    }
+    rec.root.position.y = base - 0.02;
   }
 
   private disposeBuilt(rec: Rec): void {
