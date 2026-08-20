@@ -1131,6 +1131,64 @@ console.log("Castle Era (master builder law)");
   check("genome-only choices survive with an empty form", gOnly.some((p) => p.componentId === "lib:library" && p.form === "" && p.genome));
   check("a bare citation is noise", !gOnly.some((p) => p.componentId === "docs:docs"));
   check("one choice per component still holds", gOnly.filter((p) => p.componentId === "lib:library").length === 1);
+
+  // third charter: the growth writ binds choices to the named newcomers
+  const writ = lawfulChoices(
+    [
+      { componentId: "lib:library", form: "well", cited: "a newcomer, lawfully dressed" },
+      { componentId: "docs:docs", form: "chapel", cited: "an elder outside the writ" },
+    ],
+    g,
+    new Set(["lib:library"]),
+  );
+  check("the growth writ admits the newcomer", writ.some((p) => p.componentId === "lib:library"));
+  check("the growth writ voids choices beyond it", !writ.some((p) => p.componentId === "docs:docs"));
+}
+
+console.log("Castle Era (residency law)");
+{
+  const { PURSE_LAW, foundPurse, tryWake, newlySighted, undressed, GROWTH_BATCH } = await import(
+    "../apps/web/src/game/residency.ts"
+  );
+  const { CastleState } = await import("../apps/web/src/game/castlestate.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  // the purse: counted, spaced, gold-floored — refusals spend nothing
+  const purse = foundPurse();
+  check("a fresh purse grants the first wake", tryWake(purse, 1_000, 0).allowed === true);
+  check("a granted wake is spent", purse.wakesLeft === PURSE_LAW.wakes - 1);
+  const hasty = tryWake(purse, 1_000 + PURSE_LAW.debounceMs - 1, 0);
+  check("the debounce floor refuses a hasty wake", hasty.allowed === false && hasty.reason === "debounce");
+  check("a refused wake spends nothing", purse.wakesLeft === PURSE_LAW.wakes - 1);
+  check("the floor lifts with time", tryWake(purse, 1_000 + PURSE_LAW.debounceMs, 0).allowed === true);
+  const gilt = tryWake(foundPurse(), 0, PURSE_LAW.goldCeiling);
+  check("beyond the gold ceiling taste yields to work", gilt.allowed === false && gilt.reason === "gold");
+  const drained = foundPurse();
+  for (let i = 0; i < PURSE_LAW.wakes; i++) tryWake(drained, (i + 1) * PURSE_LAW.debounceMs * 2, 0);
+  const empty = tryWake(drained, 1e12, 0);
+  check("an emptied purse refuses forever", empty.allowed === false && empty.reason === "empty");
+
+  // the watch: newcomers sighted, the undressed queue for growth decrees
+  const bakery = dir("", [file("index.html", 120), file("server.js", 240), file("README.md", 40)]);
+  const st = new CastleState();
+  const p0 = st.found(bakery, 909, [], []);
+  const known = new Set(p0.sockets.map((s) => s.componentId));
+  check("a founded castle has no newcomers", newlySighted(known, p0).length === 0);
+  const grown = st.applyWrite("lib/util.js", true, 140, 0);
+  const fresh = newlySighted(known, grown.plan);
+  check("the watch sights a risen component", fresh.length === 1 && fresh[0] === "lib:library");
+  check("a newcomer wears only derived dress", undressed(grown.plan, fresh).join(",") === "lib:library");
+  const grownLedger = structuredClone(grown.plan.ledger);
+  const dressed = st.applyRepr("lib:library", "well", "one spring of helpers", { material: { family: "marble" } });
+  check("a chosen genome leaves the undressed rolls", undressed(dressed.plan, fresh).length === 0);
+  check("growth batches stay small", GROWTH_BATCH >= 1 && GROWTH_BATCH <= 6);
+
+  // ruins: a razed claim is neither sighted nor dressed
+  const st2 = new CastleState();
+  const p2 = st2.found(bakery, 909, [], [], grownLedger);
+  check("the watch never sights a ruin", !newlySighted(new Set(), p2).includes("lib:library"));
+  check("a razed claim never queues for dress", undressed(p2, ["lib:library"]).length === 0);
 }
 
 console.log("Castle Era (persistence law)");

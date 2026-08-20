@@ -8,7 +8,13 @@ import { analyzeCensus, censusBrief } from "./game/census.js";
 import { buildComponentGraph } from "./game/components.js";
 import { CastleState } from "./game/castlestate.js";
 import { asLedger, type CastleLedger } from "./game/castle.js";
-import { generateRepresentation } from "./reprloop.js";
+import {
+  generateGrowthDecree,
+  generateMilestoneDecree,
+  generateRepresentation,
+  type BuilderDecree,
+} from "./reprloop.js";
+import { foundPurse, GROWTH_BATCH, newlySighted, PURSE_LAW, tryWake, undressed } from "./game/residency.js";
 
 export type SettlementStart = {
   repoUrl: string;
@@ -160,6 +166,17 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   // the departing ledger (and thus the persistent claims) is host-authoritative.
   const shadow = new CastleState();
 
+  // The Builder in residence: the founding decree is free; every later wake
+  // (newcomers to dress, milestones to answer) draws on the purse. The watch
+  // never blocks the session; its failures fall to lawful derived dress.
+  const purse = foundPurse();
+  const known = new Set<string>();
+  let growthQueue: string[] = [];
+  let growthTimer: number | null = null;
+  let builderBusy = false;
+  let goldSpent = 0;
+  const agentNames = new Map<string, string>();
+
   const onEvent = (event: Parameters<typeof view.onEvent>[0]) => {
     publish(event);
     view.onEvent(event, false);
@@ -184,6 +201,30 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     } catch {
       // the shadow must never break the session
     }
+    try {
+      if (event.type === "match_started" && shadow.plan) {
+        // founding sockets are the founding decree's business, not the watch's
+        for (const s of shadow.plan.sockets) known.add(s.componentId);
+      } else if ((event.type === "file_write" || event.type === "component_facts") && shadow.plan) {
+        const fresh = newlySighted(known, shadow.plan);
+        for (const id of fresh) known.add(id);
+        const dressable = undressed(shadow.plan, fresh);
+        if (dressable.length > 0) {
+          growthQueue.push(...dressable);
+          scheduleGrowth();
+        }
+      } else if (event.type === "tokens") {
+        goldSpent = event.matchTotalTokens;
+      } else if (event.type === "agent_spawned") {
+        agentNames.set(event.agentId, event.name);
+      } else if (event.type === "agent_done") {
+        void runMilestone(
+          `${agentNames.get(event.agentId) ?? "a worker"} laid down the charge: ${event.summary.slice(0, 200)}`,
+        );
+      }
+    } catch {
+      // the residency watch must never break the session
+    }
     if (event.type === "match_started") {
       // The Master Builder studies the measured ledger and may re-dress
       // components — lawfully, with citations. The castle never waits on it.
@@ -196,7 +237,63 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     }
   };
 
+  /** Stagger a decree into the stream: the style travels first, then the
+   * per-component redresses land against it. */
+  const publishDecree = (
+    decree: BuilderDecree,
+    verbs: { style: string; choice: string },
+    delays: { style: number; first: number; step: number },
+  ) => {
+    const labelOf = new Map((shadow.graph?.components ?? []).map((c) => [c.id, c.label]));
+    if (decree.style) {
+      const style = decree.style;
+      window.setTimeout(() => {
+        if (abort.signal.aborted) return;
+        onEvent({
+          seq: 0,
+          ts: Date.now(),
+          type: "castle_style",
+          style,
+        } as Parameters<typeof view.onEvent>[0]);
+        onEvent({
+          seq: 0,
+          ts: Date.now(),
+          type: "log",
+          level: "info",
+          text: `⟡ The Master Builder ${verbs.style} «${style.name}» — ${style.cited}`,
+        } as Parameters<typeof view.onEvent>[0]);
+      }, delays.style);
+    }
+    decree.choices.forEach((choice, i) => {
+      window.setTimeout(() => {
+        if (abort.signal.aborted) return;
+        // genome-only choices keep the component's current form
+        const form =
+          choice.form ||
+          shadow.plan?.sockets.find((s) => s.componentId === choice.componentId)?.form;
+        if (!form) return;
+        onEvent({
+          seq: 0,
+          ts: Date.now(),
+          type: "castle_repr",
+          componentId: choice.componentId,
+          form,
+          cited: choice.cited,
+          ...(choice.genome ? { genome: choice.genome } : {}),
+        } as Parameters<typeof view.onEvent>[0]);
+        onEvent({
+          seq: 0,
+          ts: Date.now(),
+          type: "log",
+          level: "info",
+          text: `⟡ The Master Builder ${verbs.choice}: ${labelOf.get(choice.componentId) ?? choice.componentId} shall stand as ${form}${choice.genome ? ", redressed" : ""} — ${choice.cited}`,
+        } as Parameters<typeof view.onEvent>[0]);
+      }, delays.first + i * delays.step);
+    });
+  };
+
   const runMasterBuilder = async (started: { repoTree: unknown; depEdges?: unknown; probeHits?: unknown }) => {
+    builderBusy = true;
     try {
       const graph = buildComponentGraph(
         started.repoTree as Parameters<typeof buildComponentGraph>[0],
@@ -210,56 +307,80 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
         decree = await generateRepresentation({ apiKey, model, llm, graph });
       }
       if (!decree || abort.signal.aborted) return;
-      const labelOf = new Map(graph.components.map((c) => [c.id, c.label]));
-      // the style travels first: the realm takes its design language, then
-      // the per-component redresses land against it
-      if (decree.style) {
-        const style = decree.style;
-        window.setTimeout(() => {
-          if (abort.signal.aborted) return;
-          onEvent({
-            seq: 0,
-            ts: Date.now(),
-            type: "castle_style",
-            style,
-          } as Parameters<typeof view.onEvent>[0]);
-          onEvent({
-            seq: 0,
-            ts: Date.now(),
-            type: "log",
-            level: "info",
-            text: `⟡ The Master Builder declares the style «${style.name}» — ${style.cited}`,
-          } as Parameters<typeof view.onEvent>[0]);
-        }, 1800);
-      }
-      decree.choices.forEach((choice, i) => {
-        window.setTimeout(() => {
-          if (abort.signal.aborted) return;
-          // genome-only choices keep the component's current form
-          const form =
-            choice.form ||
-            shadow.plan?.sockets.find((s) => s.componentId === choice.componentId)?.form;
-          if (!form) return;
-          onEvent({
-            seq: 0,
-            ts: Date.now(),
-            type: "castle_repr",
-            componentId: choice.componentId,
-            form,
-            cited: choice.cited,
-            ...(choice.genome ? { genome: choice.genome } : {}),
-          } as Parameters<typeof view.onEvent>[0]);
-          onEvent({
-            seq: 0,
-            ts: Date.now(),
-            type: "log",
-            level: "info",
-            text: `⟡ The Master Builder decrees: ${labelOf.get(choice.componentId) ?? choice.componentId} shall stand as ${form}${choice.genome ? ", redressed" : ""} — ${choice.cited}`,
-          } as Parameters<typeof view.onEvent>[0]);
-        }, 3400 + i * 1500);
-      });
+      publishDecree(decree, { style: "declares the style", choice: "decrees" }, { style: 1800, first: 3400, step: 1500 });
     } catch {
       // the Builder kept his silence; lawful defaults stand
+    } finally {
+      builderBusy = false;
+    }
+  };
+
+  // Choice-by-default: a burst of new works gathers, then one purse-metered
+  // wake dresses the batch. Refusals cost nothing — derived dress stands.
+  const GROWTH_GATHER_MS = 15_000;
+  const scheduleGrowth = (delay = GROWTH_GATHER_MS): void => {
+    if (growthTimer !== null || abort.signal.aborted || matchOver) return;
+    growthTimer = window.setTimeout(() => {
+      growthTimer = null;
+      void runGrowth();
+    }, delay);
+  };
+
+  const runGrowth = async () => {
+    if (abort.signal.aborted || matchOver || !shadow.plan || !shadow.graph) return;
+    if (builderBusy) return scheduleGrowth();
+    growthQueue = undressed(shadow.plan, [...new Set(growthQueue)]);
+    if (growthQueue.length === 0) return;
+    const verdict = tryWake(purse, Date.now(), goldSpent);
+    if (!verdict.allowed) {
+      // a debounced wake waits its turn; an empty or gold-closed purse
+      // disperses the queue — derived dress is lawful, waiting is not
+      if (verdict.reason === "debounce") scheduleGrowth(PURSE_LAW.debounceMs);
+      else growthQueue = [];
+      return;
+    }
+    const batch = growthQueue.slice(0, GROWTH_BATCH);
+    growthQueue = growthQueue.slice(GROWTH_BATCH);
+    builderBusy = true;
+    try {
+      const choices = await generateGrowthDecree({
+        apiKey,
+        model,
+        llm,
+        graph: shadow.graph,
+        style: shadow.plan.style,
+        newcomers: batch,
+      });
+      if (!choices || abort.signal.aborted) return;
+      publishDecree({ style: null, choices }, { style: "", choice: "returns for the new works" }, { style: 0, first: 400, step: 1200 });
+    } catch {
+      // the Builder kept his silence; derived dress stands
+    } finally {
+      builderBusy = false;
+      if (growthQueue.length > 0) scheduleGrowth();
+    }
+  };
+
+  const runMilestone = async (milestone: string) => {
+    if (abort.signal.aborted || matchOver || !shadow.plan || !shadow.graph || builderBusy) return;
+    const verdict = tryWake(purse, Date.now(), goldSpent);
+    if (!verdict.allowed) return;
+    builderBusy = true;
+    try {
+      const decree = await generateMilestoneDecree({
+        apiKey,
+        model,
+        llm,
+        graph: shadow.graph,
+        style: shadow.plan.style,
+        milestone,
+      });
+      if (!decree || abort.signal.aborted) return;
+      publishDecree(decree, { style: "amends the style to", choice: "revisits" }, { style: 400, first: 1600, step: 1200 });
+    } catch {
+      // the Builder kept his silence; what stands, stands
+    } finally {
+      builderBusy = false;
     }
   };
 
