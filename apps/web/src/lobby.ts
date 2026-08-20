@@ -300,7 +300,9 @@ async function refreshMatches(root: HTMLElement) {
       ? finished.map((m) => matchRow(m)).join("")
       : '<p class="empty-note">No records yet.</p>';
     for (const row of root.querySelectorAll<HTMLElement>(".match-row")) {
-      row.onclick = () => (location.hash = `#/match/${row.dataset.id}`);
+      // castle rows carry data-cid and their own handler (refreshCastles);
+      // binding here would stomp it and send the Crown to #/match/undefined
+      if (row.dataset.id) row.onclick = () => (location.hash = `#/match/${row.dataset.id}`);
     }
     const hallList = root.querySelector<HTMLElement>("#hall-list");
     if (hallList) {
