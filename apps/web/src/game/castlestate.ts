@@ -24,6 +24,7 @@ import {
   type Traits,
 } from "./castle.js";
 import { genomeSignature, validateBuildingGenome, validateStyleGenome } from "./genome.js";
+import { flourishSignature, signWork, validateFlourish } from "./flourish.js";
 
 export type CastleChange =
   | { kind: "added"; componentId: string }
@@ -31,7 +32,8 @@ export type CastleChange =
   | { kind: "form"; componentId: string; form: CastleForm; cited?: string }
   | { kind: "traits"; componentId: string; before: Traits; after: Traits }
   | { kind: "genome"; componentId: string; cited?: string }
-  | { kind: "style"; name: string; cited: string };
+  | { kind: "style"; name: string; cited: string }
+  | { kind: "flourish"; componentId: string; author?: string; cited?: string };
 
 type FN = FileNode & { lines?: number };
 
@@ -126,6 +128,41 @@ export class CastleState {
   }
 
   /**
+   * A worker signs the wing they worked in. The path resolves to a
+   * construction (exact file first, then directory prefix); no construction,
+   * a razed claim, or an unlawful flourish = lawful silence. Marks ride the
+   * ledger and the hash, so signed works persist and replay.
+   */
+  applyFlourish(
+    path: string,
+    mark: string,
+    author: string,
+    cited: string,
+  ): { plan: CastlePlan; changes: CastleChange[] } {
+    if (!this.plan) throw new Error("castle not founded");
+    const clean = path.replace(/^\.\/?/, "").replace(/\/+$/, "");
+    const comp =
+      this.graph?.components.find((c) => c.paths.includes(clean)) ??
+      this.graph?.components.find((c) => clean !== "" && c.paths.some((p) => p.startsWith(clean + "/")));
+    const entry = comp ? this.plan.ledger.entries[comp.id] : undefined;
+    if (!comp || !entry || entry.razed === true) return { plan: this.plan, changes: [] };
+    const f = validateFlourish({ mark, author, cited });
+    if (!f) return { plan: this.plan, changes: [] };
+    const next = signWork(entry.flourishes, f);
+    if (!next || flourishSignature(next) === flourishSignature(entry.flourishes)) {
+      return { plan: this.plan, changes: [] };
+    }
+    entry.flourishes = next;
+    const out = this.replan(this.plan.ledger);
+    // the diff reports the signature shift bare; the fold knows the signer
+    const change: CastleChange = { kind: "flourish", componentId: comp.id, author: f.author, cited: f.cited };
+    const bare = out.changes.findIndex((c) => c.kind === "flourish" && c.componentId === comp.id);
+    if (bare >= 0) out.changes[bare] = change;
+    else out.changes.push(change);
+    return out;
+  }
+
+  /**
    * The Master Builder declared the castle's design language. A style must
    * be named and cited or it is refused; unchosen buildings re-derive under
    * its biases (the diff carries their genome changes), chosen ones stand.
@@ -202,6 +239,9 @@ export function diffPlans(a: CastlePlan, b: CastlePlan): CastleChange[] {
     }
     if (genomeSignature(sa.genome) !== genomeSignature(sb.genome)) {
       changes.push({ kind: "genome", componentId: id, cited: sb.cited });
+    }
+    if (flourishSignature(sa.flourishes) !== flourishSignature(sb.flourishes)) {
+      changes.push({ kind: "flourish", componentId: id });
     }
   }
   for (const [id, sa] of A) {

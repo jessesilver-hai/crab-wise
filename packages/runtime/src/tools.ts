@@ -1,5 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { buildingKindFor, type CommandKind } from "@agent-empires/protocol";
+import { buildingKindFor, FLOURISH_MARKS, type CommandKind } from "@agent-empires/protocol";
 import { Emitter } from "./emitter.js";
 import { parseTestOutput } from "./testparse.js";
 import { heraldBattleCry, heraldVictoryTests, heraldMessage, type HeraldLexicon } from "./herald.js";
@@ -103,6 +103,20 @@ export const WORKER_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "sign_work",
+    description:
+      "Leave your maker's mark on the castle: a small cited flourish on the wing that holds a file you truly worked in this shift. Use it once your real work has landed and been verified — one mark, one line naming what you did there. The law refuses marks on files you never read or wrote.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "A file you read or wrote in that wing" },
+        mark: { type: "string", enum: [...FLOURISH_MARKS] },
+        cited: { type: "string", description: "One line naming the work you did there (<= 200 chars)" },
+      },
+      required: ["path", "mark", "cited"],
+    },
+  },
+  {
     name: "inscribe_scroll",
     description:
       "Inscribe a presentable artifact — a report, summary, table, diagram, or chart — and deliver it to The Crown's satchel as a collectible scroll. Use format \"markdown\" for prose/tables/lists, or \"svg\" for charts and diagrams (one self-contained <svg viewBox=\"…\"> using only shapes and <text>; no scripts, no external refs). Use this whenever The Crown asks to SEE something rather than just hear about it.",
@@ -133,6 +147,8 @@ export type ToolContext = {
   /** Spawn a read-only scout sub-agent; absent for scouts themselves (depth cap 1). */
   delegate?: (question: string, parentName: string) => Promise<string>;
   delegatesUsed: { count: number };
+  /** THIS agent's touched paths — the measured provenance behind sign_work. */
+  touched: Set<string>;
   stats: {
     filesRead: Set<string>;
     filesWritten: Set<string>;
@@ -190,6 +206,7 @@ export async function executeTool(
       emitter.emit("agent_status", { agentId, status: "scouting", detail: `reads ${path}`.slice(0, 160) });
       const { content, lines } = await exec.read(path);
       ctx.stats.filesRead.add(path);
+      ctx.touched.add(path);
       emitter.emit("file_read", { agentId, path, lines });
       emitter.emit("log", { agentId, level: "tool", text: `read_file ${path} (${lines} lines)` });
       const start = input.start_line ? Math.max(1, Math.floor(Number(input.start_line))) : undefined;
@@ -224,6 +241,7 @@ export async function executeTool(
       const added = newText ? newText.split("\n").length : 0;
       const removed = oldText.split("\n").length;
       ctx.stats.filesWritten.add(path);
+      ctx.touched.add(path);
       emitter.emit("file_write", {
         agentId,
         path,
@@ -247,6 +265,7 @@ export async function executeTool(
       const added = created ? newLines : Math.max(newLines - oldLines, 1);
       const removed = created ? 0 : Math.max(oldLines - newLines, newLines === oldLines ? 1 : 0);
       ctx.stats.filesWritten.add(path);
+      ctx.touched.add(path);
       emitter.emit("file_write", {
         agentId,
         path,
@@ -364,6 +383,33 @@ export async function executeTool(
         herald: heraldMessage(ctx.agentName, to, text, ctx.lexicon()),
       });
       return to ? `Message delivered to ${to}.` : "Message broadcast to all agents.";
+    }
+
+    case "sign_work": {
+      const path = String(input.path ?? "").trim();
+      const mark = String(input.mark ?? "").trim();
+      const cited = String(input.cited ?? "").trim().slice(0, 240);
+      if (!path || !cited) return "Tool error: path and cited are required.";
+      if (!(FLOURISH_MARKS as readonly string[]).includes(mark)) {
+        return `Tool error: unknown mark "${mark}" — lawful marks: ${FLOURISH_MARKS.join(", ")}.`;
+      }
+      // measured provenance: only wings this agent truly entered may be signed
+      if (!ctx.touched.has(path)) {
+        return `Tool error: you have not worked in ${path} this shift — read or write it before signing.`;
+      }
+      emitter.emit("castle_flourish", {
+        agentId,
+        author: ctx.agentName.slice(0, 60),
+        path,
+        mark,
+        cited,
+      });
+      emitter.emit("log", {
+        agentId,
+        level: "info",
+        text: `✍ ${ctx.agentName} signs the work at ${path} — a ${mark}: ${cited}`,
+      });
+      return `Your ${mark} is set upon the wing that holds ${path}.`;
     }
 
     case "inscribe_scroll": {

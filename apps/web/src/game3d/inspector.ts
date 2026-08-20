@@ -101,6 +101,13 @@ export class Inspector {
         ? `<div data-ae3d="inspector-style" style="font-style:italic;">«${esc(style.name)}» — ${esc(style.cited)}</div>`
         : "") +
       `<div data-ae3d="inspector-design" style="margin-bottom:5px;">${esc(describeGenome(socket.genome))}</div>` +
+      ((socket.flourishes ?? []).length > 0
+        ? `<div style="color:#7a6236;">signed</div><div data-ae3d="inspector-signed" style="margin-bottom:5px;">` +
+          (socket.flourishes ?? [])
+            .map((fl) => `<div style="font-style:italic;">${esc(fl.mark)} — ${esc(fl.author)}: ${esc(fl.cited)}</div>`)
+            .join("") +
+          `</div>`
+        : "") +
       row("files", String(f.files)) +
       row("lines", String(f.lines)) +
       (f.routes > 0 ? row("routes", String(f.routes)) : "") +

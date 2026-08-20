@@ -25,6 +25,7 @@ import {
   type BuildingGenome,
   type StyleGenome,
 } from "./genome.js";
+import { flourishSignature, lawfulFlourishes, type Flourish } from "./flourish.js";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -126,6 +127,8 @@ export type LedgerEntry = {
    * unchosen buildings while chosen ones persist forever.
    */
   genome?: BuildingGenome;
+  /** Signed works: maker's marks left by workers who labored here. */
+  flourishes?: Flourish[];
 };
 
 export type CastleLedger = {
@@ -184,6 +187,8 @@ export type Socket = {
   cited?: string;
   /** Resolved design vector: the chosen genome or the derived default. */
   genome: BuildingGenome;
+  /** Signed works, re-validated each plan (unlawful marks vanish). */
+  flourishes: Flourish[];
 };
 
 export type Connector = {
@@ -323,6 +328,7 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
         genome: e.genome
           ? validateBuildingGenome(e.genome, kind, traits, id, S, style)
           : deriveGenome(kind, traits, id, S, style),
+        flourishes: lawfulFlourishes(e.flourishes),
       };
     });
 
@@ -405,6 +411,7 @@ export function castleHash(plan: CastlePlan): string {
       `|${s.componentId}:${s.ring}:${s.slot}:${s.form}:${s.razed ? 1 : 0}:${s.traits.size}:${s.traits.tint ?? "-"}:${s.traits.gates}:${s.traits.shafts}`,
     );
     mix(`~${genomeSignature(s.genome)}`);
+    mix(`^${flourishSignature(s.flourishes)}`);
   }
   for (const c of plan.connectors) mix(`|${c.from}>${c.to}:${c.kind}:${c.points.length}`);
   mix(`|gate:${plan.wall.gateAngle.toFixed(4)}:towers:${plan.wall.towers.length}`);

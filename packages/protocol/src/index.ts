@@ -520,6 +520,40 @@ export const CastleStyleEvent = z.object({
 });
 export type CastleStyleEvent = z.infer<typeof CastleStyleEvent>;
 
+/**
+ * Castle Era: the maker's marks a worker may leave on a construction. The
+ * vocabulary lives here because the runtime's sign_work tool teaches it and
+ * the web-side flourish law validates against it.
+ */
+export const FLOURISH_MARKS = [
+  "lantern",
+  "garden",
+  "gargoyle",
+  "forgefire",
+  "pennant",
+  "windchime",
+  "beehive",
+  "mosaic",
+] as const;
+
+/**
+ * Castle Era: a worker signs the wing they truly worked in — a small cited
+ * flourish. `path` is a file the author touched; the castle law resolves it
+ * to a construction and refuses marks on wings the author never entered.
+ * `mark` rides loose (like genomes): the flourish law validates client-side.
+ */
+export const CastleFlourishEvent = z.object({
+  ...base,
+  type: z.literal("castle_flourish"),
+  agentId: z.string(),
+  /** The signing worker's name — replays carry it whole. */
+  author: z.string().max(60),
+  path: z.string(),
+  mark: z.string().max(24),
+  cited: z.string().max(240),
+});
+export type CastleFlourishEvent = z.infer<typeof CastleFlourishEvent>;
+
 export const TokensEvent = z.object({
   ...base,
   type: z.literal("tokens"),
@@ -594,6 +628,7 @@ export const GameEvent = z.discriminatedUnion("type", [
   ComponentFactsEvent,
   CastleReprEvent,
   CastleStyleEvent,
+  CastleFlourishEvent,
   TokensEvent,
   ContextEvent,
   CompactionEvent,

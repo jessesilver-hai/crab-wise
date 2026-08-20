@@ -133,6 +133,7 @@ type Debug = {
   labelOf(id: string): string | null;
   tintOf(id: string): { roof: string | null; banner: string | null };
   genomeOf(id: string): BuildingGenome | null;
+  flourishesOf(id: string): { mark: string; author: string; cited: string }[];
   styleOf(): StyleGenome | null;
   groundStyle(): { tone: string; nature: string; hex: string };
   wallStyleName(): string;
@@ -526,6 +527,113 @@ async function clickConstruction(id: string, done: () => boolean): Promise<void>
     dbRestyled,
     `family=${dbg().genomeOf("db:database")?.material.family} sig ${dbSigBefore} → ${dbg().constructionSig("db:database")}`,
   );
+
+  // ============ signed works ========================================================
+  stage("signed");
+  const hashUnsigned = dbg().hash();
+  const mineSig0 = dbg().constructionSig("db:database");
+  ev({
+    type: "castle_flourish",
+    agentId: "w1",
+    author: "Ashka the Unsleeping",
+    path: "db/schema.sql",
+    mark: "forgefire",
+    cited: "hammered the schema true through the night",
+  });
+  const signedUp = await until(() => dbg().flourishesOf("db:database").length === 1, 3000);
+  check(
+    "flourish-signed",
+    signedUp &&
+      dbg().flourishesOf("db:database")[0]?.mark === "forgefire" &&
+      dbg().flourishesOf("db:database")[0]?.author === "Ashka the Unsleeping",
+    JSON.stringify(dbg().flourishesOf("db:database")),
+  );
+  check("flourish-hash-moved", dbg().hash() !== hashUnsigned && dbg().hash().length === 8, `${hashUnsigned} → ${dbg().hash()}`);
+  const flMeshed = await until(() => {
+    const s = dbg().constructionSig("db:database");
+    return s !== null && s !== mineSig0;
+  }, 4000);
+  check("flourish-mesh-rebuilt", flMeshed, `${mineSig0} → ${dbg().constructionSig("db:database")}`);
+  const hashSigned = dbg().hash();
+  // an unlawful mark (outside the closed vocabulary) is lawful silence
+  ev({
+    type: "castle_flourish",
+    agentId: "w2",
+    author: "Borin Halfbeard",
+    path: "db/schema.sql",
+    mark: "graffiti",
+    cited: "scrawled his name on the shaft wall",
+  });
+  await sleep(500);
+  check(
+    "flourish-unlawful-mark-refused",
+    dbg().flourishesOf("db:database").length === 1 && dbg().hash() === hashSigned,
+    `n=${dbg().flourishesOf("db:database").length} hash=${dbg().hash()}`,
+  );
+  // a path that resolves to no construction is refused silently
+  ev({
+    type: "castle_flourish",
+    agentId: "w2",
+    author: "Borin Halfbeard",
+    path: "nowhere/void.js",
+    mark: "lantern",
+    cited: "lit a lamp in the void",
+  });
+  await sleep(500);
+  check(
+    "flourish-unknown-path-refused",
+    dbg().hash() === hashSigned && consoleErrors === 0,
+    `hash=${dbg().hash()} errors=${consoleErrors}`,
+  );
+  // a second author signs the same construction: both marks stand
+  const sigOne = dbg().constructionSig("db:database");
+  ev({
+    type: "castle_flourish",
+    agentId: "w2",
+    author: "Veyra of the Vale",
+    path: "db/schema.sql",
+    mark: "pennant",
+    cited: "raised the sync pennant over the shafts",
+  });
+  const secondSigned = await until(() => dbg().flourishesOf("db:database").length === 2, 3000);
+  const sigTwo = dbg().constructionSig("db:database");
+  check(
+    "flourish-second-author",
+    secondSigned && dbg().flourishesOf("db:database").some((fl) => fl.mark === "pennant") && sigTwo !== null && sigTwo !== sigOne,
+    `marks=${JSON.stringify(dbg().flourishesOf("db:database").map((fl) => fl.mark))} sig ${sigOne} → ${sigTwo}`,
+  );
+  // identical re-sign is silence: hash and geometry stable across the re-feed
+  const hashTwo = dbg().hash();
+  ev({
+    type: "castle_flourish",
+    agentId: "w1",
+    author: "Ashka the Unsleeping",
+    path: "db/schema.sql",
+    mark: "forgefire",
+    cited: "hammered the schema true through the night",
+  });
+  await sleep(500);
+  check(
+    "flourish-refeed-stable",
+    dbg().hash() === hashTwo && dbg().constructionSig("db:database") === sigTwo,
+    `hash=${dbg().hash()} sig=${dbg().constructionSig("db:database")}`,
+  );
+  await clickConstruction("db:database", () => dbg().inspectorOpen() === dbg().labelOf("db:database"));
+  check(
+    "flourish-inspector-signed",
+    dbg().inspectorText().includes("forgefire — Ashka the Unsleeping") &&
+      dbg().inspectorText().includes("pennant — Veyra of the Vale"),
+    `open=${dbg().inspectorOpen()}`,
+  );
+  // dismiss so later stages start clean
+  {
+    const pt = dbg().projectWorld(24, dbg().groundHeightAt(24, 24), 24);
+    firePointer("pointermove", pt.x, pt.y);
+    await sleep(120);
+    firePointer("pointerdown", pt.x, pt.y, 0, 1);
+    firePointer("pointerup", pt.x, pt.y, 0, 0);
+    await sleep(250);
+  }
 
   // ============ determinism =========================================================
   stage("determinism");

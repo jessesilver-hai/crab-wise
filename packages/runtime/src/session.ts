@@ -15,6 +15,7 @@ import { Emitter } from "./emitter.js";
 import { heraldCharge, heraldMessage, type HeraldLexicon } from "./herald.js";
 import type { Executor } from "./executor.js";
 import { SCOUT_TOOLS, type ToolContext } from "./tools.js";
+import { temperamentBrief, temperamentFor } from "./temperament.js";
 
 export type SettlementOptions = {
   /** Empty string = Crown-funded mode: calls go through the relay's LLM proxy. */
@@ -107,11 +108,12 @@ Be fast and frugal — a handful of tool calls, then stop calling tools and answ
 facts with exact file paths and line references. If the answer cannot be found, say what you
 checked and what is missing. No preamble.`;
 
-const WORKER_SYSTEM = (name: string, persona: string, repoLabel: string, peers: string[]) =>
+const WORKER_SYSTEM = (name: string, persona: string, repoLabel: string, peers: string[], temper: string) =>
   `You are ${name}${persona ? ` — ${persona}` : ""}, a software engineer working on the
 repository "${repoLabel}". Your teammates: ${peers.join(", ")}. Coordinate with send_message:
 announce what you start, share discoveries, warn before touching shared files. Keep messages
 to one or two sentences, lightly in character but technically precise.
+${temper}
 
 Work methodically:
 1. Explore only what you need (list_dir, read_file with line ranges, search). For broad
@@ -120,7 +122,9 @@ Work methodically:
 2. Edit with edit_file (exact-snippet replacement) for existing files; write_file only
    for new files or full rewrites.
 3. Verify your work: run the project's tests or build if available (run_command).
-4. When your assignment is complete and verified, stop calling tools and summarize
+4. When your assignment is complete and verified, you may leave ONE maker's mark with
+   sign_work on the wing you truly worked in (pass a file you read or wrote and one
+   line naming what you did there) — then stop calling tools and summarize
    what you did in one short paragraph.
 
 If The Crown (the human ruler) speaks to you directly, answer with send_message
@@ -265,6 +269,7 @@ export class Settlement {
       stats: this.stats,
       delegate: opts?.scout ? undefined : (question, parentName) => this.runScout(question, parentName),
       delegatesUsed: { count: 0 },
+      touched: new Set<string>(),
     };
   }
 
@@ -715,9 +720,11 @@ If work remains or something failed, dispatch another round with ASSIGN lines. R
         this.opts.signal,
       );
       const peers = names.filter((n) => n !== persona.name).concat(this.kingName);
+      // rostered temperament: deterministic per (name, match), pure flavor
+      const temper = temperamentBrief(temperamentFor(persona.name, hashString(this.opts.repoUrl)));
       jobs.push(
         worker
-          .run(WORKER_SYSTEM(persona.name, persona.persona, this.opts.repoLabel, peers), `Your assignment: ${charge}`)
+          .run(WORKER_SYSTEM(persona.name, persona.persona, this.opts.repoLabel, peers, temper), `Your assignment: ${charge}`)
           .then((summary) => {
             const text = summary.slice(0, 400) || "work complete";
             this.emitter.emit("agent_done", { agentId, summary: text });

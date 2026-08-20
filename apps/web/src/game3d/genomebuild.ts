@@ -12,6 +12,7 @@ import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { mulberry32 } from "../game/map.js";
 import type { CastleForm, Traits } from "../game/castle.js";
+import type { Flourish } from "../game/flourish.js";
 import type { BuildingGenome, MaterialFamily, PropSet } from "../game/genome.js";
 import type { Assets } from "./assets.js";
 import { modelOrBox } from "./pieces.js";
@@ -40,6 +41,8 @@ export type CompileInput = {
   traits: Traits;
   genome: BuildingGenome;
   seed: number;
+  /** Signed works: maker's marks compiled into the perimeter dressing. */
+  flourishes?: readonly Flourish[];
 };
 
 // ---------------------------------------------------------------------------
@@ -239,6 +242,13 @@ export function compileGenome(assets: Assets, input: CompileInput): Built {
     dark: () => ({ mat: mat({ color: 0x241c12, roughness: 0.95 }), geoms: [] }),
     glow: () => ({ mat: mat({ color: 0x1a140c, emissive: tone.glow, emissiveIntensity: 1.5 }), geoms: [] }),
     ivy: () => ({ mat: mat({ color: 0x4f7a3a, roughness: 1 }), geoms: [] }),
+    // flourish cloth: wears the measured banner token (never the roofcap
+    // mechanism); registered in bannerMats so banner repaints lerp it too
+    cloth: () => {
+      const m = mat({ color: hexColor(t.banner ?? "") ?? DEFAULT_BANNER, roughness: 0.7 });
+      bannerMats.push(m);
+      return { mat: m, geoms: [], role: "banner" };
+    },
     roofcap: () => {
       const m = mat({ color: hexColor(t.tint ?? "") ?? tone.roof });
       roofMats.push(m);
@@ -664,6 +674,9 @@ export function compileGenome(assets: Assets, input: CompileInput): Built {
       });
     }
   }
+  // signed works: each flourish compiles into the shared procedural buckets,
+  // so maker's marks cost zero extra draw calls beyond the cloth bucket
+  placeFlourishes(componentId, input.flourishes ?? [], footR, topY, put);
 
   // GLB placement: shared materials merge; banner cloth gets a per-construction
   // cloned material wearing the measured secondary token
@@ -917,6 +930,119 @@ function formFlavor(form: CastleForm, t: Traits, footR: number, topY: number, gl
     case "enginehouse":
     case "chapel":
       break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Signed works — flourishes. Each maker's mark is a tiny procedural build
+// anchored on the construction's perimeter, seeded from (componentId, author)
+// so the same signature always lands the same way. The door face (local +z)
+// stays clear; nothing sits inside the footprint radius except the gargoyle's
+// corner perch. All geometry rides the existing material buckets.
+// ---------------------------------------------------------------------------
+
+function placeFlourishes(
+  componentId: string,
+  flourishes: readonly Flourish[],
+  footR: number,
+  eaveY: number,
+  put: (key: string, geo: THREE.BufferGeometry) => void,
+): void {
+  for (const f of flourishes) {
+    const rng = mulberry32((hashStr(`${componentId}:${f.author}`) || 1) >>> 0);
+    let a = rng() * Math.PI * 2;
+    // keep the door approach (local +z) clear
+    if (Math.abs(Math.atan2(Math.sin(a - Math.PI / 2), Math.cos(a - Math.PI / 2))) < 0.6) a += Math.PI * 0.7;
+    const rr = footR + 0.75 + rng() * 0.45;
+    const x = Math.cos(a) * rr;
+    const z = Math.sin(a) * rr;
+    const face = Math.PI / 2 - a; // rotY turning the piece to front the spoke direction
+    switch (f.mark) {
+      case "lantern": {
+        put("beam", cylAt(0.032, 0.042, 0.52, 5, x, 0, z));
+        put("glow", boxAt(0.13, 0.14, 0.13, x, 0.52, z, face));
+        put("beam", boxAt(0.17, 0.03, 0.17, x, 0.66, z, face));
+        break;
+      }
+      case "garden": {
+        put("beam", boxAt(0.62, 0.07, 0.26, x, 0, z, face));
+        put("dark", boxAt(0.56, 0.09, 0.2, x, 0.02, z, face));
+        for (let i = -1; i <= 1; i++) {
+          const bx = x + Math.cos(face) * i * 0.17;
+          const bz = z - Math.sin(face) * i * 0.17;
+          put("ivy", placed(new THREE.IcosahedronGeometry(0.055, 0), bx, 0.1, bz));
+          put(i === 0 ? "cloth" : "trim", placed(new THREE.SphereGeometry(0.032, 5, 4), bx, 0.18, bz));
+        }
+        break;
+      }
+      case "gargoyle": {
+        // crouched block-figure perched on the nearest footprint corner
+        const ca = Math.PI / 4 + Math.round((a - Math.PI / 4) / (Math.PI / 2)) * (Math.PI / 2);
+        const gx = Math.cos(ca) * (footR + 0.22);
+        const gz = Math.sin(ca) * (footR + 0.22);
+        const gy = Math.PI / 2 - ca;
+        const ox = Math.cos(ca);
+        const oz = Math.sin(ca);
+        put("trim", boxAt(0.2, 0.12, 0.2, gx, 0, gz, gy)); // plinth
+        put("body", boxAt(0.15, 0.13, 0.2, gx, 0.12, gz, gy)); // haunches
+        put("body", boxAt(0.11, 0.09, 0.11, gx + ox * 0.07, 0.23, gz + oz * 0.07, gy)); // head
+        put("body", boxAt(0.04, 0.16, 0.12, gx - oz * 0.1, 0.16, gz + ox * 0.1, gy, 0.5));
+        put("body", boxAt(0.04, 0.16, 0.12, gx + oz * 0.1, 0.16, gz - ox * 0.1, gy, -0.5));
+        break;
+      }
+      case "forgefire": {
+        put("dark", cylAt(0.15, 0.08, 0.2, 6, x, 0, z));
+        put("beam", cylAt(0.17, 0.15, 0.05, 6, x, 0.2, z));
+        put("glow", placed(new THREE.IcosahedronGeometry(0.09, 0), x, 0.28, z));
+        break;
+      }
+      case "pennant": {
+        put("beam", cylAt(0.02, 0.027, 0.88, 5, x, 0, z));
+        put("trim", placed(new THREE.SphereGeometry(0.035, 5, 4), x, 0.9, z));
+        // cloth wedge, both windings so it reads from either side
+        const wedgeGeo = tris([
+          0, 0.86, 0, 0.32, 0.8, 0, 0, 0.72, 0,
+          0, 0.86, 0, 0, 0.72, 0, 0.32, 0.8, 0,
+        ]);
+        put("cloth", placed(wedgeGeo, x, 0, z, face));
+        break;
+      }
+      case "windchime": {
+        // hung close under the eave line, tight against the wall
+        const wx = Math.cos(a) * (footR + 0.18);
+        const wz = Math.sin(a) * (footR + 0.18);
+        const wy = Math.max(0.55, eaveY - 0.06);
+        const tang = face + Math.PI / 2;
+        put("beam", boxAt(0.34, 0.035, 0.035, wx, wy, wz, tang));
+        for (let i = -1; i <= 1; i++) {
+          const bx = wx + Math.cos(tang) * i * 0.11;
+          const bz = wz - Math.sin(tang) * i * 0.11;
+          const len = 0.14 + 0.05 * ((i + 1) % 3);
+          put("trim", boxAt(0.026, len, 0.026, bx, wy - len, bz));
+        }
+        break;
+      }
+      case "beehive": {
+        put("beam", cylAt(0.085, 0.11, 0.15, 6, x, 0, z));
+        const dome = new THREE.SphereGeometry(0.16, 8, 5, 0, Math.PI * 2, 0, Math.PI / 2).scale(1, 1.05, 1);
+        put("trim", placed(dome, x, 0.15, z));
+        put("dark", boxAt(0.06, 0.05, 0.06, x + Math.cos(a) * 0.13, 0.17, z + Math.sin(a) * 0.13, face));
+        break;
+      }
+      case "mosaic": {
+        const pat = ["cloth", "trim", "dark"] as const;
+        for (let i = -1; i <= 1; i++) {
+          for (let j = -1; j <= 1; j++) {
+            const ox = i * 0.13;
+            const oz = j * 0.13;
+            const tx = x + ox * Math.cos(face) + oz * Math.sin(face);
+            const tz = z - ox * Math.sin(face) + oz * Math.cos(face);
+            put(pat[(i + j * 2 + 9) % 3]!, boxAt(0.11, 0.028, 0.11, tx, 0, tz, face));
+          }
+        }
+        break;
+      }
+    }
   }
 }
 

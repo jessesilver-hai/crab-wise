@@ -441,6 +441,21 @@ export class Constructions {
     this.beginSwap(rec, { form: socket.form, traits: socket.traits, state: rec.state === "rubble" ? "rubble" : "built" });
   }
 
+  /**
+   * Signed-works fold: refresh the socket and rebuild in place so the new
+   * maker's marks stand. Scaffold/rubble just keep the socket — their own
+   * later rebuild compiles the flourishes. Returns whether geometry rebuilt.
+   */
+  applyFlourishes(id: string, socket: Socket, animate: boolean): boolean {
+    const rec = this.recs.get(id);
+    if (!rec) return false;
+    rec.socket = socket;
+    if (rec.state !== "built") return false;
+    this.rebuild(rec);
+    if (animate) this.puffAt(rec, "shimmer");
+    return true;
+  }
+
   /** Collapse to rubble. Returns false when it was still scaffolding. */
   raze(id: string, socket: Socket, animate: boolean): boolean {
     const rec = this.recs.get(id);
@@ -511,6 +526,7 @@ export class Constructions {
         traits: rec.traits,
         genome: rec.socket.genome,
         seed: this.planSeed,
+        flourishes: rec.socket.flourishes,
       });
     }
     rec.builtSize = rec.traits.size;

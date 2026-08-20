@@ -197,6 +197,8 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
         shadow.applyRepr(event.componentId, event.form, event.cited, event.genome);
       } else if (event.type === "castle_style") {
         shadow.applyStyle(event.style);
+      } else if (event.type === "castle_flourish") {
+        shadow.applyFlourish(event.path, event.mark, event.author, event.cited);
       }
     } catch {
       // the shadow must never break the session

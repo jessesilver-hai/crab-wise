@@ -278,6 +278,8 @@ class CastleGame {
       tintOf: (id: string) => this.constructions.tintOf(id),
       genomeOf: (id: string) =>
         this.st.plan?.sockets.find((s) => s.componentId === id)?.genome ?? null,
+      flourishesOf: (id: string) =>
+        this.st.plan?.sockets.find((s) => s.componentId === id)?.flourishes ?? [],
       styleOf: () => this.st.plan?.style ?? null,
       groundStyle: () => this.ground.styleInfo(),
       wallStyleName: () => this.wall.stats.style,
@@ -357,6 +359,12 @@ class CastleGame {
         if (!this.founded) break;
         const { plan, changes } = this.st.applyRepr(e.componentId, e.form, e.cited, e.genome);
         this.applyChanges(plan, changes, historical, e.cited);
+        break;
+      }
+      case "castle_flourish": {
+        if (!this.founded) break;
+        const { plan, changes } = this.st.applyFlourish(e.path, e.mark, e.author, e.cited);
+        this.applyChanges(plan, changes, historical, e.path);
         break;
       }
       case "castle_style": {
@@ -649,6 +657,24 @@ class CastleGame {
           }
           if (!historical) {
             this.examine(`${label} is redressed${ch.cited ? ` — ${ch.cited}` : ""}`);
+          }
+          break;
+        }
+        case "flourish": {
+          // signed works: rebuild the construction so the maker's mark stands
+          // (skip when this batch already rebuilt it with the new socket)
+          const socket = socketOf.get(ch.componentId);
+          if (!socket) break;
+          if (!rebuilt.has(ch.componentId)) {
+            if (this.constructions.applyFlourishes(ch.componentId, socket, !historical)) {
+              rebuilt.add(ch.componentId);
+            }
+          }
+          if (!historical && ch.author) {
+            const mark = socket.flourishes.find((f) => f.author === ch.author)?.mark ?? "mark";
+            this.examine(
+              `${ch.author} signs the ${socket.form} of ${label} with a ${mark}${ch.cited ? ` — ${ch.cited}` : ""}`,
+            );
           }
           break;
         }

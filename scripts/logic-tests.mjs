@@ -125,6 +125,7 @@ const ctx = (over = {}) => ({
   sendMessage: () => {},
   stats: { filesRead: new Set(), filesWritten: new Set(), maxFailuresSeen: 0, lastFailedCount: 0, lastTestGreen: false },
   delegatesUsed: { count: 0 },
+  touched: new Set(),
   ...over,
 });
 
@@ -1189,6 +1190,131 @@ console.log("Castle Era (residency law)");
   const p2 = st2.found(bakery, 909, [], [], grownLedger);
   check("the watch never sights a ruin", !newlySighted(new Set(), p2).includes("lib:library"));
   check("a razed claim never queues for dress", undressed(p2, ["lib:library"]).length === 0);
+}
+
+console.log("Castle Era (flourish law)");
+{
+  const { validateFlourish, signWork, lawfulFlourishes, flourishSignature } = await import(
+    "../apps/web/src/game/flourish.ts"
+  );
+  const { CastleState } = await import("../apps/web/src/game/castlestate.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  check("an unlawful mark does not exist", validateFlourish({ mark: "graffiti", author: "A", cited: "x" }) === null);
+  check(
+    "an unsigned or uncited mark does not exist",
+    validateFlourish({ mark: "lantern", author: "", cited: "x" }) === null &&
+      validateFlourish({ mark: "lantern", author: "A", cited: "" }) === null,
+  );
+  check("a lawful flourish validates", validateFlourish({ mark: "lantern", author: "Ashka", cited: "forged the lexer" })?.mark === "lantern");
+
+  const one = signWork(undefined, { mark: "lantern", author: "Ashka", cited: "forged the lexer" });
+  const two = signWork(one, { mark: "garden", author: "Veyra", cited: "tended the docs" });
+  const three = signWork(two, { mark: "beehive", author: "Odran", cited: "polished the halls" });
+  check("three authors may sign one construction", three.length === 3);
+  check("a fourth author is refused", signWork(three, { mark: "mosaic", author: "Imre", cited: "late" }) === null);
+  const resigned = signWork(three, { mark: "mosaic", author: "Ashka", cited: "returned to re-lay the door" });
+  check(
+    "re-signing replaces the author's earlier mark",
+    resigned.length === 3 && resigned.some((f) => f.author === "Ashka" && f.mark === "mosaic") && !resigned.some((f) => f.mark === "lantern"),
+  );
+  check("signatures name mark and author stably", flourishSignature(two) === "lantern@Ashka+garden@Veyra");
+  check("no marks reads unsigned", flourishSignature([]) === "unsigned" && flourishSignature(undefined) === "unsigned");
+  check(
+    "ledger-borne garbage is shed",
+    lawfulFlourishes([{ mark: "lantern", author: "A", cited: "x" }, "junk", { mark: "voidmark", author: "B", cited: "y" }]).length === 1,
+  );
+
+  // live fold: sign through the state, refuse ghosts, ride the hash + ledger
+  const bakery = dir("", [
+    file("index.html", 120),
+    file("styles.css", 260),
+    dir("db", [file("db/schema.sql", 90)]),
+    file("README.md", 40),
+  ]);
+  const st = new CastleState();
+  const p0 = st.found(bakery, 555, [], []);
+  const h0 = p0.hash;
+  const r1 = st.applyFlourish("db/schema.sql", "forgefire", "Ashka the Unsleeping", "sank both shafts by hand");
+  check(
+    "a signed work lands and is reported",
+    r1.changes.some((c) => c.kind === "flourish" && c.componentId === "db:database" && c.author === "Ashka the Unsleeping"),
+  );
+  check(
+    "the mark stands on the socket",
+    r1.plan.sockets.find((s) => s.componentId === "db:database").flourishes.some((f) => f.mark === "forgefire"),
+  );
+  check("the castle hash answers the signature", r1.plan.hash !== h0);
+  const rDir = st.applyFlourish("db", "beehive", "Veyra Signal-Bearer", "swept the mine floor");
+  check("a directory path resolves to its wing", rDir.changes.some((c) => c.kind === "flourish" && c.componentId === "db:database"));
+  const ghost = st.applyFlourish("phantom/none.js", "lantern", "Odran", "never was");
+  check("a pathless mark is refused", ghost.changes.length === 0);
+  const dup = st.applyFlourish("db/schema.sql", "forgefire", "Ashka the Unsleeping", "sank both shafts by hand");
+  check("an identical re-sign is silence", dup.changes.length === 0);
+
+  // persistence: marks ride the ledger across re-foundings, hash identical
+  const st2 = new CastleState();
+  const p2 = st2.found(bakery, 555, [], [], structuredClone(rDir.plan.ledger));
+  check(
+    "signed works survive re-founding",
+    p2.sockets.find((s) => s.componentId === "db:database").flourishes.length === 2,
+  );
+  check("the re-founded castle hashes identical", p2.hash === rDir.plan.hash);
+
+  // a shrunken repo leaves a ruin; ruins cannot be signed
+  const shrunk = dir("", [file("index.html", 120), file("styles.css", 260), file("README.md", 40)]);
+  const st3 = new CastleState();
+  st3.found(shrunk, 555, [], [], structuredClone(rDir.plan.ledger));
+  const ruin = st3.applyFlourish("db/schema.sql", "lantern", "Imre", "haunts the ruin");
+  check("a ruin cannot be signed", ruin.changes.length === 0);
+}
+
+console.log("Castle Era (signed works law)");
+{
+  const { FLOURISH_MARKS } = await import("../packages/protocol/src/index.ts");
+  const { TEMPERAMENTS, temperamentFor, temperamentBrief } = await import(
+    "../packages/runtime/src/temperament.ts"
+  );
+  const { executeTool } = await import("../packages/runtime/src/tools.ts");
+  const { Emitter } = await import("../packages/runtime/src/emitter.ts");
+
+  const t1 = temperamentFor("Ashka the Unsleeping", 777);
+  check("temperaments are deterministic", t1.name === temperamentFor("Ashka the Unsleeping", 777).name);
+  check(
+    "a roster draws more than one temperament",
+    new Set(["Ashka", "Veyra", "Odran", "Imre", "Berta", "Corin", "Aldric", "Sable"].map((n) => temperamentFor(n, 777).name)).size >= 3,
+  );
+  check(
+    "temperaments lean only on lawful marks",
+    TEMPERAMENTS.every((t) => t.marks.every((m) => FLOURISH_MARKS.includes(m))),
+  );
+  check("the temperament brief teaches the instrument", /sign_work/.test(temperamentBrief(t1)));
+
+  // the sign_work tool: measured provenance or refusal
+  const events = [];
+  const ctx = {
+    exec: {},
+    emitter: new Emitter((e) => events.push(e)),
+    agentId: "w1",
+    agentName: "Ashka the Unsleeping",
+    lexicon: () => undefined,
+    sendMessage: () => {},
+    delegatesUsed: { count: 0 },
+    touched: new Set(["src/lexer.js"]),
+    stats: { filesRead: new Set(), filesWritten: new Set(), maxFailuresSeen: 0, lastFailedCount: 0, lastTestGreen: false },
+  };
+  const refused = await executeTool(ctx, "sign_work", { path: "src/parser.js", mark: "lantern", cited: "x" });
+  check("signing an untouched wing is refused", /have not worked/.test(refused));
+  const badmark = await executeTool(ctx, "sign_work", { path: "src/lexer.js", mark: "graffiti", cited: "x" });
+  check("an unlawful mark is refused at the tool", /unknown mark/.test(badmark));
+  const signed = await executeTool(ctx, "sign_work", { path: "src/lexer.js", mark: "forgefire", cited: "forged the lexer whole" });
+  check("a lawful signing is confirmed", /forgefire/.test(signed));
+  check(
+    "a lawful signing emits castle_flourish",
+    events.some((e) => e.type === "castle_flourish" && e.author === "Ashka the Unsleeping" && e.mark === "forgefire" && e.path === "src/lexer.js"),
+  );
+  check("no event leaks from refusals", events.filter((e) => e.type === "castle_flourish").length === 1);
 }
 
 console.log("Castle Era (persistence law)");
