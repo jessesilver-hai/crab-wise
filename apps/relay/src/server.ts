@@ -215,11 +215,44 @@ app.post<{ Params: { matchId: string; op: string } }>(
 // --- Crown-funded LLM proxy (host-only, bearer hostToken) ---------------------
 // The site pays for inference: requests are forwarded to OpenRouter's
 // Anthropic-compatible endpoint with the server-held key, model pinned.
+// Succession law: if the funded mind fails (capacity, overload, 5xx), the
+// same request is retried once on the fallback mind — one OpenRouter key
+// covers both. Only when both fail does a 502 reach the stumble law.
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
 const FUNDED_MODEL = process.env.FUNDED_MODEL ?? "x-ai/grok-4.6";
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL ?? "anthropic/claude-opus-5";
 const MAX_LLM_CALLS_PER_MATCH = Number(process.env.MAX_LLM_CALLS_PER_MATCH ?? 400);
 const llmCalls = new Map<string, number>();
+
+/** One upstream call. OpenRouter wraps provider failures ("model at capacity")
+ * in HTTP 200 {"type":"error"} bodies; unwrap them to real statuses so callers
+ * and the runtime's stumble law see the truth. */
+async function callFunded(body: Record<string, unknown>, model: string): Promise<{ status: number; text: string }> {
+  const res = await fetch("https://openrouter.ai/api/v1/messages", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+      "http-referer": "https://crab-wise.fly.dev",
+      "x-title": "Agent Empires",
+    },
+    body: JSON.stringify({ ...body, model }),
+    signal: AbortSignal.timeout(300_000),
+  });
+  const text = await res.text();
+  let status = res.status;
+  if (status === 200) {
+    try {
+      const parsed = JSON.parse(text) as { type?: unknown };
+      if (parsed && parsed.type === "error") status = 502;
+    } catch {
+      status = 502;
+    }
+  }
+  return { status, text };
+}
 
 app.post<{ Params: { matchId: string } }>("/api/llm/:matchId/v1/messages", async (req, reply) => {
   if (!OPENROUTER_API_KEY) return reply.code(503).send({ error: "the Crown's coffers are closed" });
@@ -234,36 +267,23 @@ app.post<{ Params: { matchId: string } }>("/api/llm/:matchId/v1/messages", async
   llmCalls.set(req.params.matchId, calls);
 
   const body = req.body as Record<string, unknown>;
-  body.model = FUNDED_MODEL;
   if (typeof body.max_tokens !== "number" || body.max_tokens > 16_000) body.max_tokens = 16_000;
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/messages", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-        "http-referer": "https://crab-wise.fly.dev",
-        "x-title": "Agent Empires",
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(300_000),
-    });
-    const text = await res.text();
-    // OpenRouter wraps provider failures ("model at capacity") in HTTP 200
-    // {"type":"error"} bodies; pass them on as real errors so the runtime's
-    // stumble law retries instead of crashing on a usage-less message.
-    let status = res.status;
-    if (status === 200) {
-      try {
-        const parsed = JSON.parse(text) as { type?: unknown };
-        if (parsed && parsed.type === "error") status = 502;
-      } catch {
-        status = 502;
-      }
+    let out = await callFunded(body, FUNDED_MODEL);
+    if ((out.status === 429 || out.status >= 500) && FALLBACK_MODEL) {
+      req.log.warn({ matchId: req.params.matchId, status: out.status }, "funded mind failed; the fallback mind answers");
+      const second = await callFunded(body, FALLBACK_MODEL);
+      if (second.status === 200) out = second;
     }
-    reply.code(status).header("content-type", "application/json").send(text);
+    reply.code(out.status).header("content-type", "application/json").send(out.text);
   } catch (err) {
+    // the primary fetch itself failed (network, timeout) — one succession try
+    try {
+      const second = await callFunded(body, FALLBACK_MODEL);
+      return reply.code(second.status).header("content-type", "application/json").send(second.text);
+    } catch {
+      // both minds beyond the veil
+    }
     reply.code(502).send({ error: `the oracle is unreachable: ${String(err)}` });
   }
 });
