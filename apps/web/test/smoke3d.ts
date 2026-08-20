@@ -317,7 +317,7 @@ async function clickConstruction(id: string, done: () => boolean): Promise<void>
 
   // ============ isomorphism-repaint ================================================
   stage("repaint");
-  check("manor-measured-tint", dbg().tintOf("root:app-web").roof === "#e86a33", JSON.stringify(dbg().tintOf("root:app-web")));
+  check("manor-measured-tint", dbg().tintOf("root:file:styles.css").roof === "#e86a33", JSON.stringify(dbg().tintOf("root:file:styles.css")));
   ev({
     type: "component_facts",
     path: "styles.css",
@@ -326,8 +326,8 @@ async function clickConstruction(id: string, done: () => boolean): Promise<void>
       { path: "styles.css", probe: "color", value: "#3aa0ff" },
     ],
   });
-  const repainted = await until(() => dbg().tintOf("root:app-web").roof === "#3aa0ff", 2000);
-  check("repaint-within-2s", repainted, JSON.stringify(dbg().tintOf("root:app-web")));
+  const repainted = await until(() => dbg().tintOf("root:file:styles.css").roof === "#3aa0ff", 2000);
+  check("repaint-within-2s", repainted, JSON.stringify(dbg().tintOf("root:file:styles.css")));
   check(
     "repaint-examine-line",
     examineLog.some((l) => /the manor of .+ repainted to #3aa0ff \(styles\.css\)/.test(l)),
@@ -461,28 +461,28 @@ async function clickConstruction(id: string, done: () => boolean): Promise<void>
 
   // ============ genome redress ======================================================
   stage("genome");
-  const sigBefore = dbg().constructionSig("root:app-web");
+  const sigBefore = dbg().constructionSig("root:file:styles.css");
   ev({
     type: "castle_repr",
-    componentId: "root:app-web",
+    componentId: "root:file:styles.css",
     form: "manor",
     cited: "an onion-domed obsidian manor for a storefront that trades at dusk",
     genome: { roof: { form: "onion" }, material: { family: "obsidian" } },
   });
   const gVec = await until(() => {
-    const g = dbg().genomeOf("root:app-web");
+    const g = dbg().genomeOf("root:file:styles.css");
     return g?.roof.form === "onion" && g?.material.family === "obsidian";
   }, 3000);
-  check("genome-redress-vector", gVec, JSON.stringify(dbg().genomeOf("root:app-web")));
+  check("genome-redress-vector", gVec, JSON.stringify(dbg().genomeOf("root:file:styles.css")));
   const gRebuilt = await until(() => {
-    const s = dbg().constructionSig("root:app-web");
+    const s = dbg().constructionSig("root:file:styles.css");
     return s !== null && s !== sigBefore;
   }, 4000);
-  check("genome-redress-rebuilt", gRebuilt, `${sigBefore} → ${dbg().constructionSig("root:app-web")}`);
+  check("genome-redress-rebuilt", gRebuilt, `${sigBefore} → ${dbg().constructionSig("root:file:styles.css")}`);
   // the measured tint law survives any redress: the roofcap still wears the hex
-  const tintHeld = await until(() => dbg().tintOf("root:app-web").roof === "#3aa0ff", 3000);
-  check("genome-redress-tint-law", tintHeld, JSON.stringify(dbg().tintOf("root:app-web")));
-  await clickConstruction("root:app-web", () => dbg().inspectorOpen() === dbg().labelOf("root:app-web"));
+  const tintHeld = await until(() => dbg().tintOf("root:file:styles.css").roof === "#3aa0ff", 3000);
+  check("genome-redress-tint-law", tintHeld, JSON.stringify(dbg().tintOf("root:file:styles.css")));
+  await clickConstruction("root:file:styles.css", () => dbg().inspectorOpen() === dbg().labelOf("root:file:styles.css"));
   check(
     "genome-inspector-design",
     dbg().inspectorText().includes("onion roof") && dbg().inspectorText().includes("obsidian"),

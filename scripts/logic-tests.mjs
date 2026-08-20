@@ -888,10 +888,12 @@ console.log("Castle Era (component law)");
   ];
   const g = buildComponentGraph(bakery, edges, probes);
   const ids = g.components.map((c) => c.id);
-  check("bakery groups into six components", g.components.length === 6, ids.join(","));
+  check("bakery groups into eight components (wards law)", g.components.length === 8, ids.join(","));
   check("library sliver folds into the web front", ids.includes("root:app-web") && !ids.includes("root:library"));
+  const styles = g.components.find((c) => c.id === "root:file:styles.css");
+  check("the stylesheet stands as its own ward", Boolean(styles) && styles.label === "styles.css");
+  check("palette is measured, deduped, frequency-ordered", styles.facts.palette[0] === "#e86a33" && styles.facts.palette[1] === "#222831");
   const web = g.components.find((c) => c.id === "root:app-web");
-  check("palette is measured, deduped, frequency-ordered", web.facts.palette[0] === "#e86a33" && web.facts.palette[1] === "#222831");
   check("web front owns the folded client script", web.paths.includes("app.js"));
   const server = g.components.find((c) => c.id === "root:app-server");
   check("routes are counted on the server", server.facts.routes === 3);
@@ -975,9 +977,9 @@ console.log("Castle Era (plan law)");
   // nothing moves, the hash records the difference
   const g3 = mk(true, "#3aa0ff");
   const p3 = planCastle(g3, SEED, p2.ledger);
-  const manor2 = p2.sockets.find((s) => s.componentId === "root:app-web");
-  const manor3 = p3.sockets.find((s) => s.componentId === "root:app-web");
-  check("css color becomes the manor tint", manor2.traits.tint === "#e86a33" && manor3.traits.tint === "#3aa0ff");
+  const manor2 = p2.sockets.find((s) => s.componentId === "root:file:styles.css");
+  const manor3 = p3.sockets.find((s) => s.componentId === "root:file:styles.css");
+  check("css color becomes the stylesheet ward's tint", manor2.traits.tint === "#e86a33" && manor3.traits.tint === "#3aa0ff");
   check("a repaint moves nothing", manor3.ring === manor2.ring && manor3.slot === manor2.slot && p3.sockets.length === p2.sockets.length);
   check("a repaint changes the hash", p3.hash !== p2.hash);
 
@@ -1022,13 +1024,13 @@ console.log("Castle Era (live loop)");
 
   // THE loop: repaint css → exactly one traits diff, tint flips, nothing moves
   const r1 = st.applyFacts("styles.css", [{ path: "styles.css", probe: "color", value: "#3aa0ff" }]);
-  const tintChange = r1.changes.find((c) => c.kind === "traits" && c.componentId === "root:app-web");
+  const tintChange = r1.changes.find((c) => c.kind === "traits" && c.componentId === "root:file:styles.css");
   check("repaint yields a traits diff", Boolean(tintChange), JSON.stringify(r1.changes));
   check("tint flips to the measured color", tintChange && tintChange.before.tint === "#e86a33" && tintChange.after.tint === "#3aa0ff");
   check("repaint adds and removes nothing", r1.changes.every((c) => c.kind === "traits"));
   check("repaint moves nothing", (() => {
-    const a = plan0.sockets.find((s) => s.componentId === "root:app-web");
-    const b = r1.plan.sockets.find((s) => s.componentId === "root:app-web");
+    const a = plan0.sockets.find((s) => s.componentId === "root:file:styles.css");
+    const b = r1.plan.sockets.find((s) => s.componentId === "root:file:styles.css");
     return a.ring === b.ring && a.slot === b.slot;
   })());
 
@@ -1588,6 +1590,67 @@ console.log("Castle Era (genome law)");
   check("the style survives re-founding", p2.style !== null && p2.style.name === "Harbor Timberwork");
   check("chosen genomes survive re-founding", p2.sockets.find((s) => s.componentId === "db:database").genome.roof.form === "dome");
   check("the re-founded castle hashes identical", p2.hash === r2.plan.hash);
+}
+
+// ---------------------------------------------------------------------------
+// Wards law: a flat repo's loose code files each raise their own ward —
+// new features must RISE as new buildings, not vanish into one blob.
+// ---------------------------------------------------------------------------
+{
+  console.log("\nwards law");
+  const { buildComponentGraph } = await import("../apps/web/src/game/components.ts");
+  const { planCastle } = await import("../apps/web/src/game/castle.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+
+  // the snake settlement before and after a masonry-law commission
+  const before = dir("", [file("index.html", 210), file("snake.js", 180), file("README.md", 30)]);
+  const after = dir("", [
+    file("index.html", 210),
+    file("snake.js", 180),
+    file("pause-button.css", 8),
+    file("pause-button.js", 60),
+    file("score-display.js", 45),
+    file("speed-up.js", 38),
+    file("README.md", 30),
+  ]);
+
+  const gB = buildComponentGraph(before, [], []);
+  const gA = buildComponentGraph(after, [], []);
+  const idsA = gA.components.map((c) => c.id);
+  check("each feature file raises its own ward", idsA.includes("root:file:score-display.js") && idsA.includes("root:file:speed-up.js"), idsA.join(","));
+  check("the anchor keeps the group's historic id", idsA.includes("root:library"));
+  const anchor = gA.components.find((c) => c.id === "root:library");
+  check("the anchor is the alphabetical first", anchor.paths.length === 1 && anchor.paths[0] === "pause-button.js", anchor.paths.join(","));
+  const hall = gA.components.find((c) => c.id === "root:app-web");
+  check("a shed under ten lines leans on the hall", hall.paths.includes("pause-button.css"), hall.paths.join(","));
+  check("docs stay chunky", idsA.includes("root:docs") && !idsA.includes("root:file:README.md"));
+  const ward = gA.components.find((c) => c.id === "root:file:score-display.js");
+  check("a ward is labeled by its file", ward.label === "score-display.js" && ward.facts.lines === 45);
+  check("a file ward's id survives regrouping", gB.components.some((c) => c.id === "root:file:snake.js") && idsA.includes("root:file:snake.js"));
+
+  // growth: the commission adds three sockets and moves nothing
+  const SEED = 20260820;
+  const pB = planCastle(gB, SEED);
+  const pA = planCastle(gA, SEED, pB.ledger);
+  check("the wards claim fresh sockets", pA.sockets.length === pB.sockets.length + 3, `${pB.sockets.length} → ${pA.sockets.length}`);
+  check("prior wards stand fast through growth", pB.sockets.every((s) => {
+    const t = pA.sockets.find((x) => x.componentId === s.componentId);
+    return t && t.ring === s.ring && t.slot === s.slot;
+  }));
+
+  // a structured repo keeps its chunky boundaries — no file wards
+  const mono = dir("", [
+    dir("apps", [dir("apps/web", [
+      file("apps/web/main.ts", 300),
+      file("apps/web/view.ts", 200),
+      file("apps/web/state.ts", 150),
+    ])]),
+    file("README.md", 40),
+  ]);
+  const gM = buildComponentGraph(mono, [], []);
+  check("boundaried repos never split into file wards", gM.components.every((c) => !c.id.includes(":file:")), gM.components.map((c) => c.id).join(","));
+  check("ward derivation is deterministic", JSON.stringify(buildComponentGraph(after, [], [])) === JSON.stringify(gA));
 }
 
 // ---------------------------------------------------------------------------

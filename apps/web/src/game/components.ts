@@ -174,7 +174,7 @@ export function buildComponentGraph(
   const probes = { routes: routeFiles, tables: tableFiles };
 
   // group files into components by (boundary, kind)
-  const byId = new Map<string, { kind: ComponentKind; boundary: string; recs: FileRec[] }>();
+  const byId = new Map<string, { kind: ComponentKind; boundary: string; recs: FileRec[]; label?: string }>();
   for (const f of files) {
     const kind = classifyComponentFile(f.path, probes);
     const boundary = boundaryOf(f.path, packageDirs);
@@ -201,6 +201,40 @@ export function buildComponentGraph(
       byId.get(domId)!.recs.push(...g.recs);
       byId.delete(id);
     }
+  }
+
+  // Wards law: a flat repo's loose code files each raise their own ward.
+  // Grouping by kind froze growing settlements into one blob — five feature
+  // files are five works, and the Law of Isomorphism wants five buildings.
+  // The alphabetical anchor keeps the group's historic id so prior ledgers
+  // (eras, genomes, flourishes) never orphan; docs/config/assets stay
+  // chunky; sheds under 10 lines lean on the anchor; past 24 wards the
+  // quarter is a district again, not a scatter.
+  const WARD_KINDS: ReadonlySet<ComponentKind> = new Set([
+    "app-web",
+    "app-server",
+    "database",
+    "pipeline",
+    "cli",
+    "library",
+    "tests",
+  ] as ComponentKind[]);
+  const WARD_MIN_LINES = 10;
+  const MAX_FILE_WARDS = 24;
+  for (const g of [...byId.values()]) {
+    if (g.boundary !== "" || !WARD_KINDS.has(g.kind) || g.recs.length < 2) continue;
+    const recs = [...g.recs].sort((a, b) => (a.path < b.path ? -1 : 1));
+    const keep: FileRec[] = [recs[0]!];
+    let made = 0;
+    for (const r of recs.slice(1)) {
+      if (r.lines < WARD_MIN_LINES || made >= MAX_FILE_WARDS) {
+        keep.push(r);
+        continue;
+      }
+      byId.set(`root:file:${r.name}`, { kind: g.kind, boundary: "", recs: [r], label: r.name });
+      made++;
+    }
+    g.recs = keep;
   }
 
   // materialize components
@@ -233,7 +267,7 @@ export function buildComponentGraph(
     components.push({
       id,
       kind: g.kind,
-      label: g.boundary ? g.boundary.split("/").pop()! : KIND_LABEL[g.kind],
+      label: g.label ?? (g.boundary ? g.boundary.split("/").pop()! : KIND_LABEL[g.kind]),
       boundary: g.boundary,
       paths,
       facts: { files: g.recs.length, lines, palette, routes, tables, testFiles, langs },
