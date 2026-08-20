@@ -769,12 +769,12 @@ export function districtArchetype(dirName: string, fileNames: string[] = []): Di
 // ---------------------------------------------------------------------------
 
 export const SKILLS = {
-  Lorecraft: 0x3fa7d6, // reading files
-  Forgecraft: 0xe8873c, // writing files
-  Wayfaring: 0x7bc96f, // exploring dirs, searching
-  Trialcraft: 0xc84b4b, // running commands
-  Slaying: 0x9d5bd2, // clearing bounties (granted by the ledger keeper)
-  Diplomacy: 0xd8c25a, // messages and dialogue
+  Lorecraft: 0x3fa7d6, // scrolls studied and inscribed (file reads, scrolls)
+  Forgecraft: 0xe8873c, // works raised and signed (file writes, flourishes)
+  Wayfaring: 0x7bc96f, // expeditions and trails (dir lists, searches)
+  Trialcraft: 0xc84b4b, // trials joined and tests won (commands + results)
+  Slaying: 0x9d5bd2, // bounties felled — XP equals the bounty's posted renown
+  Diplomacy: 0xd8c25a, // parleys (addressed words weigh more than broadcast)
 } as const;
 export type SkillName = keyof typeof SKILLS;
 
@@ -809,8 +809,12 @@ export type XpDrop = {
 
 export type SkillStats = { total: number; top: [SkillName, number][] };
 
+/** The measured deeds behind a skill: how many, and how much (lines, tests, renown). */
+export type SkillTally = { deeds: number; measure: number };
+
 export class SkillBook {
   private xp = new Map<string, Map<SkillName, number>>();
+  private tallies = new Map<string, Map<SkillName, SkillTally>>();
 
   grant(agentId: string, skill: SkillName, amount: number): XpDrop {
     const book = this.xp.get(agentId) ?? new Map<SkillName, number>();
@@ -824,23 +828,88 @@ export class SkillBook {
     return drop;
   }
 
-  /** Deterministic XP for a game event; Slaying is granted separately on bounty clears. */
+  private note(agentId: string, skill: SkillName, deeds: number, measure: number): void {
+    const book = this.tallies.get(agentId) ?? new Map<SkillName, SkillTally>();
+    this.tallies.set(agentId, book);
+    const t = book.get(skill) ?? { deeds: 0, measure: 0 };
+    t.deeds += deeds;
+    t.measure += measure;
+    book.set(skill, t);
+  }
+
+  /**
+   * Deed-proportional XP: every grant scales with the event's own measured
+   * numbers, so a drop can always be read back to its deed. The attempt pays
+   * little; the measured outcome pays the rest (command_run vs command_result).
+   */
   apply(e: GameEvent): XpDrop[] {
     switch (e.type) {
-      case "file_read":
-        return [this.grant(e.agentId, "Lorecraft", 25 + Math.min(25, Math.floor((e.lines ?? 0) / 40)))];
-      case "file_write":
-        return [this.grant(e.agentId, "Forgecraft", 40 + Math.min(40, Math.floor((e.linesAdded + e.linesRemoved) / 10)))];
+      case "file_read": {
+        const lines = e.lines ?? 0;
+        this.note(e.agentId, "Lorecraft", 1, lines);
+        return [this.grant(e.agentId, "Lorecraft", 8 + Math.min(42, Math.floor(lines / 12)))];
+      }
+      case "file_write": {
+        const churn = e.linesAdded + e.linesRemoved;
+        this.note(e.agentId, "Forgecraft", 1, churn);
+        return [this.grant(e.agentId, "Forgecraft", 12 + Math.min(68, Math.floor(churn / 6)))];
+      }
       case "list_dir":
-        return [this.grant(e.agentId, "Wayfaring", 15)];
+        this.note(e.agentId, "Wayfaring", 1, 0);
+        return [this.grant(e.agentId, "Wayfaring", 6)];
       case "search":
-        return [this.grant(e.agentId, "Wayfaring", 10 + Math.min(15, e.matchCount))];
+        this.note(e.agentId, "Wayfaring", 1, e.matchCount);
+        return [this.grant(e.agentId, "Wayfaring", 4 + Math.min(21, e.matchCount * 3))];
       case "command_run":
-        return [this.grant(e.agentId, "Trialcraft", 30)];
+        // joining the trial is worth little; the result pays the true wage
+        this.note(e.agentId, "Trialcraft", 1, 0);
+        return [this.grant(e.agentId, "Trialcraft", 8)];
+      case "command_result": {
+        if (e.kind === "test") {
+          const passed = e.testsPassed ?? 0;
+          this.note(e.agentId, "Trialcraft", 0, passed);
+          return [this.grant(e.agentId, "Trialcraft", 10 + (e.exitCode === 0 ? 25 : 0) + Math.min(90, passed * 4))];
+        }
+        return [this.grant(e.agentId, "Trialcraft", e.exitCode === 0 ? 20 : 6)];
+      }
       case "message":
-        return [this.grant(e.fromId, "Diplomacy", 20)];
+        this.note(e.fromId, "Diplomacy", 1, 0);
+        return [this.grant(e.fromId, "Diplomacy", e.toId ? 18 : 8)];
+      case "scroll":
+        this.note(e.authorId, "Lorecraft", 1, 0);
+        return [this.grant(e.authorId, "Lorecraft", 60)];
+      case "castle_flourish":
+        this.note(e.agentId, "Forgecraft", 1, 0);
+        return [this.grant(e.agentId, "Forgecraft", 45)];
       default:
         return [];
+    }
+  }
+
+  /** A felled bounty pays exactly its posted renown — the number on the board. */
+  slay(agentId: string, bountyValue: number): XpDrop {
+    this.note(agentId, "Slaying", 1, bountyValue);
+    return this.grant(agentId, "Slaying", bountyValue);
+  }
+
+  /** One-line provenance: the measured deeds behind a skill's level. */
+  why(agentId: string, skill: SkillName): string {
+    const t = this.tallies.get(agentId)?.get(skill);
+    if (!t || t.deeds === 0) return "";
+    const n = (x: number) => x.toLocaleString("en-US");
+    switch (skill) {
+      case "Lorecraft":
+        return `${n(t.deeds)} scrolls, ${n(t.measure)} lines studied`;
+      case "Forgecraft":
+        return `${n(t.deeds)} works, ${n(t.measure)} lines reforged`;
+      case "Wayfaring":
+        return `${n(t.deeds)} expeditions, ${n(t.measure)} trails found`;
+      case "Trialcraft":
+        return `${n(t.deeds)} trials joined, ${n(t.measure)} tests won`;
+      case "Diplomacy":
+        return `${n(t.deeds)} parleys held`;
+      case "Slaying":
+        return `${n(t.deeds)} bounties felled, ${n(t.measure)} renown collected`;
     }
   }
 

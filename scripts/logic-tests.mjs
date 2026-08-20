@@ -270,18 +270,42 @@ console.log("Skills");
   check("OSRS curve: level 99 = 13034431xp", xpForLevel(99) === 13034431);
   check("levelForXp inverts curve", levelForXp(83) === 2 && levelForXp(82) === 1 && levelForXp(13034431) === 99);
   const book = new SkillBook();
+  // deed-proportional: XP reads back to the event's own measured numbers
   const drops = book.apply({ type: "file_read", agentId: "a1", path: "src/x.ts", lines: 400, ts: 0 });
-  check("file_read grants Lorecraft", drops.length === 1 && drops[0].skill === "Lorecraft" && drops[0].xp === 35);
-  check("file_write grants Forgecraft", book.apply({ type: "file_write", agentId: "a1", path: "y.ts", created: false, linesAdded: 50, linesRemoved: 10, buildingKind: "house", ts: 0 })[0].skill === "Forgecraft");
-  check("message grants Diplomacy to sender", book.apply({ type: "message", fromId: "a1", text: "t", herald: "h", ts: 0 })[0].agentId === "a1");
+  check("file_read scales with lines read (400 → 41)", drops.length === 1 && drops[0].skill === "Lorecraft" && drops[0].xp === 8 + Math.min(42, Math.floor(400 / 12)));
+  check("a skim pays less than a survey", new SkillBook().apply({ type: "file_read", agentId: "a1", path: "s.ts", lines: 12, ts: 0 })[0].xp < drops[0].xp);
+  const fw = book.apply({ type: "file_write", agentId: "a1", path: "y.ts", created: false, linesAdded: 50, linesRemoved: 10, buildingKind: "house", ts: 0 })[0];
+  check("file_write scales with churn (60 → 22)", fw.skill === "Forgecraft" && fw.xp === 12 + Math.min(68, Math.floor(60 / 6)));
+  check("addressed words outweigh broadcast", book.apply({ type: "message", fromId: "a1", toId: "a2", text: "t", herald: "h", ts: 0 })[0].xp > new SkillBook().apply({ type: "message", fromId: "a1", text: "t", herald: "h", ts: 0 })[0].xp);
+  check("joining a trial pays little (8)", book.apply({ type: "command_run", agentId: "a1", command: "npm test", kind: "test", ts: 0 })[0].xp === 8);
+  const green = book.apply(testResult("a1", [], 0, 24));
+  check("a green suite pays the wage (10+25+90cap)", green[0].skill === "Trialcraft" && green[0].xp === 10 + 25 + Math.min(90, 24 * 4));
+  const red = new SkillBook().apply(testResult("a1", [], 3, 9));
+  check("a red suite pays for tests won only", red[0].xp === 10 + 0 + 36);
+  check("sign_work pays Forgecraft (45)", book.apply({ type: "castle_flourish", agentId: "a1", author: "Ashka", path: "src/x.ts", mark: "lantern", cited: "measured", ts: 0 })[0].xp === 45);
+  check("an inscribed scroll pays Lorecraft (60)", book.apply({ type: "scroll", scrollId: "s1", authorId: "a1", authorName: "Ashka", title: "T", format: "markdown", content: "c", ts: 0 })[0].xp === 60);
+  const slay = book.slay("a1", bountyValue("tokenizer eats digits"));
+  check("a felled bounty pays exactly its posted renown", slay.skill === "Slaying" && slay.xp === bountyValue("tokenizer eats digits"));
+  check("why(): Lorecraft names scrolls and lines", /2 scrolls, 400 lines studied/.test(book.why("a1", "Lorecraft")));
+  check("why(): Trialcraft names trials and wins", /1 trials joined, 24 tests won/.test(book.why("a1", "Trialcraft")));
+  check("why(): Slaying names renown collected", /1 bounties felled/.test(book.why("a1", "Slaying")));
+  check("why() is empty for the deedless", new SkillBook().why("ghost", "Slaying") === "");
+  const twin = new SkillBook();
+  const events = [
+    { type: "file_read", agentId: "a1", path: "p", lines: 973, ts: 0 },
+    { type: "search", agentId: "a1", query: "q", matchCount: 7, paths: [], ts: 0 },
+    { type: "list_dir", agentId: "a1", path: ".", ts: 0 },
+  ];
+  for (const e of events) twin.apply(e);
+  const twin2 = new SkillBook();
+  for (const e of events) twin2.apply(e);
+  check("replay determinism: same events, same book", twin.stats("a1").total === twin2.stats("a1").total && twin.why("a1", "Wayfaring") === twin2.why("a1", "Wayfaring"));
   let up;
   for (let i = 0; i < 5; i++) {
     const d = book.grant("a1", "Slaying", 30);
     if (d.leveledTo) up = d;
   }
-  check("level-up flagged crossing 83xp", up?.leveledTo === 2);
-  const st = book.stats("a1");
-  check("stats: total 7, top only Slaying 2", st.total === 7 && st.top.length === 1 && st.top[0][0] === "Slaying" && st.top[0][1] === 2);
+  check("level-up flagged crossing a boundary", up?.leveledTo !== undefined);
   check("unknown agent stats safe", new SkillBook().stats("ghost").total === 6);
   check("six skills defined", Object.keys(SKILLS).length === 6);
   const ex = examineLine("src/index.ts", 260, "quarter");

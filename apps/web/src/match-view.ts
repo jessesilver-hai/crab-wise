@@ -235,7 +235,12 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
       renderer?.showXpDrop?.(d.agentId, d.skill, d.xp, SKILLS[d.skill]);
       if (d.leveledTo) {
         renderer?.showLevelUp?.(d.agentId, d.skill, d.leveledTo);
-        addEntry(heraldFeed, "triumph", `⚔ ${escapeHtml(name(d.agentId))} has advanced <strong>${d.skill}</strong> to level <strong>${d.leveledTo}</strong>!`);
+        const why = skills.why(d.agentId, d.skill);
+        addEntry(
+          heraldFeed,
+          "triumph",
+          `⚔ ${escapeHtml(name(d.agentId))} has advanced <strong>${d.skill}</strong> to level <strong>${d.leveledTo}</strong>!${why ? ` <span class="dim">(${escapeHtml(why)})</span>` : ""}`,
+        );
       }
     }
   }
@@ -285,7 +290,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         `☨ Bounty claimed — <span class="mono">${escapeHtml(b.name)}</span> falls to ${escapeHtml(b.clearedBy ?? "unknown hands")} <strong>(+${b.value} renown)</strong>`,
       );
       const slayer = b.clearedBy && agentIdByName(b.clearedBy);
-      if (slayer) grantVisuals([skills.grant(slayer, "Slaying", 150)], historical);
+      if (slayer) grantVisuals([skills.slay(slayer, b.value)], historical);
     }
     if (postedNow.length > 0 || clearedNow.length > 0 || e.type === "tokens") renderBounties();
   }
@@ -834,7 +839,14 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
         }
         if (kind === "unit") {
           const st = skills.stats(id);
-          const tops = st.top.map(([s, l]) => `${s} ${l}`).join(", ");
+          // each skill names its deeds — the level is legible, never arbitrary
+          const tops = st.top
+            .slice(0, 2)
+            .map(([s, l]) => {
+              const why = skills.why(id, s);
+              return `${s} ${l}${why ? ` — ${why}` : ""}`;
+            })
+            .join("; ");
           return `${name(id)} — a loyal hand of the realm. Total level ${st.total}.${tops ? ` (${tops})` : ""}`;
         }
         if (kind === "raider") return `${id} — a specter risen from failing trials. Slaying it pays renown.`;
