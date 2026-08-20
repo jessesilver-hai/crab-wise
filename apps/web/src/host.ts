@@ -206,8 +206,9 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
       } else if (event.type === "castle_flourish") {
         shadow.applyFlourish(event.path, event.mark, event.author, event.cited);
       }
-    } catch {
-      // the shadow must never break the session
+    } catch (err) {
+      // the shadow must never break the session — but it must confess
+      console.warn("[shadow] fold failed", event.type, err);
     }
     try {
       if (event.type === "match_started" && shadow.plan) {
@@ -230,8 +231,9 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
           `${agentNames.get(event.agentId) ?? "a worker"} laid down the charge: ${event.summary.slice(0, 200)}`,
         );
       }
-    } catch {
-      // the residency watch must never break the session
+    } catch (err) {
+      // the residency watch must never break the session — but it confesses
+      console.warn("[watch] fold failed", event.type, err);
     }
     if (event.type === "match_started") {
       // The Master Builder studies the measured ledger and may re-dress
@@ -407,7 +409,15 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
   // amendment within the vocabulary — or a spoken, reasoned refusal. Purse-
   // metered like every other wake; refusals cost nothing.
   const runTaste = async (wish: string) => {
-    if (abort.signal.aborted || matchOver || !shadow.plan || !shadow.graph) return;
+    if (abort.signal.aborted || matchOver || !shadow.plan || !shadow.graph) {
+      console.warn("[taste] refused at the gate", {
+        aborted: abort.signal.aborted,
+        matchOver,
+        plan: !!shadow.plan,
+        graph: !!shadow.graph,
+      });
+      return;
+    }
     if (builderBusy) {
       builderSays(tasteRefusal("debounce"));
       return;
