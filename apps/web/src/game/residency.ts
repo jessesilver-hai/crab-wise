@@ -61,3 +61,18 @@ export function undressed(plan: CastlePlan, ids: readonly string[]): string[] {
 
 /** Newcomers are dressed in small batches: one wake, a few citations. */
 export const GROWTH_BATCH = 4;
+
+/**
+ * The Builder's spoken refusals when the purse gates a Crown wish. The
+ * taste channel never fails silently: the Crown always hears why.
+ */
+export function tasteRefusal(reason: "empty" | "debounce" | "gold"): string {
+  switch (reason) {
+    case "empty":
+      return "The purse holds no more wakes this commission — the castle keeps its dress.";
+    case "debounce":
+      return "I am still at the drafting table — bring the wish again in a moment.";
+    case "gold":
+      return "The treasury's gold has gone to real work, as it should — no more taste this commission.";
+  }
+}

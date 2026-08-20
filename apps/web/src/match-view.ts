@@ -107,7 +107,7 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
             </div>
           </div>
           <div class="command-bar">
-            <select id="cmd-target"><option value="">⟡ The Realm</option></select>
+            <select id="cmd-target"><option value="">⟡ The Realm</option><option value="The Master Builder">🏛 The Master Builder</option></select>
             <input id="cmd-input" placeholder="Speak, and the realm obeys — issue an order or address a worker…" maxlength="2000"/>
             <button id="cmd-send">Decree</button>
           </div>` : ""}
@@ -589,7 +589,9 @@ export function createMatchView(root: HTMLElement, opts: MatchViewOptions): Matc
     const target = root.querySelector<HTMLSelectElement>("#cmd-target");
     if (!target) return;
     const current = target.value;
-    target.innerHTML = `<option value="">⟡ The Realm${kingName ? ` (${escapeHtml(kingName)})` : ""}</option>`;
+    target.innerHTML =
+      `<option value="">⟡ The Realm${kingName ? ` (${escapeHtml(kingName)})` : ""}</option>` +
+      `<option value="The Master Builder">🏛 The Master Builder</option>`;
     for (const id of activeAgents) {
       const agentName = agentNames.get(id);
       if (!agentName || agentName === kingName) continue;

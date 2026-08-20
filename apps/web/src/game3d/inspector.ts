@@ -108,6 +108,7 @@ export class Inspector {
             .join("") +
           `</div>`
         : "") +
+      (socket.era > 0 ? row("quarter", `era ${socket.era + 1}`) : "") +
       row("files", String(f.files)) +
       row("lines", String(f.lines)) +
       (f.routes > 0 ? row("routes", String(f.routes)) : "") +

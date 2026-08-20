@@ -68,7 +68,13 @@ export class CastleState {
       else for (const c of n.children ?? []) walk(c as FN);
     };
     walk(this.tree);
-    return this.replan(priorLedger).plan;
+    // a returning castle enters its next commission: new claims stamp the
+    // new era while every standing wing keeps the era that raised it
+    const prior =
+      priorLedger && Object.keys(priorLedger.entries).length > 0
+        ? { ...priorLedger, commission: (priorLedger.commission ?? 0) + 1 }
+        : priorLedger;
+    return this.replan(prior).plan;
   }
 
   /** A worker wrote a file: grow the tree/lines, re-plan, diff. */
@@ -164,15 +170,22 @@ export class CastleState {
 
   /**
    * The Master Builder declared the castle's design language. A style must
-   * be named and cited or it is refused; unchosen buildings re-derive under
-   * its biases (the diff carries their genome changes), chosen ones stand.
+   * be named and cited or it is refused. The declaration lands on the
+   * CURRENT era: this commission's unchosen wings re-derive under it (the
+   * diff carries their genome changes) and the world dressing follows, but
+   * earlier quarters keep the style of the era that raised them.
    */
   applyStyle(style: unknown): { plan: CastlePlan; changes: CastleChange[] } {
     if (!this.plan) throw new Error("castle not founded");
     const validated = validateStyleGenome(style);
     if (!validated) return { plan: this.plan, changes: [] };
     const ledger = this.plan.ledger;
-    ledger.style = validated;
+    const commission = ledger.commission ?? 0;
+    const eras = ledger.eras ?? (ledger.style ? [ledger.style] : []);
+    while (eras.length <= commission) eras.push(null);
+    eras[commission] = validated;
+    ledger.eras = eras;
+    ledger.style = validated; // legacy mirror: the latest declared language
     const out = this.replan(ledger);
     out.changes.push({ kind: "style", name: validated.name, cited: validated.cited });
     return out;

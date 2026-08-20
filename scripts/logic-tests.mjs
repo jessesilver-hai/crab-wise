@@ -1317,6 +1317,102 @@ console.log("Castle Era (signed works law)");
   check("no event leaks from refusals", events.filter((e) => e.type === "castle_flourish").length === 1);
 }
 
+console.log("Castle Era (district eras)");
+{
+  const { CastleState } = await import("../apps/web/src/game/castlestate.ts");
+  const { styleForEra } = await import("../apps/web/src/game/castle.ts");
+  const { genomeSignature, styleSignature } = await import("../apps/web/src/game/genome.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+  const bakery = dir("", [
+    file("index.html", 120),
+    file("styles.css", 260),
+    dir("db", [file("db/schema.sql", 90)]),
+    file("README.md", 40),
+  ]);
+  const styleA = {
+    name: "Harbor Timberwork", cited: "a static html page, hand-inlined styles",
+    materialBias: ["timber"], roofBias: ["gable"], trimBias: ["halftimber"],
+    natureSet: "oak", wallStyle: "palisade", groundTone: "meadow", fog: "none",
+  };
+  const styleB = {
+    name: "Iron Ledger Gothic", cited: "the second commission raised a library wing in cold basalt",
+    materialBias: ["basalt"], roofBias: ["dome"],
+  };
+
+  // founding commission: declare A
+  const st = new CastleState();
+  st.found(bakery, 4242, [], []);
+  const a = st.applyStyle(styleA);
+  check(
+    "the founding declaration lands at era zero",
+    a.plan.ledger.eras?.length === 1 && styleSignature(a.plan.ledger.eras[0]).startsWith("Harbor"),
+  );
+  const hA = a.plan.hash;
+  const webSigA = genomeSignature(a.plan.sockets.find((s) => s.componentId === "root:app-web").genome);
+
+  // the castle returns: a new commission begins
+  const st2 = new CastleState();
+  const p1 = st2.found(bakery, 4242, [], [], structuredClone(a.plan.ledger));
+  check("a returning castle enters the next commission", p1.ledger.commission === 1);
+  check("an unchanged return hashes identical", p1.hash === hA);
+  check("the standing style carries into the new era", styleSignature(p1.style).startsWith("Harbor"));
+
+  // the new commission raises a library wing — stamped with its era
+  const g = st2.applyWrite("lib/util.js", true, 420);
+  check(
+    "newcomers are stamped with the commission that raised them",
+    g.plan.sockets.find((s) => s.componentId === "lib:library")?.era === 1,
+  );
+  check("founding wings keep era zero", g.plan.sockets.find((s) => s.componentId === "root:app-web").era === 0);
+  const libSigUnderA = genomeSignature(g.plan.sockets.find((s) => s.componentId === "lib:library").genome);
+
+  // the new era declares its own language
+  const b = st2.applyStyle(styleB);
+  check(
+    "the amendment lands on the current era only",
+    b.plan.ledger.eras.length === 2 && styleSignature(b.plan.ledger.eras[1]).startsWith("Iron Ledger"),
+  );
+  check("world dressing follows the newest quarter", styleSignature(b.plan.style).startsWith("Iron Ledger"));
+  check(
+    "the new wing re-derives under its era's style",
+    genomeSignature(b.plan.sockets.find((s) => s.componentId === "lib:library").genome) !== libSigUnderA,
+  );
+  check(
+    "old quarters keep the style that raised them",
+    genomeSignature(b.plan.sockets.find((s) => s.componentId === "root:app-web").genome) === webSigA,
+  );
+  check("the eras roll rides the hash", b.plan.hash !== g.plan.hash);
+
+  // walk-down: a silent era inherits the last declared language
+  check("a silent era inherits the last declaration", styleSignature(styleForEra(b.plan.ledger, 5)).startsWith("Iron Ledger"));
+  check(
+    "legacy ledgers read as a founding-era declaration",
+    styleSignature(styleForEra({ version: 1, seed: 1, entries: {}, style: b.plan.ledger.eras[0] }, 9)).startsWith("Harbor"),
+  );
+
+  // identity: the stratified castle re-founds byte-identical
+  const grownTree = dir("", [
+    file("index.html", 120),
+    file("styles.css", 260),
+    dir("db", [file("db/schema.sql", 90)]),
+    file("README.md", 40),
+    dir("lib", [file("lib/util.js", 420)]),
+  ]);
+  const st3 = new CastleState();
+  const p3 = st3.found(grownTree, 4242, [], [], structuredClone(b.plan.ledger));
+  check("a stratified castle re-founds identical", p3.hash === b.plan.hash);
+  check("the third commission counts on", p3.ledger.commission === 2);
+}
+
+console.log("Castle Era (taste channel)");
+{
+  const { tasteRefusal } = await import("../apps/web/src/game/residency.ts");
+  const reasons = ["empty", "debounce", "gold"];
+  check("every purse refusal has a spoken reason", reasons.every((r) => tasteRefusal(r).length > 10));
+  check("refusals are distinct", new Set(reasons.map(tasteRefusal)).size === 3);
+}
+
 console.log("Castle Era (persistence law)");
 {
   const { upsertRecord, CASTLE_ID_RE } = await import("../apps/relay/src/castles.ts");

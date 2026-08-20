@@ -389,3 +389,81 @@ export async function generateMilestoneDecree(opts: {
     return null;
   }
 }
+
+const TASTE_CREED = `You are the MASTER BUILDER in residence. The CROWN itself has come to the drafting
+table with a wish for the castle's look. You serve the Crown — but you serve the LAW first.
+
+You wield three instruments:
+
+1. ANSWER (required) — one line to the Crown (<= 240 chars), in the Builder's voice: what you
+   will do, or why the law refuses. Never silent, never servile; cite the measured record.
+
+2. AMEND THE STYLE (optional) — if the wish can be honored castle-wide, declare the current
+   era's language anew: named, cited, and drawn from the lawful vocabulary. Earlier quarters
+   keep the style that raised them; your amendment dresses THIS era's wings.
+
+3. REDRESS COMPONENTS (optional) — re-dress particular wings (lawful form and/or design
+   genome), each with ONE vivid citation naming the Crown's wish and the measured fact.
+
+Rules:
+- The vocabulary is closed: forms from each component's allowed list, genome fields from the
+  design vocabulary. What the law cannot express, you refuse in your answer — with the reason.
+- A wish that contradicts the measured record is refused; cite the fact that refuses it.
+- Storeys and banners are law-banded to measured facts; your values clamp.
+- At most one choice per component.`;
+
+export type TasteDecree = BuilderDecree & { reply: string };
+
+/** The Crown's wish, served within the law — or refused with a spoken reason. */
+export async function generateTasteDecree(opts: {
+  apiKey: string;
+  model: string;
+  llm?: { baseURL: string; headers?: Record<string, string> };
+  graph: ComponentGraph;
+  style: StyleGenome | null;
+  wish: string;
+}): Promise<TasteDecree | null> {
+  const { graph } = opts;
+  const client = makeClient(opts);
+  const prompt =
+    `THE MEASURED LEDGER\n${componentBrief(graph)}\n\n` +
+    `THE STANDING STYLE\n${styleBrief(opts.style)}\n\n` +
+    `THE CROWN'S WISH\n${opts.wish.slice(0, 600)}\n\n` +
+    `LAWFUL FORMS PER COMPONENT\n${formsBrief(graph)}\n\n` +
+    `DESIGN VOCABULARY\n${DESIGN_VOCAB}\n\n` +
+    `Answer the Crown with the taste_decree tool.`;
+  try {
+    const response = await client.messages.create({
+      model: opts.model,
+      max_tokens: 4000,
+      system: TASTE_CREED,
+      tools: [
+        {
+          name: "taste_decree",
+          description: "The Master Builder answers the Crown: a reply line, an optional style amendment, optional redresses.",
+          input_schema: {
+            type: "object",
+            properties: {
+              reply: { type: "string", description: "One line to the Crown (<= 240 chars)" },
+              style: STYLE_SCHEMA as unknown as Record<string, unknown>,
+              choices: { type: "array", items: CHOICE_ITEM_SCHEMA },
+            },
+            required: ["reply"],
+          },
+        },
+      ],
+      tool_choice: { type: "tool", name: "taste_decree" },
+      messages: [{ role: "user", content: prompt }],
+    });
+    const block = response.content.find((b) => b.type === "tool_use");
+    const raw =
+      block && block.type === "tool_use"
+        ? (block.input as { reply?: unknown; style?: unknown; choices?: unknown })
+        : null;
+    const reply = typeof raw?.reply === "string" ? raw.reply.trim().slice(0, 240) : "";
+    if (!reply) return null;
+    return { reply, style: validateStyleGenome(raw?.style), choices: lawfulChoices(raw?.choices, graph) };
+  } catch {
+    return null;
+  }
+}

@@ -129,14 +129,24 @@ export type LedgerEntry = {
   genome?: BuildingGenome;
   /** Signed works: maker's marks left by workers who labored here. */
   flourishes?: Flourish[];
+  /** The commission that claimed this socket (absent = the founding era). */
+  era?: number;
 };
 
 export type CastleLedger = {
   version: 1;
   seed: number;
   entries: Record<string, LedgerEntry>;
-  /** The castle's chosen design language (cited), if any ever was. */
+  /** Legacy mirror: the latest declared design language, if any ever was. */
   style?: StyleGenome;
+  /**
+   * District eras: the style declared during each commission, by ordinal
+   * (null = that commission never declared one). Wings keep the style of
+   * the era that raised them — the castle stratifies into visible quarters.
+   */
+  eras?: (StyleGenome | null)[];
+  /** Which commission this ledger is living through (absent = 0). */
+  commission?: number;
 };
 
 export function foundLedger(seed: number): CastleLedger {
@@ -150,6 +160,21 @@ export function asLedger(u: unknown): CastleLedger | undefined {
   if (c.version !== 1 || typeof c.seed !== "number") return undefined;
   if (typeof c.entries !== "object" || c.entries === null) return undefined;
   return u as CastleLedger;
+}
+
+/**
+ * The style an era's wings wear: the nearest declared language at or before
+ * that era. A commission that never declares inherits the last one; before
+ * any declaration the castle stands unstyled. Legacy ledgers (style, no
+ * eras) read as a single founding-era declaration.
+ */
+export function styleForEra(ledger: CastleLedger, era: number): StyleGenome | null {
+  const eras = ledger.eras ?? (ledger.style ? [ledger.style] : []);
+  for (let i = Math.min(era, eras.length - 1); i >= 0; i--) {
+    const s = validateStyleGenome(eras[i]);
+    if (s) return s;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +214,8 @@ export type Socket = {
   genome: BuildingGenome;
   /** Signed works, re-validated each plan (unlawful marks vanish). */
   flourishes: Flourish[];
+  /** The commission that raised this wing — its quarter's era. */
+  era: number;
 };
 
 export type Connector = {
@@ -209,7 +236,11 @@ export type CastlePlan = {
   wall: { radius: number; towers: WallTower[]; gateAngle: number };
   connectors: Connector[];
   ledger: CastleLedger;
-  /** The castle's design language (validated) or null = unstyled defaults. */
+  /**
+   * The CURRENT era's effective design language (validated) or null =
+   * unstyled defaults. World dressing (ground, wall, weather) follows the
+   * newest quarter; each wing's own derivation uses its era's style.
+   */
   style: StyleGenome | null;
   hash: string;
 };
@@ -237,9 +268,17 @@ function posOf(ring: number, slot: number, seed: number): { x: number; z: number
  */
 export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLedger): CastlePlan {
   const ledger: CastleLedger = prior
-    ? { version: 1, seed: prior.seed, entries: { ...prior.entries }, ...(prior.style ? { style: prior.style } : {}) }
+    ? {
+        version: 1,
+        seed: prior.seed,
+        entries: { ...prior.entries },
+        ...(prior.style ? { style: prior.style } : {}),
+        ...(prior.eras ? { eras: prior.eras } : {}),
+        ...(typeof prior.commission === "number" ? { commission: prior.commission } : {}),
+      }
     : foundLedger(seed);
   const S = ledger.seed;
+  const commission = ledger.commission ?? 0;
 
   const byId = new Map(graph.components.map((c) => [c.id, c]));
 
@@ -290,13 +329,15 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
       !SUPPORT_KINDS.has(c.kind) &&
       !Object.values(ledger.entries).some((e) => e.ring === 0)
     ) {
-      ledger.entries[c.id] = { ring: 0, slot: 0, form: "keep" };
+      ledger.entries[c.id] = { ring: 0, slot: 0, form: "keep", ...(commission > 0 ? { era: commission } : {}) };
       taken.add("0:0");
       continue;
     }
     const home = SUPPORT_KINDS.has(c.kind) ? 2 : 1;
     const { ring, slot } = claim(home);
-    ledger.entries[c.id] = { ring, slot, form: defaultFormFor(c.kind) };
+    // new claims are stamped with the commission that raised them: their
+    // quarter keeps this era's style even as later eras declare their own
+    ledger.entries[c.id] = { ring, slot, form: defaultFormFor(c.kind), ...(commission > 0 ? { era: commission } : {}) };
   }
 
   // raze flags: claims whose component is gone stand as ruins
@@ -304,7 +345,8 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
 
   // sockets — the design vector resolves here: a chosen genome (validated
   // against today's law) outranks the derived default; both clamp to traits.
-  const style = validateStyleGenome(ledger.style);
+  // Each wing derives under ITS era's style: old quarters keep their look.
+  const style = styleForEra(ledger, commission);
   const sockets: Socket[] = Object.entries(ledger.entries)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
     .map(([id, e]) => {
@@ -314,6 +356,8 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
         ? traitsFor(c)
         : { size: 1, tint: null, banner: null, gates: 1, shafts: 1, banners: 1, storeys: 1 };
       const kind = c?.kind ?? "library";
+      const era = e.era ?? 0;
+      const eraStyle = styleForEra(ledger, era);
       return {
         componentId: id,
         form: e.form,
@@ -326,9 +370,10 @@ export function planCastle(graph: ComponentGraph, seed: number, prior?: CastleLe
         razed: e.razed === true,
         cited: e.cited,
         genome: e.genome
-          ? validateBuildingGenome(e.genome, kind, traits, id, S, style)
-          : deriveGenome(kind, traits, id, S, style),
+          ? validateBuildingGenome(e.genome, kind, traits, id, S, eraStyle)
+          : deriveGenome(kind, traits, id, S, eraStyle),
         flourishes: lawfulFlourishes(e.flourishes),
+        era,
       };
     });
 
@@ -412,9 +457,11 @@ export function castleHash(plan: CastlePlan): string {
     );
     mix(`~${genomeSignature(s.genome)}`);
     mix(`^${flourishSignature(s.flourishes)}`);
+    mix(`&e${s.era}`);
   }
   for (const c of plan.connectors) mix(`|${c.from}>${c.to}:${c.kind}:${c.points.length}`);
   mix(`|gate:${plan.wall.gateAngle.toFixed(4)}:towers:${plan.wall.towers.length}`);
   mix(`|style:${styleSignature(plan.style)}`);
+  mix(`|eras:${(plan.ledger.eras ?? []).map((e) => styleSignature(validateStyleGenome(e))).join(";")}`);
   return (h >>> 0).toString(16).padStart(8, "0");
 }

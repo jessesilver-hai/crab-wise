@@ -12,9 +12,10 @@ import {
   generateGrowthDecree,
   generateMilestoneDecree,
   generateRepresentation,
+  generateTasteDecree,
   type BuilderDecree,
 } from "./reprloop.js";
-import { foundPurse, GROWTH_BATCH, newlySighted, PURSE_LAW, tryWake, undressed } from "./game/residency.js";
+import { foundPurse, GROWTH_BATCH, newlySighted, PURSE_LAW, tasteRefusal, tryWake, undressed } from "./game/residency.js";
 
 export type SettlementStart = {
   repoUrl: string;
@@ -80,7 +81,12 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
     matchId,
     title: repoLabel,
     role: "host",
-    onSpeak: (text, toName) => settlement?.speak(text, toName),
+    onSpeak: (text, toName) => {
+      // the taste channel: a decree addressed to the Builder never reaches
+      // the workers — it goes to the drafting table (or is refused aloud)
+      if (toName === "The Master Builder") void runTaste(text);
+      else settlement?.speak(text, toName);
+    },
     onSpeakTo: (agentId, text) => settlement?.speakTo(agentId, text),
     onOrder: (kind, target, agentId) => settlement?.order(kind, target, agentId),
     onReadFile: async (path) => {
@@ -381,6 +387,56 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
       publishDecree(decree, { style: "amends the style to", choice: "revisits" }, { style: 400, first: 1600, step: 1200 });
     } catch {
       // the Builder kept his silence; what stands, stands
+    } finally {
+      builderBusy = false;
+    }
+  };
+
+  /** The Builder speaks into the feed — the taste channel never goes mute. */
+  const builderSays = (text: string) => {
+    onEvent({
+      seq: 0,
+      ts: Date.now(),
+      type: "log",
+      level: "info",
+      text: `🏛 The Master Builder: ${text}`,
+    } as Parameters<typeof view.onEvent>[0]);
+  };
+
+  // The Crown's taste channel: a wish spoken to the Builder becomes a cited
+  // amendment within the vocabulary — or a spoken, reasoned refusal. Purse-
+  // metered like every other wake; refusals cost nothing.
+  const runTaste = async (wish: string) => {
+    if (abort.signal.aborted || matchOver || !shadow.plan || !shadow.graph) return;
+    if (builderBusy) {
+      builderSays(tasteRefusal("debounce"));
+      return;
+    }
+    const verdict = tryWake(purse, Date.now(), goldSpent);
+    if (!verdict.allowed) {
+      builderSays(tasteRefusal(verdict.reason));
+      return;
+    }
+    builderBusy = true;
+    try {
+      const decree = await generateTasteDecree({
+        apiKey,
+        model,
+        llm,
+        graph: shadow.graph,
+        style: shadow.plan.style,
+        wish,
+      });
+      if (!decree || abort.signal.aborted) {
+        builderSays("The veil clouded the drafting table; the castle keeps its dress.");
+        return;
+      }
+      builderSays(decree.reply);
+      if (decree.style || decree.choices.length > 0) {
+        publishDecree(decree, { style: "serves the Crown with", choice: "redresses" }, { style: 600, first: 1800, step: 1200 });
+      }
+    } catch {
+      builderSays("The veil clouded the drafting table; the castle keeps its dress.");
     } finally {
       builderBusy = false;
     }
