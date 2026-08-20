@@ -187,15 +187,46 @@ export class SandboxManager {
     return reaped;
   }
 
-  async provision(matchId: string, ip: string): Promise<{ hostToken: string }> {
-    if (this.sessions.size + this.pending.size >= MAX_SANDBOXES) {
-      throw new Error("all sandboxes are busy; try again in a few minutes");
+  /** Whether a session's machine still answers. Ghosts (machines that
+   *  auto-destroyed or crashed) leave sessions that can't speak for
+   *  themselves — this map is the only witness, so ask the machine. */
+  private async alive(s: Session): Promise<boolean> {
+    try {
+      const res = await fetch(`${s.handle.baseUrl}/healthz`, { signal: AbortSignal.timeout(2500) });
+      return res.ok;
+    } catch {
+      return false;
     }
+  }
+
+  /** Bury sessions whose machines died on their own; returns how many. */
+  private async reapDead(candidates: Session[]): Promise<number> {
+    let reaped = 0;
+    for (const s of candidates) {
+      if (await this.alive(s)) continue;
+      console.log(`ghost session ${s.matchId}: machine unreachable; burying it`);
+      await this.destroy(s.matchId);
+      reaped++;
+    }
+    return reaped;
+  }
+
+  async provision(matchId: string, ip: string): Promise<{ hostToken: string }> {
+    // A dead machine must not hold its visitor's slot until the TTL: before
+    // refusing anyone, make sure the sessions blocking them are still alive.
+    const mine = [...this.sessions.values()].filter((s) => s.ip === ip);
+    if (mine.length > 0) await this.reapDead(mine);
     for (const s of this.sessions.values()) {
       if (s.ip === ip) throw new Error("one settlement per visitor at a time");
     }
     for (const pendingIp of this.pending.values()) {
       if (pendingIp === ip) throw new Error("one settlement per visitor at a time");
+    }
+    if (this.sessions.size + this.pending.size >= MAX_SANDBOXES) {
+      await this.reapDead([...this.sessions.values()]);
+      if (this.sessions.size + this.pending.size >= MAX_SANDBOXES) {
+        throw new Error("all sandboxes are busy; try again in a few minutes");
+      }
     }
     this.pending.set(matchId, ip);
     let handle: SandboxHandle;

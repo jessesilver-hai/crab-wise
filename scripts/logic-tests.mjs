@@ -1590,5 +1590,51 @@ console.log("Castle Era (genome law)");
   check("the re-founded castle hashes identical", p2.hash === r2.plan.hash);
 }
 
+// ---------------------------------------------------------------------------
+// Ghost-session law: a session whose machine died must not hold its
+// visitor's slot — provision buries unreachable sessions before refusing.
+// ---------------------------------------------------------------------------
+{
+  console.log("\nghost-session law");
+  const { SandboxManager } = await import("../apps/relay/src/sandbox.ts");
+  const { createServer } = await import("node:http");
+
+  // A live sandboxd stand-in: answers /healthz on a real port.
+  const server = createServer((req, res) => {
+    if (req.url === "/healthz") { res.writeHead(200); res.end("ok"); return; }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const livePort = server.address().port;
+
+  const destroyed = [];
+  const fake = (baseUrl) => ({
+    async create(id) {
+      return { baseUrl, token: "t", destroy: async () => { destroyed.push(id); } };
+    },
+  });
+
+  // Port 1 answers nothing: the session registers, then its machine is gone.
+  const ghostMgr = new SandboxManager(fake("http://127.0.0.1:1"));
+  await ghostMgr.provision("m-ghost", "10.0.0.1");
+  check("a session registers and counts", ghostMgr.count === 1);
+  const second = await ghostMgr.provision("m-next", "10.0.0.1").then(() => "ok", (e) => e.message);
+  check("a ghost session is buried, not defended", second === "ok", second);
+  check("the buried ghost's machine was told to die", destroyed.includes("m-ghost"));
+  check("only the new session remains", ghostMgr.count === 1);
+  await ghostMgr.destroy("m-next");
+
+  // A machine that still answers keeps its visitor's slot defended.
+  const liveMgr = new SandboxManager(fake(`http://127.0.0.1:${livePort}`));
+  await liveMgr.provision("m-live", "10.0.0.2");
+  const refusal = await liveMgr.provision("m-again", "10.0.0.2").then(() => "ok", (e) => e.message);
+  check("a living session still refuses its visitor", refusal === "one settlement per visitor at a time", refusal);
+  const other = await liveMgr.provision("m-other", "10.0.0.3").then(() => "ok", (e) => e.message);
+  check("another visitor is not blocked by it", other === "ok", other);
+  await liveMgr.destroy("m-live");
+  await liveMgr.destroy("m-other");
+  server.close();
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
