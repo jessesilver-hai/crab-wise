@@ -1,9 +1,9 @@
-// Castle grounds: a circular disk (~radius 30) with subtle seeded height
-// noise and a raised motte under the keep, an underlay plain running to the
-// fog line, and a nature scatter ring outside the outer ward. The StyleGenome
-// restyles it: GROUND_TONES recolor disk/motte/plain, NATURE_SETS swap the
-// scatter (kit trees, or procedural palms/crystals/mushrooms). Heights are
-// tone-independent, so a restyle never moves a standing construction.
+// Castle grounds: a flat circular disk (~radius 30), an underlay plain
+// running to the fog line, and a nature scatter ring outside the outer ward.
+// The ground is FLAT by decree — an earlier raised motte read as an invisible
+// dome under even light (vertex tint alone carries no relief once the perf
+// governor sheds shadows), so height is gone and only paint remains: the
+// StyleGenome recolors disk/motte-circle/plain, NATURE_SETS swap the scatter.
 import * as THREE from "three";
 import { mulberry32 } from "../game/map.js";
 import type { GroundTone, NatureSet } from "../game/genome.js";
@@ -44,14 +44,11 @@ export class CastleGround {
   private natureName: NatureSet = "pine";
   private plainHex = "#000000";
 
-  /** Deterministic ground height; everything standing on the grounds asks this. */
-  heightAt = (x: number, z: number): number => {
-    const r = Math.hypot(x, z);
-    const motte = MOTTE_H * (1 - smoothstep(2.4, 5.4, r));
-    // noise fades in past the inner ward and back out at the rim
-    const fade = smoothstep(5.5, 9, r) * (1 - smoothstep(26, GROUNDS_RADIUS, r));
-    return motte + this.noise2(x, z) * NOISE_AMP * fade;
-  };
+  /** Deterministic ground height; everything standing on the grounds asks
+   *  this. Flat by decree — relief without visible shading read as an
+   *  invisible dome, so the grounds hold one honest plane. The funnel stays:
+   *  every placement still asks here, so relief could return in one line. */
+  heightAt = (_x: number, _z: number): number => 0;
 
   /** Machine-readable style state for the smoke battery. */
   styleInfo(): { tone: GroundTone; nature: NatureSet; hex: string } {

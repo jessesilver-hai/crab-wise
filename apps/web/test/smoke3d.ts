@@ -281,9 +281,11 @@ async function clickConstruction(id: string, done: () => boolean): Promise<void>
   const plan = dbg().plan()!;
   check("keep-root", dbg().rootId() === "root:app-server", `root=${dbg().rootId()}`);
   const keepPos = dbg().socketWorld("root:app-server");
+  // flatland law: the grounds are one honest plane, so the keep sits at the
+  // settle law's sink depth rather than atop the old raised motte
   check(
     "keep-at-origin",
-    keepPos !== null && Math.abs(keepPos.x) < 0.01 && Math.abs(keepPos.z) < 0.01 && keepPos.y > 0.5,
+    keepPos !== null && Math.abs(keepPos.x) < 0.01 && Math.abs(keepPos.z) < 0.01 && Math.abs(keepPos.y + 0.02) < 0.01,
     JSON.stringify(keepPos),
   );
   const offRing = plan.sockets.filter(
