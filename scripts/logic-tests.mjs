@@ -10,6 +10,8 @@ import {
 } from "../packages/protocol/src/index.ts";
 import { executeTool, commandKind, WORKER_TOOLS, SCOUT_TOOLS } from "../packages/runtime/src/tools.ts";
 import { diffHtml, fileDiffFrom, escapeHtml } from "../apps/web/src/match-view.ts";
+import { normalizeCandidate, fixHex } from "../apps/web/src/themer.ts";
+import { ThemePack } from "../packages/protocol/src/index.ts";
 
 let passed = 0;
 let failed = 0;
@@ -1778,6 +1780,121 @@ console.log("Castle Era (genome law)");
   await liveMgr.destroy("m-live");
   await liveMgr.destroy("m-other");
   server.close();
+}
+
+// --- Theme-mend law ------------------------------------------------------------
+{
+  console.log("\nTheme-mend law: lawful clamps salvage sloppy visions");
+  check("fixHex expands shorthand #8a7", fixHex("#8a7") === "#88aa77");
+  check("fixHex adds a missing #", fixHex("8a7c5e") === "#8a7c5e");
+  check("fixHex strips an alpha channel", fixHex("#8a7c5eff") === "#8a7c5e");
+  check("fixHex lowercases", fixHex("#8A7C5E") === "#8a7c5e");
+  check("fixHex refuses prose", fixHex("the color of dusk") === null);
+  check("fixHex refuses non-strings", fixHex(0x8a7c5e) === null);
+
+  const sloppy = {
+    factionName: "The Endless Order of the Uncompiled Depths Beneath the Ninth Compiling Moon", // 76 chars
+    tagline: "T".repeat(200),
+    kingName: "Archregent of the Seventeen Unmerged Branches of the Deep", // 58
+    enemyName: "The Unresolved Dependencies of the Outer Dark", // 45
+    biome: {
+      grassColors: ["#8a7", "8a7c5e", "#aabbccdd", "not a color"],
+      fogColor: "8a7c5e",
+      accentColor: "#AABBCC",
+      archetype: "Ash Steppe",
+    },
+    world: { timeOfDay: "Dusk", vegetation: "SPARSE", worldLore: [{ subject: "walls", line: "Trials guard 31% of all lines." }] },
+    heraldOpeners: ["Hear now the long recitation of the vault-keepers, whose litany runs past every lawful bound", "The gates open.", ""],
+    heraldClosers: ["So it is written.", "The record holds.", "And the forges dim their voices until the next accounting of the deep vaults"],
+    personas: [
+      { name: "Vessa", title: "Keeper of Seams", quirk: "Q".repeat(150) },
+      { name: "Odrik", title: "Warden of the Causeway", quirk: "Counts requests like prayer beads." },
+      { name: "Mhal", title: "Oracle-Smith", quirk: "Speaks only in exit codes." },
+      { name: "" }, // malformed: dropped
+    ],
+    sprites: [
+      {
+        key: "villager",
+        rows: ["..x..", "..x", ".xxx.", "..x..", ".x.x."],
+        palette: { x: "#123", yy: "#112233", z: "prose" },
+      },
+    ],
+    worldSpec: {
+      version: "1",
+      lore: {
+        placeName: "P".repeat(80),
+        epithet: "Where the causeway meets the compiling sea.",
+        loadingLines: ["The chroniclers unseal the record.", "L".repeat(200), "Walls rise from measured stone.", ""],
+      },
+      sky: { top: "#123", horizon: "8a7c5e", hazeAlpha: 0.8 },
+      terrain: {
+        base: ["#111", "222222", "#333333cc", "#444444"],
+        pattern: "Plates",
+        reliefIntensity: 1.5,
+        waterline: { color: "#0aa", coverage: 0.6 },
+      },
+      props: [
+        {
+          silhouette: [
+            { shape: "Obelisk", w: 12.6, h: 40.2, color: "#8a7", tilt: 45 },
+            { shape: "pyramid", w: 10, h: 10, color: "#112233", tilt: 0 }, // alien shape: dropped
+          ],
+          density: 1.4,
+          placement: "Scatter",
+          glow: { color: "abc", pulseSec: 60 },
+        },
+        { silhouette: [{ shape: "cube", w: 5, h: 5, color: "#111111", tilt: 0 }], density: 0.2, placement: "edges" }, // no readable prims: dropped
+      ],
+      architecture: {
+        house: { silhouette: [{ shape: "slab", w: 20, h: 14, color: "#445566" }], roofColor: "#234", wallColor: "556677", emissive: "nope" },
+        mill: { silhouette: [{ shape: "slab", w: 20, h: 14, color: "#445566", tilt: 0 }], roofColor: "prose", wallColor: "#111111" }, // unmendable roof: dropped
+        temple: { silhouette: [{ shape: "slab", w: 20, h: 14, color: "#445566", tilt: 0 }], roofColor: "#111111", wallColor: "#111111" }, // alien kind: dropped
+      },
+      ambience: { particles: "EMBERS", tint: "#987", rate: 3, skyEvents: { kind: "Aurora", everySec: 300 } },
+      units: { villagerTint: "#fed", heroTint: "FFEEDD", raiderTint: "#ffeedd", gaitBounce: 1.8 },
+    },
+  };
+  const parsed = ThemePack.safeParse(normalizeCandidate(sloppy));
+  check(
+    "a maximally sloppy vision validates after mending",
+    parsed.success,
+    parsed.success ? "" : JSON.stringify(parsed.error.issues.slice(0, 4)),
+  );
+  if (parsed.success) {
+    const t = parsed.data;
+    check("overlong prose trimmed to the caps", t.factionName.length === 60 && t.tagline.length === 160 && t.enemyName.length === 32);
+    check("herald lines trimmed to 60 and empties dropped", t.heraldOpeners.length === 2 && t.heraldOpeners.every((s) => s.length <= 60));
+    check("overlong quirk trimmed, malformed persona dropped", t.personas.length === 3 && t.personas[0].quirk.length === 120);
+    check("biome shorthand hexes mended", t.biome.grassColors.join(",") === "#88aa77,#8a7c5e,#aabbcc" && t.biome.fogColor === "#8a7c5e");
+    check("Title Case world enums coerced", t.world?.timeOfDay === "dusk" && t.world?.vegetation === "sparse");
+    check("sprite palette mended, bad keys dropped", t.sprites[0].palette["x"] === "#112233" && !("yy" in t.sprites[0].palette));
+    const ws = t.worldSpec;
+    check("worldSpec survived whole (not dropped)", ws !== undefined);
+    if (ws) {
+      check("version string coerced to 1", ws.version === 1);
+      check("placeName and loading lines trimmed", ws.lore.placeName.length === 60 && ws.lore.loadingLines.every((s) => s.length <= 160));
+      check("sky hexes mended, hazeAlpha clamped", ws.sky.top === "#112233" && ws.sky.hazeAlpha === 0.5);
+      check("terrain base mended, pattern coerced, relief clamped", ws.terrain.base.length === 4 && ws.terrain.pattern === "plates" && ws.terrain.reliefIntensity === 1);
+      check("waterline coverage clamped to 0.35", ws.terrain.waterline?.coverage === 0.35);
+      check("alien-shape primitive dropped, prop kept", ws.props.length === 1 && ws.props[0].silhouette.length === 1);
+      const prim = ws.props[0].silhouette[0];
+      check("primitive rounded, coerced, clamped", prim.shape === "obelisk" && prim.w === 13 && prim.tilt === 30);
+      check("glow mended and pulse clamped", ws.props[0].glow?.color === "#aabbcc" && ws.props[0].glow?.pulseSec === 20);
+      check("house mended: hexes fixed, missing tilt defaults, bad emissive dropped",
+        ws.architecture.house?.roofColor === "#223344" && ws.architecture.house?.silhouette[0].tilt === 0 && ws.architecture.house?.emissive === undefined);
+      check("unmendable mill and alien temple dropped", ws.architecture.mill === undefined && !("temple" in ws.architecture));
+      check("ambience coerced and clamped", ws.ambience.particles === "embers" && ws.ambience.rate === 1 && ws.ambience.skyEvents?.everySec === 120);
+      check("unit tints mended, gaitBounce clamped", ws.units.heroTint === "#ffeedd" && ws.units.gaitBounce === 1);
+    }
+  }
+  // Honesty: what cannot be read lawfully still fails, and fails visibly.
+  const hopeless = normalizeCandidate({ ...sloppy, biome: { ...sloppy.biome, fogColor: "the color of dusk" } });
+  const refused = ThemePack.safeParse(hopeless);
+  check("a truly alien fogColor still fails validation", !refused.success);
+  check(
+    "the refusal names the torn field",
+    !refused.success && refused.error.issues.some((i) => i.path.join(".") === "biome.fogColor"),
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

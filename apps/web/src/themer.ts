@@ -109,6 +109,15 @@ When worldSpec is present it supplies terrain, props, and building geometry, so 
 tree and building pixel sprites become optional — but villager/hero/raider sprites are
 still required.`;
 
+/** One divination attempt: a theme, or the evidence needed to mend the next try. */
+export type ThemeAttempt = {
+  theme: ThemePack | null;
+  /** "path: problem" lines from the first failing validation (or the transport error). */
+  issues?: string;
+  /** The failed candidate, so a mend pass can repair it instead of re-rolling. */
+  candidate?: Record<string, unknown>;
+};
+
 export async function generateTheme(opts: {
   apiKey: string;
   model: string;
@@ -118,7 +127,9 @@ export async function generateTheme(opts: {
   treeSummary: string;
   /** Measured code facts (censusBrief) — the Law of Isomorphism's evidence. */
   censusBrief?: string;
-}): Promise<ThemePack | null> {
+  /** A prior failed attempt; when present this call asks the model to repair it. */
+  mend?: { candidate: Record<string, unknown>; issues: string };
+}): Promise<ThemeAttempt> {
   const client = new Anthropic({
     apiKey: opts.apiKey || "crown-funded",
     dangerouslyAllowBrowser: true,
@@ -256,7 +267,8 @@ export async function generateTheme(opts: {
       messages: [
         {
           role: "user",
-          content: `Repository: ${opts.repoLabel}
+          content:
+            `Repository: ${opts.repoLabel}
 
 CODE CENSUS (measured — the land must express these facts):
 ${opts.censusBrief ?? "(census unavailable — derive temperament from the tree)"}
@@ -267,13 +279,24 @@ ${opts.readme.slice(0, 5000) || "(no readme)"}
 File tree:
 ${opts.treeSummary.slice(0, 3000)}
 
-Deliver the theme via set_theme.`,
+Deliver the theme via set_theme.` +
+            (opts.mend
+              ? `
+
+MEND PASS. Your previous set_theme answer failed validation. The failed answer (JSON):
+${JSON.stringify(opts.mend.candidate).slice(0, 50_000)}
+
+Exactly these issues (path: problem):
+${opts.mend.issues}
+
+Fix ONLY what the issues name, keep every other field identical, and deliver the complete corrected theme via set_theme.`
+              : ""),
         },
       ],
     });
 
     const call = response.content.find((b) => b.type === "tool_use");
-    if (!call || call.type !== "tool_use") return null;
+    if (!call || call.type !== "tool_use") return { theme: null, issues: "the model returned no set_theme call" };
     const candidate = normalizeCandidate(call.input as Record<string, unknown>);
     // Never fail the whole theme over optional garnish: strip world, then
     // worldSpec, then both, keeping the first shape that validates.
@@ -285,42 +308,101 @@ Deliver the theme via set_theme.`,
       ["worldSpec", drop(candidate, ["worldSpec"])],
       ["world+worldSpec", drop(candidate, ["world", "worldSpec"])],
     ];
-    let firstIssues: unknown = null;
+    let firstIssues: string | null = null;
     for (const [dropped, shape] of attempts) {
       const parsed = ThemePack.safeParse(shape);
       if (parsed.success) {
         if (dropped !== "full") console.warn(`theme validated after dropping ${dropped}`, firstIssues);
-        return parsed.data;
+        return { theme: parsed.data };
       }
-      if (firstIssues === null) firstIssues = parsed.error.issues.slice(0, 5);
+      if (firstIssues === null) {
+        firstIssues = parsed.error.issues
+          .slice(0, 8)
+          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+          .join("; ");
+      }
     }
     console.warn("theme validation failed", firstIssues);
-    return null;
+    return { theme: null, issues: firstIssues ?? "unknown validation failure", candidate };
   } catch (err) {
     console.warn("theme generation failed", err);
-    return null;
+    return { theme: null, issues: `the oracle was unreachable (${String((err as Error).message ?? err).slice(0, 120)})` };
   }
 }
 
 const ARCHETYPE_VALUES = ["ash-steppe", "harbor-citadel", "oracle-forge", "glacier-vault", "verdant-ruin", "dune-monolith"];
 
-/** Repair common LLM slop before strict validation. */
-function normalizeCandidate(input: Record<string, unknown>): Record<string, unknown> {
+/** "#8a7" → "#88aa77", "8a7c5e" → "#8a7c5e", "#rrggbbaa" → "#rrggbb"; else null. */
+export function fixHex(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  let s = v.trim().toLowerCase();
+  if (!s.startsWith("#")) s = "#" + s;
+  if (/^#[0-9a-f]{3}$/.test(s)) s = "#" + [...s.slice(1)].map((c) => c + c).join("");
+  if (/^#[0-9a-f]{8}$/.test(s)) s = s.slice(0, 7);
+  return /^#[0-9a-f]{6}$/.test(s) ? s : null;
+}
+
+const trimS = (v: unknown, max: number): unknown => (typeof v === "string" ? v.trim().slice(0, max) : v);
+const clampN = (v: unknown, lo: number, hi: number): unknown =>
+  typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : v;
+/** Lowercase/kebab a near-miss enum value; alien values pass through to fail visibly. */
+const coerceEnum = (v: unknown, allowed: readonly string[]): unknown => {
+  if (typeof v !== "string") return v;
+  const norm = v.toLowerCase().trim().replace(/[\s_]+/g, "-");
+  return allowed.includes(norm) ? norm : v;
+};
+
+/** Repair common LLM slop before strict validation. The model's intent is
+ *  kept wherever a lawful reading exists (trim, clamp, kebab, hex-mend);
+ *  what cannot be read lawfully is dropped or left to fail visibly. */
+export function normalizeCandidate(input: Record<string, unknown>): Record<string, unknown> {
   const out = { ...input };
+  // Bounded prose: the schema's caps are hard, the model's drafts run long.
+  out.factionName = trimS(out.factionName, 60);
+  out.tagline = trimS(out.tagline, 160);
+  out.kingName = trimS(out.kingName, 48);
+  out.enemyName = trimS(out.enemyName, 32);
+  for (const k of ["heraldOpeners", "heraldClosers"] as const) {
+    if (Array.isArray(out[k])) {
+      out[k] = (out[k] as unknown[])
+        .map((s) => trimS(s, 60))
+        .filter((s): s is string => typeof s === "string" && s.length > 0)
+        .slice(0, 8);
+    }
+  }
+  if (Array.isArray(out.personas)) {
+    out.personas = (out.personas as unknown[])
+      .map((p) => {
+        const o = (p ?? {}) as Record<string, unknown>;
+        return { name: trimS(o.name ?? "", 40), title: trimS(o.title ?? "", 48), quirk: trimS(o.quirk ?? "", 120) };
+      })
+      .filter((p) => p.name && p.title && p.quirk)
+      .slice(0, 8);
+  }
   // biome.archetype is load-bearing (it steers the world form): coerce close
   // misses ("Ash Steppe", "harbor_citadel") and drop inventions entirely.
   if (out.biome && typeof out.biome === "object") {
     const b = { ...(out.biome as Record<string, unknown>) };
     if (typeof b.archetype === "string") {
-      const norm = b.archetype.toLowerCase().trim().replace(/[\s_]+/g, "-");
-      if (ARCHETYPE_VALUES.includes(norm)) b.archetype = norm;
+      const norm = coerceEnum(b.archetype, ARCHETYPE_VALUES);
+      if (typeof norm === "string" && ARCHETYPE_VALUES.includes(norm)) b.archetype = norm;
       else delete b.archetype;
     } else if (b.archetype !== undefined) delete b.archetype;
+    if (Array.isArray(b.grassColors)) {
+      const fixed = (b.grassColors as unknown[]).map(fixHex).filter((c): c is string => c !== null);
+      if (fixed.length >= 2) b.grassColors = fixed.slice(0, 6);
+    }
+    for (const k of ["fogColor", "accentColor"] as const) {
+      const fixed = fixHex(b[k]);
+      if (fixed) b[k] = fixed;
+    }
     out.biome = b;
   }
   // world block: keep only what validates; a hopeless block is dropped, never fatal.
   if (out.world && typeof out.world === "object" && !Array.isArray(out.world)) {
     const w = { ...(out.world as Record<string, unknown>) };
+    w.timeOfDay = coerceEnum(w.timeOfDay, ["dawn", "noon", "dusk", "night"]);
+    w.vegetation = coerceEnum(w.vegetation, ["barren", "sparse", "wooded", "lush"]);
     if (!["dawn", "noon", "dusk", "night"].includes(w.timeOfDay as string)) delete w.timeOfDay;
     if (!["barren", "sparse", "wooded", "lush"].includes(w.vegetation as string)) delete w.vegetation;
     if (Array.isArray(w.worldLore)) {
@@ -352,8 +434,8 @@ function normalizeCandidate(input: Record<string, unknown>): Record<string, unkn
           rows: rows.slice(0, 40).map((r) => r.padEnd(width, ".")),
           palette: Object.fromEntries(
             Object.entries((s.palette as Record<string, string>) ?? {})
-              .filter(([k, v]) => k.length === 1 && /^#[0-9a-fA-F]{6}$/.test(String(v)))
-              .map(([k, v]) => [k, String(v)]),
+              .map(([k, v]) => [k, fixHex(v)] as const)
+              .filter((e): e is readonly [string, string] => e[0].length === 1 && e[1] !== null),
           ),
         };
       })
@@ -366,32 +448,145 @@ function normalizeCandidate(input: Record<string, unknown>): Record<string, unkn
   return out;
 }
 
+const PRIMITIVE_SHAPES = ["slab", "obelisk", "arch", "mast", "orb", "shard", "frond", "coil", "ring", "beam"];
+
 /**
- * Round/clamp primitive numerics before strict validation — models emit
- * floats and slightly-out-of-range tilts far more often than bad structure.
+ * Mend the whole worldSpec before strict validation — models emit floats,
+ * out-of-range numerics, shorthand hex, and Title Case enums far more often
+ * than bad structure. Unsalvageable pieces (a prop, a building) are dropped
+ * so one bad limb never costs the whole spec.
  */
-function normalizeWorldSpec(spec: Record<string, unknown>): Record<string, unknown> {
-  const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
-  const fixPrimitive = (p: unknown): unknown => {
-    if (!p || typeof p !== "object") return p;
+export function normalizeWorldSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  const fixPrimitive = (p: unknown): Record<string, unknown> | null => {
+    if (!p || typeof p !== "object") return null;
     const prim = { ...(p as Record<string, unknown>) };
-    if (typeof prim.w === "number") prim.w = clamp(Math.round(prim.w), 2, 48);
-    if (typeof prim.h === "number") prim.h = clamp(Math.round(prim.h), 2, 72);
-    if (typeof prim.tilt === "number") prim.tilt = clamp(prim.tilt, -30, 30);
+    prim.shape = coerceEnum(prim.shape, PRIMITIVE_SHAPES);
+    if (!PRIMITIVE_SHAPES.includes(prim.shape as string)) return null;
+    const color = fixHex(prim.color);
+    if (!color) return null;
+    prim.color = color;
+    if (typeof prim.w !== "number" || typeof prim.h !== "number") return null;
+    prim.w = clampN(Math.round(prim.w), 2, 48);
+    prim.h = clampN(Math.round(prim.h), 2, 72);
+    prim.tilt = typeof prim.tilt === "number" ? clampN(prim.tilt, -30, 30) : 0;
     return prim;
   };
-  const fixSilhouette = (o: unknown): unknown => {
-    if (!o || typeof o !== "object") return o;
-    const rec = { ...(o as Record<string, unknown>) };
-    if (Array.isArray(rec.silhouette)) rec.silhouette = rec.silhouette.map(fixPrimitive);
-    return rec;
+  const fixGlow = (g: unknown): Record<string, unknown> | undefined => {
+    if (!g || typeof g !== "object") return undefined;
+    const glow = { ...(g as Record<string, unknown>) };
+    const color = fixHex(glow.color);
+    if (!color) return undefined;
+    glow.color = color;
+    glow.pulseSec = clampN(glow.pulseSec, 2, 20);
+    return glow;
   };
   const out = { ...spec };
-  if (Array.isArray(out.props)) out.props = out.props.map(fixSilhouette);
+  if (out.version === "1") out.version = 1;
+  if (out.lore && typeof out.lore === "object") {
+    const l = { ...(out.lore as Record<string, unknown>) };
+    l.placeName = trimS(l.placeName, 60);
+    l.epithet = trimS(l.epithet, 200);
+    if (Array.isArray(l.loadingLines)) {
+      l.loadingLines = (l.loadingLines as unknown[])
+        .map((s) => trimS(s, 160))
+        .filter((s): s is string => typeof s === "string" && s.length > 0)
+        .slice(0, 6);
+    }
+    out.lore = l;
+  }
+  if (out.sky && typeof out.sky === "object") {
+    const s = { ...(out.sky as Record<string, unknown>) };
+    for (const k of ["top", "horizon"] as const) {
+      const fixed = fixHex(s[k]);
+      if (fixed) s[k] = fixed;
+    }
+    s.hazeAlpha = clampN(s.hazeAlpha, 0, 0.5);
+    out.sky = s;
+  }
+  if (out.terrain && typeof out.terrain === "object") {
+    const t = { ...(out.terrain as Record<string, unknown>) };
+    if (Array.isArray(t.base)) {
+      const fixed = (t.base as unknown[]).map(fixHex).filter((c): c is string => c !== null);
+      if (fixed.length >= 3) t.base = fixed.slice(0, 6);
+    }
+    t.pattern = coerceEnum(t.pattern, ["plates", "dunes", "floes", "moss", "tessellae", "shale"]);
+    t.reliefIntensity = clampN(t.reliefIntensity, 0, 1);
+    if (t.waterline && typeof t.waterline === "object") {
+      const w = { ...(t.waterline as Record<string, unknown>) };
+      const color = fixHex(w.color);
+      if (color) {
+        w.color = color;
+        w.coverage = clampN(w.coverage, 0, 0.35);
+        t.waterline = w;
+      } else delete t.waterline;
+    }
+    out.terrain = t;
+  }
+  if (Array.isArray(out.props)) {
+    out.props = (out.props as unknown[])
+      .map((p) => {
+        if (!p || typeof p !== "object") return null;
+        const prop = { ...(p as Record<string, unknown>) };
+        const sil = Array.isArray(prop.silhouette)
+          ? (prop.silhouette as unknown[]).map(fixPrimitive).filter((x): x is Record<string, unknown> => x !== null).slice(0, 6)
+          : [];
+        if (sil.length === 0) return null;
+        prop.silhouette = sil;
+        prop.density = clampN(prop.density, 0, 1);
+        prop.placement = coerceEnum(prop.placement, ["ridges", "edges", "scatter", "districts"]);
+        const glow = fixGlow(prop.glow);
+        if (glow) prop.glow = glow;
+        else delete prop.glow;
+        return prop;
+      })
+      .filter((p): p is Record<string, unknown> => p !== null)
+      .slice(0, 12);
+  }
   if (out.architecture && typeof out.architecture === "object") {
-    out.architecture = Object.fromEntries(
-      Object.entries(out.architecture as Record<string, unknown>).map(([k, v]) => [k, fixSilhouette(v)]),
-    );
+    const kinds = ["house", "barracks", "market", "monastery", "mill", "towncenter"];
+    const arch: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(out.architecture as Record<string, unknown>)) {
+      if (!kinds.includes(k) || !v || typeof v !== "object") continue;
+      const piece = { ...(v as Record<string, unknown>) };
+      const sil = Array.isArray(piece.silhouette)
+        ? (piece.silhouette as unknown[]).map(fixPrimitive).filter((x): x is Record<string, unknown> => x !== null).slice(0, 5)
+        : [];
+      const roof = fixHex(piece.roofColor);
+      const wall = fixHex(piece.wallColor);
+      if (sil.length === 0 || !roof || !wall) continue;
+      piece.silhouette = sil;
+      piece.roofColor = roof;
+      piece.wallColor = wall;
+      const emissive = fixHex(piece.emissive);
+      if (emissive) piece.emissive = emissive;
+      else delete piece.emissive;
+      arch[k] = piece;
+    }
+    out.architecture = arch;
+  }
+  if (out.ambience && typeof out.ambience === "object") {
+    const a = { ...(out.ambience as Record<string, unknown>) };
+    a.particles = coerceEnum(a.particles, ["embers", "mist", "snow", "spores", "dust", "rain", "none"]);
+    const tint = fixHex(a.tint);
+    if (tint) a.tint = tint;
+    a.rate = clampN(a.rate, 0, 1);
+    if (a.skyEvents && typeof a.skyEvents === "object") {
+      const se = { ...(a.skyEvents as Record<string, unknown>) };
+      se.kind = coerceEnum(se.kind, ["flare", "drift", "aurora", "birds"]);
+      se.everySec = clampN(se.everySec, 20, 120);
+      if (["flare", "drift", "aurora", "birds"].includes(se.kind as string)) a.skyEvents = se;
+      else delete a.skyEvents;
+    }
+    out.ambience = a;
+  }
+  if (out.units && typeof out.units === "object") {
+    const u = { ...(out.units as Record<string, unknown>) };
+    for (const k of ["villagerTint", "heroTint", "raiderTint"] as const) {
+      const fixed = fixHex(u[k]);
+      if (fixed) u[k] = fixed;
+    }
+    u.gaitBounce = clampN(u.gaitBounce, 0, 1);
+    out.units = u;
   }
   return out;
 }
@@ -407,7 +602,7 @@ export async function resolveTheme(opts: {
   const key = repoKey(opts.repoUrl);
   const cached = await getCachedTheme(key);
   if (cached) return { theme: cached, fromCache: true };
-  const theme = await generateTheme(opts);
-  if (theme) await putCachedTheme(key, theme);
-  return { theme, fromCache: false };
+  const attempt = await generateTheme(opts);
+  if (attempt.theme) await putCachedTheme(key, attempt.theme);
+  return { theme: attempt.theme, fromCache: false };
 }

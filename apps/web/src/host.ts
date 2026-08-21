@@ -478,15 +478,21 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
       const narrate = (text: string) =>
         onEvent({ seq: 0, ts: Date.now(), type: "log", level: "info", text });
       narrate(`⟡ The chroniclers read the record of ${repoLabel}…`);
-      // Theme divination is stochastic; one clouded vision earns one re-read.
+      // Theme divination is stochastic; a clouded vision earns one MEND pass —
+      // the model is shown its failed answer and the exact validation issues,
+      // which repairs far more reliably than a fresh roll of the same slop.
       const divine = async () => {
         const first = await generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary, censusBrief: brief });
-        if (first || abort.signal.aborted) return first;
-        narrate("⟡ The vision blurred — the chroniclers read the record once more…");
-        return generateTheme({ apiKey, model, llm, repoLabel, readme, treeSummary, censusBrief: brief });
+        if (first.theme || abort.signal.aborted) return first;
+        narrate("⟡ The vision blurred — the chroniclers mend the record where it tore…");
+        return generateTheme({
+          apiKey, model, llm, repoLabel, readme, treeSummary, censusBrief: brief,
+          mend: first.candidate && first.issues ? { candidate: first.candidate, issues: first.issues } : undefined,
+        });
       };
-      void divine().then(async (theme) => {
+      void divine().then(async (attempt) => {
         if (abort.signal.aborted) return;
+        const theme = attempt.theme;
         if (theme) {
           // Fake-stream the world's own loading narration while it morphs in.
           theme.worldSpec?.lore.loadingLines.forEach((line, i) => {
@@ -501,16 +507,18 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
             body: JSON.stringify(theme),
           }).catch(() => {});
         } else {
-          // Surface the failure instead of failing silently. The land already
-          // wears its census-derived form; only the bespoke dressing is lost.
+          // Surface the failure WITH the reason instead of failing mutely. The
+          // land already wears its census-derived form; only the dressing is lost.
+          const why = (attempt.issues ?? "unknown").slice(0, 240);
           onEvent({
             seq: 0,
             ts: Date.now(),
             type: "log",
             level: "error",
             text:
-              "⚠ The chroniclers could not divine this realm's bespoke theme (twice the model's answer failed validation). " +
-              "The land still wears its true form — terrain, walls, and coasts are drawn from the measured code — " +
+              "⚠ The chroniclers could not divine this realm's bespoke theme — even the mend pass failed validation. " +
+              `Where it tore: ${why}. ` +
+              "The land still wears its true form (terrain, walls, and coasts are drawn from the measured code), " +
               "but custom names, liturgy, and sprites are absent. Leaving and refounding the realm rolls the bones again.",
           } as Parameters<typeof view.onEvent>[0]);
         }
