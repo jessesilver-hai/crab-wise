@@ -115,6 +115,12 @@ const mkExec = () => ({
   search: async () => ["src/x.js:1:hit"],
   exec: async (cmd) => (cmd.includes("sleepy") ? { exitCode: 0, output: "ok", timedOut: true } : { exitCode: 0, output: "1 passed", timedOut: false }),
   diff: async () => ({ patch: "", stat: "" }),
+  tree: async () => ({
+    kind: "dir",
+    name: ".",
+    path: "",
+    children: [...files.entries()].map(([p, c]) => ({ kind: "file", name: p.split("/").pop(), path: p, lines: c.split("\n").length })),
+  }),
 });
 const ctx = (over = {}) => ({
   exec: mkExec(),
@@ -126,6 +132,7 @@ const ctx = (over = {}) => ({
   stats: { filesRead: new Set(), filesWritten: new Set(), maxFailuresSeen: 0, lastFailedCount: 0, lastTestGreen: false },
   delegatesUsed: { count: 0 },
   touched: new Set(),
+  knownPaths: new Set(files.keys()),
   ...over,
 });
 
@@ -173,6 +180,8 @@ const ctx = (over = {}) => ({
   check("both writes emit file_write", writes.length === 2);
   check("created file carries a + snippet", writes[0].diffSnippet?.startsWith("+ l0"));
   check("edit carries ± snippet", writes[1].diffSnippet?.includes("- l5") && writes[1].diffSnippet?.includes("+ l5x"));
+  check("write carries the measured total", writes[0].lines === 40, String(writes[0].lines));
+  check("edit carries the measured total", writes[1].lines === 41, String(writes[1].lines));
   for (const w of writes) {
     const parsed = FileWriteEvent.safeParse({ ...w, seq: 1, ts: Date.now() });
     check(`file_write event validates against protocol (${w.created ? "create" : "edit"})`, parsed.success, JSON.stringify(parsed.error?.issues?.[0] ?? ""));
@@ -193,6 +202,43 @@ const ctx = (over = {}) => ({
   check("run_command reports exit and duration", /exit code: 0 · \d+\.\ds/.test(out), out.split("\n")[0]);
   const sleepy = await executeTool(ctx(), "run_command", { command: "sleepy" });
   check("timeout surfaces in result", sleepy.includes("timed out"));
+}
+{
+  // Counted-stones law: files born through the shell are sighted after the
+  // command and raised as real writes; every stone is counted exactly once.
+  files.clear();
+  files.set("index.html", "<html>\n</html>");
+  events.length = 0;
+  const c = ctx();
+  const base = c.exec;
+  const rawExec = base.exec;
+  base.exec = async (cmd) => {
+    files.set("game.js", Array.from({ length: 30 }, (_, i) => `g${i}`).join("\n"));
+    return rawExec(cmd);
+  };
+  await executeTool(c, "run_command", { command: "bash build.sh" });
+  const sighted = events.filter((e) => e.type === "file_write");
+  check("a shell-born file is sighted and raised", sighted.length === 1 && sighted[0].path === "game.js" && sighted[0].created === true, JSON.stringify(sighted.map((s) => s.path)));
+  check("the sighting carries measured lines", sighted[0].lines === 30 && sighted[0].linesAdded === 30);
+  check("sighted paths join the known roll", c.knownPaths.has("game.js"));
+  check("sightings validate against the protocol", FileWriteEvent.safeParse({ ...sighted[0], seq: 1, ts: Date.now() }).success);
+  await executeTool(c, "run_command", { command: "bash build.sh" });
+  check("a stone is counted once", events.filter((e) => e.type === "file_write").length === 1);
+
+  // a blast of >50 newcomers is generated output: counted in silence
+  files.clear();
+  files.set("index.html", "<html>\n</html>");
+  events.length = 0;
+  const cBlast = ctx();
+  const bl = cBlast.exec;
+  const rawBlast = bl.exec;
+  bl.exec = async (cmd) => {
+    for (let i = 0; i < 60; i++) files.set(`node_modules/m${i}.js`, "x");
+    return rawBlast(cmd);
+  };
+  await executeTool(cBlast, "run_command", { command: "npm install" });
+  check("a generated blast is never heralded", events.filter((e) => e.type === "file_write").length === 0);
+  check("the blast is still counted", cBlast.knownPaths.size >= 61);
 }
 {
   let delegated = 0;
@@ -1590,6 +1636,41 @@ console.log("Castle Era (genome law)");
   check("the style survives re-founding", p2.style !== null && p2.style.name === "Harbor Timberwork");
   check("chosen genomes survive re-founding", p2.sockets.find((s) => s.componentId === "db:database").genome.roof.form === "dome");
   check("the re-founded castle hashes identical", p2.hash === r2.plan.hash);
+}
+
+// ---------------------------------------------------------------------------
+// Adoption law: a path the castle never met is adopted on first touch —
+// files seeded after the snapshot or born through the shell still raise
+// their stone, and a measured total outranks the diff arithmetic.
+// ---------------------------------------------------------------------------
+{
+  console.log("\nadoption law");
+  const { CastleState } = await import("../apps/web/src/game/castlestate.ts");
+  const file = (path, lines) => ({ kind: "file", name: path.split("/").pop(), path, lines });
+  const dir = (path, children) => ({ kind: "dir", name: path.split("/").pop() || ".", path, children });
+  const st = new CastleState();
+  const p0 = st.found(dir("", [file("README.md", 20)]), 42, [], []);
+  check("the founding knows only the chronicle", p0.sockets.length === 1 && p0.sockets[0].componentId === "root:docs");
+
+  // a polish edit (created:false) to a file the founding snapshot never met
+  const r = st.applyWrite("index.html", false, 7, 5, 210);
+  check("an unknown path is adopted on first touch", r.changes.some((c) => c.kind === "added"), JSON.stringify(r.changes));
+  const hall = r.plan.sockets.find((s) => s.componentId === "root:app-web");
+  check("the adopted ward stands", Boolean(hall));
+  const storeysWithTotal = hall.traits.storeys;
+
+  // the same touch without a measured total would size the ward by churn alone
+  const st2 = new CastleState();
+  st2.found(dir("", [file("README.md", 20)]), 42, [], []);
+  const r2 = st2.applyWrite("index.html", false, 7, 5);
+  const hall2 = r2.plan.sockets.find((s) => s.componentId === "root:app-web");
+  check("a measured total outranks churn arithmetic", storeysWithTotal > hall2.traits.storeys, `${storeysWithTotal} vs ${hall2.traits.storeys}`);
+
+  // churn still accrues on later writes that carry no total: enough added
+  // lines raise the churn-sized ward's storeys (below the storey cap)
+  const r3 = st2.applyWrite("index.html", false, 100, 0);
+  const hall3 = r3.plan.sockets.find((s) => s.componentId === "root:app-web");
+  check("churn accrues without a total", hall3.traits.storeys > hall2.traits.storeys, `${hall3.traits.storeys} vs ${hall2.traits.storeys}`);
 }
 
 // ---------------------------------------------------------------------------

@@ -77,11 +77,15 @@ export class CastleState {
     return this.replan(prior).plan;
   }
 
-  /** A worker wrote a file: grow the tree/lines, re-plan, diff. */
-  applyWrite(path: string, created: boolean, linesAdded = 0, linesRemoved = 0): { plan: CastlePlan; changes: CastleChange[] } {
+  /** A worker wrote a file: grow the tree/lines, re-plan, diff.
+   *  Adoption law: any path the castle never met is adopted on first touch,
+   *  whatever the `created` flag says — files born through the shell or
+   *  seeded after the founding snapshot must still raise their stone. */
+  applyWrite(path: string, created: boolean, linesAdded = 0, linesRemoved = 0, lines?: number): { plan: CastlePlan; changes: CastleChange[] } {
     if (!this.tree) throw new Error("castle not founded");
-    if (created && !this.lines.has(path)) this.insertFile(path);
-    this.lines.set(path, Math.max(1, (this.lines.get(path) ?? 0) + linesAdded - linesRemoved));
+    if (!this.lines.has(path)) this.insertFile(path);
+    const measured = lines ?? (this.lines.get(path) ?? 0) + linesAdded - linesRemoved;
+    this.lines.set(path, Math.max(1, measured));
     this.writeLinesIntoTree();
     return this.replan(this.plan?.ledger);
   }

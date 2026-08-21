@@ -196,7 +196,7 @@ export async function startSettlement(root: HTMLElement, opts: SettlementStart):
           priorLedger,
         );
       } else if (event.type === "file_write") {
-        shadow.applyWrite(event.path, event.created, event.linesAdded, event.linesRemoved);
+        shadow.applyWrite(event.path, event.created, event.linesAdded, event.linesRemoved, event.lines);
       } else if (event.type === "component_facts") {
         shadow.applyFacts(event.path, event.hits);
       } else if (event.type === "castle_repr") {

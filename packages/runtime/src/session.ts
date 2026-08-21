@@ -218,6 +218,9 @@ export class Settlement {
   private wsNamings: string[] = [];
   private wsChatCalls = 0;
   private censusBriefText: string | null = null;
+  // Sighting law: every path the realm has counted; the founding tree seeds
+  // it, tools grow it, and post-command tree walks diff against it.
+  private knownPaths = new Set<string>();
   // Castle Era fact survey: last-known probe hits per path, re-taken on writes.
   private factsByPath = new Map<string, ProbeHit[]>();
   private reprobeTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -279,6 +282,7 @@ export class Settlement {
       delegate: opts?.scout ? undefined : (question, parentName) => this.runScout(question, parentName),
       delegatesUsed: { count: 0 },
       touched: new Set<string>(),
+      knownPaths: this.knownPaths,
     };
   }
 
@@ -323,6 +327,7 @@ export class Settlement {
     this.emitter.emit("session_status", { phase: "cloning", detail: repoUrl });
     const { readme } = await executor.clone(repoUrl);
     const tree = await executor.tree();
+    for (const p of collectFilePaths(tree)) this.knownPaths.add(p);
 
     // Founding-time dependency survey: one bounded grep; failure = no streets.
     let depEdges: { from: string; to: string }[] | undefined;

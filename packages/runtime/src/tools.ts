@@ -1,5 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { buildingKindFor, FLOURISH_MARKS, type CommandKind } from "@agent-empires/protocol";
+import { buildingKindFor, FLOURISH_MARKS, type CommandKind, type FileNode } from "@agent-empires/protocol";
 import { Emitter } from "./emitter.js";
 import { parseTestOutput } from "./testparse.js";
 import { heraldBattleCry, heraldVictoryTests, heraldMessage, type HeraldLexicon } from "./herald.js";
@@ -149,6 +149,10 @@ export type ToolContext = {
   delegatesUsed: { count: number };
   /** THIS agent's touched paths — the measured provenance behind sign_work. */
   touched: Set<string>;
+  /** Every path the realm has ever counted (seeded from the founding tree,
+   *  shared across agents). The sighting law diffs the tree against this
+   *  after each command, so shell-born files still raise their stone. */
+  knownPaths: Set<string>;
   stats: {
     filesRead: Set<string>;
     filesWritten: Set<string>;
@@ -242,6 +246,7 @@ export async function executeTool(
       const removed = oldText.split("\n").length;
       ctx.stats.filesWritten.add(path);
       ctx.touched.add(path);
+      ctx.knownPaths.add(path);
       emitter.emit("file_write", {
         agentId,
         path,
@@ -250,6 +255,7 @@ export async function executeTool(
         linesRemoved: removed,
         buildingKind: buildingKindFor(path),
         diffSnippet: snippetOf(oldText, newText),
+        lines: newLines,
       });
       emitter.emit("log", { agentId, level: "tool", text: `edit_file ${path} (~+${added}/−${removed})` });
       return `Edited ${path}: replaced ${removed} line(s) with ${added} (file now ${newLines} lines).`;
@@ -266,6 +272,7 @@ export async function executeTool(
       const removed = created ? 0 : Math.max(oldLines - newLines, newLines === oldLines ? 1 : 0);
       ctx.stats.filesWritten.add(path);
       ctx.touched.add(path);
+      ctx.knownPaths.add(path);
       emitter.emit("file_write", {
         agentId,
         path,
@@ -274,6 +281,7 @@ export async function executeTool(
         linesRemoved: removed,
         buildingKind: buildingKindFor(path),
         diffSnippet: created ? snippetOf("", content.split("\n").slice(0, 24).join("\n")) : undefined,
+        lines: newLines,
       });
       emitter.emit("log", {
         agentId,
@@ -349,6 +357,44 @@ export async function executeTool(
         failures,
       });
       emitter.emit("log", { agentId, level: "tool", text: `${command} → exit ${exitCode} (${summary}, ${secs}s)` });
+
+      // Sighting law: files born through the shell speak no file_write — walk
+      // the tree after every command and raise the newborn stones. A blast of
+      // >50 newcomers is generated output, not architecture: count it in
+      // silence. At most 12 sightings are heralded per command.
+      try {
+        const tree = await exec.tree();
+        const born: { path: string; lines: number }[] = [];
+        const walk = (n: FileNode): void => {
+          if (n.kind === "file") {
+            if (!ctx.knownPaths.has(n.path)) born.push({ path: n.path, lines: (n as FileNode & { lines?: number }).lines ?? 1 });
+            return;
+          }
+          for (const c of n.children ?? []) walk(c);
+        };
+        walk(tree);
+        for (const f of born) ctx.knownPaths.add(f.path);
+        if (born.length > 0 && born.length <= 50) {
+          for (const f of born.slice(0, 12)) {
+            ctx.stats.filesWritten.add(f.path);
+            ctx.touched.add(f.path);
+            emitter.emit("file_write", {
+              agentId,
+              path: f.path,
+              created: true,
+              linesAdded: f.lines,
+              linesRemoved: 0,
+              buildingKind: buildingKindFor(f.path),
+              lines: f.lines,
+            });
+          }
+          if (born.length > 12) {
+            emitter.emit("log", { agentId, level: "tool", text: `${born.length} files sighted after the command — 12 raised, the rest counted` });
+          }
+        }
+      } catch {
+        // the surveyors came home empty-handed; the next command may sight them
+      }
       return clip(`exit code: ${exitCode}${timedOut ? " (timed out)" : ""} · ${secs}s\n${output}`);
     }
 

@@ -396,6 +396,9 @@ export const FileWriteEvent = z.object({
   buildingKind: BuildingKind,
   /** Compact ±-prefixed change excerpt for live inspection feeds (edits and new files). */
   diffSnippet: z.string().max(2000).optional(),
+  /** Total measured lines after the write. Without it a small edit to a file
+   *  the castle never met would register as a shed the size of the diff. */
+  lines: z.number().optional(),
 });
 
 export const CommandKind = z.enum(["test", "install", "other"]);

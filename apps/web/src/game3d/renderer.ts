@@ -375,7 +375,7 @@ class CastleGame {
       }
       case "file_write": {
         if (!this.founded) break;
-        const { plan, changes } = this.st.applyWrite(e.path, e.created, e.linesAdded, e.linesRemoved);
+        const { plan, changes } = this.st.applyWrite(e.path, e.created, e.linesAdded, e.linesRemoved, e.lines);
         this.applyChanges(plan, changes, historical, e.path, e.agentId);
         this.walkAgentToPath(e.agentId, e.path, historical);
         const compId = this.pathToComp.get(e.path);
